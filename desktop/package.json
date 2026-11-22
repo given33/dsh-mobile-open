@@ -1,0 +1,61 @@
+{
+  "name": "dsh-mobile-link",
+  "version": "0.5.3",
+  "private": true,
+  "type": "module",
+  "description": "DSH Mobile desktop side: a DSH plugin and CLI for pairing phones, following tasks and enabling phone actions over a pinned TLS link",
+  "license": "MIT",
+  "main": "plugin/host.mjs",
+  "exports": {
+    ".": "./plugin/host.mjs",
+    "./text-turn-tail": "./plugin/text-turn-tail.mjs",
+    "./client": "./plugin/client.js",
+    "./package.json": "./package.json",
+    "./locale/*.json": "./locale/*.json"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "plugin",
+    "tools",
+    "examples",
+    "locale",
+    "cordis.patch.yml",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "bin": {
+    "dsh-mobile-link": "bin/dsh-mobile-link.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar"
+      ]
+    }
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node bin/dsh-mobile-link.mjs",
+    "demo": "node tools/demo-server.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "fflate": "0.8.3",
+    "qrcode": "1.5.4",
+    "ws": "8.22.1"
+  },
+  "bundleDependencies": [
+    "fflate",
+    "qrcode",
+    "ws"
+  ]
+}

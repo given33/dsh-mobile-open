@@ -1,0 +1,13 @@
+{
+  "name": "dsh-mobile-panel-example",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./host.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

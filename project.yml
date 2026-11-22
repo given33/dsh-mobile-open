@@ -1,0 +1,78 @@
+name: DSHMobile
+options:
+  bundleIdPrefix: app.dshmobile
+  deploymentTarget:
+    iOS: '17.0'
+packages:
+  DSHCore:
+    path: Core
+settings:
+  base:
+    SWIFT_VERSION: '5.0'
+    TARGETED_DEVICE_FAMILY: '1,2'
+    IPHONEOS_DEPLOYMENT_TARGET: '17.0'
+    MARKETING_VERSION: '0.5.3'
+    CURRENT_PROJECT_VERSION: '22'
+targets:
+  DSHMobile:
+    type: application
+    platform: iOS
+    sources:
+      - path: DSHMobile
+        excludes:
+          - Views
+          - Connection/LinkSession.swift
+    dependencies:
+      - package: DSHCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.dshmobile.client
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: DSH Mobile
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_NSLocalNetworkUsageDescription: 连接你电脑上正在运行的 DSH，实时显示任务进程。
+        INFOPLIST_KEY_NSCameraUsageDescription: 扫描电脑上「手机连接」显示的配对二维码。
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: 在手机上录音并转写到聊天草稿。
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: 将录音在设备上转换为可编辑的聊天草稿。
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+    info:
+      path: DSHMobile/Info.plist
+      properties:
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+          # Direct IP addresses are supplied by the pairing offer at runtime.
+          # CFNetwork must allow the app's trust delegate to check the pinned
+          # desktop key. This client only constructs HTTPS and WSS URLs.
+          NSExceptionDomains:
+            '0.0.0.0/0':
+              NSExceptionAllowsInsecureHTTPLoads: true
+            '::/0':
+              NSExceptionAllowsInsecureHTTPLoads: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        CFBundleURLTypes:
+          - CFBundleURLName: app.dshmobile.pair
+            CFBundleURLSchemes: [dshmobile]
+        CADisableMinimumFrameDurationOnPhone: true
+        UIFileSharingEnabled: false
+  DSHMobileUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [DSHMobileUITests]
+    dependencies:
+      - target: DSHMobile
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: DSHMobile
+schemes:
+  DSHMobile:
+    build:
+      targets:
+        DSHMobile: all
+    run:
+      config: Debug
+    test:
+      targets: [DSHMobileUITests]
+    archive:
+      config: Release

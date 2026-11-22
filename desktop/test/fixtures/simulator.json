@@ -1,0 +1,46 @@
+{
+  "rpc": {
+    "session/list": {
+      "items": [{
+        "sessionId": "s-native-ui",
+        "cwd": "/demo/native-ui",
+        "updatedAt": 1794000000000,
+        "running": false,
+        "blank": false,
+        "projections": {"asOfSeq": 0, "values": {"title": "原生联调会话"}}
+      }]
+    },
+    "session/search": {"items": [{"sessionId": "s-native-ui", "snippet": "匹配到原生联调消息"}], "hasMore": false},
+    "directoryPicker/list": {"path": "/demo", "home": "/demo", "crumbs": [{"path": "/demo", "name": "demo"}], "entries": [], "truncated": false},
+    "session/modelCatalog": {"groups": [{"id": "fixture", "name": "演示提供商", "models": [{"id": "demo", "name": "演示模型"}]}]},
+    "session/selectModel": {"selected": {"provider": "fixture", "model": "demo"}},
+    "session/prompt": {"accepted": true},
+    "$events/result": {},
+    "pluginManager/listBundles": [],
+    "pluginManager/listPlugins": [],
+    "mobilePanels/list": [{"id": "fixture:note", "owner": "fixture", "version": 1, "title": "演示插件面板"}],
+    "mobilePanels/read": {
+      "id": "fixture:note", "owner": "fixture", "title": "演示插件面板", "version": 1, "revision": "1:0",
+      "info": [{"title": "更新次数", "value": "0"}],
+      "fields": [{"id": "note", "title": "备注", "kind": "text", "value": "初始备注", "required": true}],
+      "actions": [{"id": "save", "title": "保存备注", "confirm": true}]
+    },
+    "mobilePanels/perform": {"message": "演示保存成功"}
+  },
+  "streams": {
+    "$events": [
+      {"at": 0, "value": {"type": "ready", "clientId": "client-native-ui", "host": {"home": "/demo"}}},
+      {"at": 100, "value": {"type": "waterfall", "eventId": "approval-native-ui", "agentId": "s-native-ui", "event": "approval/request",
+        "request": {"toolName": "demo-tool", "description": "模拟器审批"}}},
+      {"at": 200, "value": {"type": "waterfall", "eventId": "question-native-ui", "agentId": "s-native-ui", "event": "user-questions/request",
+        "request": {"questions": [{"id": "choice", "question": "选择一个演示选项", "options": [{"label": "选项甲"}, {"label": "选项乙"}]}]}}}
+    ],
+    "session/control": [{"at": 0, "value": {"type": "baseline", "value": {"projections": {}}}}],
+    "workspace/follow": [{"at": 0, "value": {"type": "baseline", "value": {"items": [], "archivedSessionIds": [], "pinnedSessionIds": []}}}],
+    "session/follow:s-native-ui": [{
+      "at": 0,
+      "value": {"type": "snapshot", "cursor": 0, "hasMore": false, "records": [],
+        "projections": {"asOfSeq": 0, "values": {"title": "原生联调会话"}}}
+    }]
+  }
+}

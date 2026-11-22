@@ -1,0 +1,304 @@
+{
+  "streams": {
+    "session/follow:demo-history": [
+      {
+        "value": {
+          "hasMore": false,
+          "records": [
+            {
+              "seq": 1,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 1：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 2,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 2：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 3,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 3：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 4,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 4：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 5,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 5：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 6,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 6：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 7,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 7：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 8,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 8：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 9,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 9：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 10,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 10：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 11,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 11：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 12,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 12：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 13,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 13：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 14,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 14：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 15,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 15：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 16,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 16：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 17,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 17：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 18,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 18：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 19,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 19：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 20,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 20：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 21,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 21：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 22,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 22：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 23,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 23：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 24,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 24：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 25,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 25：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 26,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 26：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 27,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 27：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 28,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 28：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 29,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 29：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 30,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 30：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 31,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 31：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 32,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 32：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 33,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 33：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 34,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 34：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 35,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 35：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 36,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 36：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 37,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 37：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 38,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 38：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 39,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 39：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 40,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 40：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 41,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 41：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 42,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 42：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 43,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 43：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 44,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 44：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 45,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 45：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 46,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 46：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 47,
+              "type": "message",
+              "role": "user",
+              "text": "演示记录 47：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            },
+            {
+              "seq": 48,
+              "type": "message",
+              "role": "assistant",
+              "text": "演示记录 48：这里是测试历史加载与解压的合成内容。 A sample paragraph for exercising history compression and mobile rendering."
+            }
+          ],
+          "type": "snapshot",
+          "cursor": 48
+        },
+        "at": 0
+      }
+    ]
+  }
+}

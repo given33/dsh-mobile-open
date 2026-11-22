@@ -1,0 +1,44 @@
+name: Build unsigned iPhone IPA
+on:
+  workflow_dispatch:
+    inputs:
+      simulator:
+        type: boolean
+        description: Run the DSH UI simulator test after packaging
+        default: false
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify desktop link
+        run: npm ci && npm test
+        working-directory: desktop
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Build and test iOS client
+        run: bash scripts/build-ipa.sh
+      - name: Upload unsigned device IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: DSH-Mobile-unsigned-IPA
+          path: |
+            build/DSH-Mobile-unsigned.ipa
+            build/DSH-Mobile-unsigned.ipa.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - name: Verify DSH UI on an iPhone simulator
+        if: ${{ inputs.simulator == true }}
+        run: |
+          npm install -g pnpm
+          bash scripts/test-official-simulator.sh

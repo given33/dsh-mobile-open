@@ -1,0 +1,26 @@
+# dsh-mobile-link bundle patch: applied after the profile's base bundles.
+# Inserts the phone link row into the host. Every config field is optional.
+# Gate only the official recorder on the registration of its compatibility hook.
+- id: workspace-changes
+  name: '@deepseek-ai/dsh-workspace-changes'
+  inject: [dshMobileTextTurnTail]
+- insert:
+    - id: mobile-text-turn-tail
+      name: 'dsh-mobile-link/text-turn-tail'
+    - id: mobile-link
+      name: 'dsh-mobile-link'
+      config:
+        # LAN port phones connect to (TLS, pinned to this computer's key).
+        port: 3081
+        # Phone connections stay off until you turn them on in the
+        # "手机连接" panel; set true to force them on (headless hosts).
+        # enabled: true
+        # Explicit opt-ins for headless hosts. Both default to false.
+        # actions: true
+        # terminal: true
+        # Name shown on the phone (default: this computer's host name).
+        # name: 工作站
+        # Extra addresses to put in the QR code, e.g. a fixed DNS name.
+        # extraHosts: [desk.example.lan]
+        # Your own https tunnels in front of this port.
+        # tunnels: [https://desk.example.com]
