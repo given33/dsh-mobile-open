@@ -359,7 +359,7 @@ struct RootView: View {
 
     private var connectionState: some View {
         VStack(spacing: 18) {
-            if !model.revoked && (model.connecting || model.reconnecting || model.recoveryFailures < 2) {
+            if !model.revoked && (model.problem == nil || model.recoveryFailures < 2) {
                 // Silent automatic reconnect on matching DSH background — never flash an error screen while retrying.
                 Color.clear
             } else {

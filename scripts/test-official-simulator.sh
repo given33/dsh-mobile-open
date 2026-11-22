@@ -37,13 +37,32 @@ sys.exit("No available iPhone simulator")
 ')"
 xcrun simctl boot "$simulator" 2>/dev/null || true
 xcodegen generate
-TEST_RUNNER_DSH_UI_LINK="$(cat "$scratch/pair.txt")" \
-  xcodebuild -skipPackagePluginValidation test -project DSHMobile.xcodeproj -scheme DSHMobile \
-  -destination "platform=iOS Simulator,id=$simulator" -parallel-testing-enabled NO \
-  -derivedDataPath build/OfficialSimulator -resultBundlePath "$scratch/Official.xcresult" \
-  >"$scratch/xcodebuild.log" 2>&1 || {
-    sed -E 's/(dshmobile:\/\/pair)[^[:space:]]*/\1[redacted]/g' "$scratch/xcodebuild.log" | tail -110
-    exit 1
-  }
-grep -Fq '** TEST SUCCEEDED **' "$scratch/xcodebuild.log"
-grep -E 'Executed [0-9]+ test|TEST SUCCEEDED|testOfficial.*passed' "$scratch/xcodebuild.log"
+# Build first: the desktop QR expires after five minutes and is single-use.
+# Each test gets a fresh code from the isolated local host just before launch.
+args=(-project DSHMobile.xcodeproj -scheme DSHMobile -destination "platform=iOS Simulator,id=$simulator" -parallel-testing-enabled NO -derivedDataPath build/OfficialSimulator)
+xcodebuild -skipPackagePluginValidation build-for-testing "${args[@]}" >"$scratch/build.log" 2>&1 || { tail -80 "$scratch/build.log"; exit 1; }
+mask_test_log() {
+  sed -E 's/(dshmobile:\/\/pair)[^[:space:]]*/\1[redacted]/g' "$1"
+}
+for test in testOfficialDesktopUILoadsAndTogglesSidebarDrawer testOfficialDesktopStalledFirstPaintCanBeRetried; do
+  fresh_link="$(node --input-type=module -e '
+    import { readFileSync } from "node:fs";
+    const h=JSON.parse(readFileSync(process.argv[1]));
+    const url=new URL(h.base);
+    if(url.hostname!=="127.0.0.1") throw Error("Not a test fixture");
+    const r=await fetch(new URL("dsh-mobile-link/code",url),{method:"POST",headers:{Cookie:h.cookie,"Content-Type":"application/json"},body:"{}"});
+    const d=await r.json();
+    if(!r.ok || !d.pairing?.link) throw Error("No fresh pairing offer");
+    process.stdout.write(d.pairing.link);
+  ' "$scratch/host.json")"
+  log="$scratch/$test.log"
+  TEST_RUNNER_DSH_UI_LINK="$fresh_link" \
+    xcodebuild test-without-building "${args[@]}" \
+    -only-testing:"DSHMobileUITests/DSHMobileUITests/$test" \
+    -resultBundlePath "$scratch/$test.xcresult" >"$log" 2>&1 || {
+      mask_test_log "$log" | tail -85
+      exit 1
+    }
+  grep -Fq '** TEST SUCCEEDED **' "$log"
+  grep -F "$test]' passed" "$log"
+done

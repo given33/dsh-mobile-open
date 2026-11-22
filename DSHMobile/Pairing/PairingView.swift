@@ -49,7 +49,7 @@ struct PairingView: View {
                         .font(.callout)
                         .multilineTextAlignment(.center)
                     cameraTarget
-                    if let problem {
+                    if let problem = problem ?? model.problem {
                         Label(problem, systemImage: "exclamationmark.triangle")
                             .font(DSHFont.secondary)
                             .padding(12)

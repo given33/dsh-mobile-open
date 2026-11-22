@@ -10,7 +10,7 @@ final class DSHMobileUITests: XCTestCase {
         app.launchEnvironment["DSH_DEMO_LINK"] = link
         app.launchEnvironment["DSH_TEST_HOLD_FIRST_LAUNCH"] = "1"
         app.launch()
-        XCTAssertTrue(app.webViews["official-web-view"].firstMatch.waitForExistence(timeout: 25))
+        try waitForWebView(in: app)
         let retry = app.buttons["document-reload"]
         XCTAssertTrue(retry.waitForExistence(timeout: 22), "A missing first-paint acknowledgement must not trap the user")
         retry.tap()
@@ -18,6 +18,17 @@ final class DSHMobileUITests: XCTestCase {
         expectation(for: NSPredicate(format: "value BEGINSWITH 'doc:2|' AND value CONTAINS 'connected|busy:false'"), evaluatedWith: status)
         waitForExpectations(timeout: 30)
         XCTAssertTrue(retry.waitForNonExistence(timeout: 8))
+    }
+
+    @MainActor @discardableResult
+    private func waitForWebView(in app: XCUIApplication) throws -> XCUIElement {
+        let web = app.webViews["official-web-view"].firstMatch
+        if !web.waitForExistence(timeout: 25) {
+            let problem = app.descendants(matching: .any)["pairing-error"].firstMatch
+            if problem.exists { XCTFail("Pairing failed: \(problem.label)") }
+            else { XCTFail("Official DSH WebView should mount after pairing") }
+        }
+        return web
     }
 
     /// Optional live probe. The supplied offer must use an intentionally invalid
@@ -58,8 +69,7 @@ final class DSHMobileUITests: XCTestCase {
         app.launchEnvironment["DSH_APPEARANCE"] = "light"
         app.launch()
 
-        let webView = app.webViews["official-web-view"].firstMatch
-        XCTAssertTrue(webView.waitForExistence(timeout: 25), "Official DSH WebView should mount after pairing")
+        let webView = try waitForWebView(in: app)
 
         // Wait for the official DSH frontend inside WKWebView to hydrate (button/textbox/navigation appears).
         let hydrated = NSPredicate { _, _ in

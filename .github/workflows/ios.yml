@@ -37,6 +37,10 @@ jobs:
             build/DSH-Mobile-unsigned.ipa.sha256
           if-no-files-found: error
           retention-days: 14
+      - uses: actions/setup-node@v4
+        if: ${{ inputs.simulator == true }}
+        with:
+          node-version: '24'
       - name: Verify DSH UI on an iPhone simulator
         if: ${{ inputs.simulator == true }}
         run: |
