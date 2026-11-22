@@ -1,4 +1,4 @@
-# DSH Mobile Link 0.6.3
+# DSH Mobile Link 0.6.4
 
 桌面端「手机连接」插件。需要 Node.js 22+ 和已安装的 DeepSeek Harness。首次使用须在 DSH 界面明确开启连接。
 
@@ -31,11 +31,11 @@ Windows 桌面版先从系统托盘彻底退出，再执行：
 
 ```powershell
 $dsh = Join-Path $env:LOCALAPPDATA 'Programs/DeepSeek Harness/resources/runtime/cli/bin/dsh.cmd'
-$package = (Resolve-Path 'build/dsh-mobile-link-0.6.3.tgz').Path
+$package = (Resolve-Path 'build/dsh-mobile-link-0.6.4.tgz').Path
 & $dsh plugin --profile desktop add $package
 ```
 
-若 DSH 安装在其他位置，调整 `$dsh`。Web 版使用 `dsh plugin --profile web add ./build/dsh-mobile-link-0.6.3.tgz`。
+若 DSH 安装在其他位置，调整 `$dsh`。Web 版使用 `dsh plugin --profile web add ./build/dsh-mobile-link-0.6.4.tgz`。
 
 重开 DSH，点左下角「手机连接」，开启连接，再用手机扫码。连接初次开启时先在可信局域网配对。已配对设备默认只读；需要主动发送和审批时再开启「允许手机操作」，需要输入终端指令时才启用单独的终端权限。可随时在此面板撤销配对。
 
@@ -53,6 +53,6 @@ Windows 可另外开启[远程启动组件](tools/WINDOWS-WAKE.md)，默认关�
 
 ### 手机首页与当地天气
 
-空白会话在可用区域居中显示输入卡，并播放一次宿主自带的鲸鱼动画；启用「减少动态效果」时不自动播放。会话保留原工具箱入口。0.6.3 客户端在插件、自动化等全局页面将工具箱放到原生顶栏，不遮挡页面控件。
+空白会话在可用区域居中显示输入卡，并播放一次宿主自带的鲸鱼动画；启用「减少动态效果」时不自动播放。会话保留原工具箱入口。0.6.4 客户端在插件、自动化等全局页面将工具箱放到原生顶栏，不遮挡页面控件。
 
 会话标题左侧默认显示配对电脑所在地的天气，而不是手机的位置。Windows 插件通过系统位置服务获取近似位置，再以两位小数精度向 Open-Meteo 查询；坐标不会发给手机，也不写入插件存储。电脑未允许定位、取不到位置（包括目前未接入系统定位的非 Windows 主机）、天气过期或天气服务不可用时，按电脑时钟和时区显示时段，不用公网 IP 推测位置。点图标选择「仅显示电脑时间」后，此手机不再发起天气查询。天气为模型估算，不是街道级实测；公开免费接口适用于非商业使用，商业部署须遵守供应商条款。

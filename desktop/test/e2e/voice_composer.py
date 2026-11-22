@@ -115,26 +115,42 @@ with sync_playwright() as pw:
     page.wait_for_function("document.activeElement.isContentEditable && document.activeElement.textContent.includes('测试 voice 日本語')")
     assert not inline.is_visible()
     check_toolbar(393)
+    # Long press: no secondary editor. Meter responds to native volume, then settles to silence.
+    before = editor.inner_text()
     x, y = down()
-    page.evaluate("()=>__DSH_MOBILE_BRIDGE__.voiceEvent({id:messages.filter(m=>m.type==='voice-start').at(-1).id,status:'final',text:'should not insert early'})")
-    assert 'should not insert early' not in editor.inner_text()
-    page.mouse.move(x - 70, y)
-    page.mouse.up()
-    page.locator('#dml-voice-hud').wait_for(state='hidden')
-    assert 'should not insert early' not in editor.inner_text()
+    hud = page.locator('#dml-voice-hud')
+    cancel = hud.locator('[data-target=cancel]')
+    bubble = hud.locator('.dml-voice-bubble')
+    assert bubble.bounding_box()['y'] > hud.bounding_box()['height'] * .55
+    assert bubble.bounding_box()['y'] + bubble.bounding_box()['height'] < cancel.bounding_box()['y']
+    assert page.get_by_text('预览文字', exact=True).count() == 0
+    assert page.get_by_role('textbox', name='识别结果').count() == 0
+    page.evaluate("""() => {window.level = n=>__DSH_MOBILE_BRIDGE__.voiceEvent({id:messages.filter(m=>m.type==='voice-start').at(-1).id,status:'level',level:n}); level(.05)}""")
+    middle = hud.locator('i').nth(6)
+    quiet = middle.evaluate('e=>e.style.transform')
+    page.evaluate('level(.9)')
+    assert quiet != middle.evaluate('e=>e.style.transform')
+    page.wait_for_function("document.querySelector('.dml-voice-wave i:nth-child(7)').getBoundingClientRect().height > 22")
+    page.wait_for_function("document.querySelector('.dml-voice-wave i:nth-child(7)').getBoundingClientRect().height < 5")
+    page.evaluate('[.25,.4,.66,.54,.8,.68,.94].forEach(level)')
+    page.wait_for_function("document.querySelector('.dml-voice-wave i:nth-child(7)').getBoundingClientRect().height > 22")
+    page.screenshot(path=fixture / f'voice-hold-{name}.png')
+    pending = "() => __DSH_MOBILE_BRIDGE__.voiceEvent({id:messages.filter(m=>m.type==='voice-start').at(-1).id,status:'final',text:'不应插入'})"
+    page.evaluate(pending)
+    target = cancel.bounding_box()
+    cx, cy = target['x'] + target['width']/2, target['y'] + target['height']/2
+    page.mouse.move(cx, cy)
+    assert cancel.inner_text() == '松开取消'
+    page.mouse.up(); hud.wait_for(state='hidden')
+    assert editor.inner_text() == before
     assert page.evaluate("messages.at(-1).type==='voice-cancel'")
     x, y = down()
-    page.mouse.move(x + 50, y)
+    page.mouse.move(cx, cy); page.mouse.move(x + 45, y)
+    assert cancel.inner_text() == '滑到此处取消'
     page.mouse.up()
-    transcript = page.get_by_role('textbox', name='识别结果')
-    transcript.wait_for()
-    assert transcript.input_value() == '测试 voice 日本語'
-    transcript.fill('可编辑的文字')
-    page.get_by_role('button', name='插入草稿').click()
-    page.wait_for_function("document.querySelector('[data-composer-card] [contenteditable=true]').textContent.includes('可编辑的文字')")
-    down()
-    page.mouse.up()
-    page.wait_for_function("document.querySelector('[data-composer-card] [contenteditable=true]').textContent.includes('测试 voice 日本語')")
+    page.wait_for_function("t=>document.querySelector('[data-composer-card] [contenteditable=true]').textContent !== t", arg=before)
+    assert editor.inner_text().count('测试 voice 日本語') == before.count('测试 voice 日本語') + 1
     assert not page.evaluate("document.activeElement?.isContentEditable")
+    assert not page.locator('#dml-voice-panel').is_visible()
     page.screenshot(path=fixture / f'voice-{name}.png')
-    print('Hold, late results, left cancel, right preview/edit, plain release and no keyboard focus passed.')
+    print('PASS: inline dictation, hold-to-draft, native-level meter, bottom cancel, slide out to keep, no preview editor.')

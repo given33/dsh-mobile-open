@@ -180,12 +180,19 @@ struct VoiceDictationSheet: View {
             guard format.sampleRate > 0, format.channelCount > 0 else {
                 throw ClientError.message("当前没有可用的麦克风输入。")
             }
-            input.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
+            input.installTap(onBus: 0, bufferSize: 2048, format: format) { [weak self] buffer, _ in
                 request.append(buffer)
                 guard let samples = buffer.floatChannelData?.pointee else { return }
-                var peak: Float = 0
-                for i in stride(from: 0, to: Int(buffer.frameLength), by: 12) { peak = max(peak, abs(samples[i])) }
-                let level = Double(min(1, peak * 5))
+                let frames = Int(buffer.frameLength)
+                guard frames > 0 else { return }
+                var energy: Float = 0
+                for frame in 0..<frames {
+                    let sample = samples[frame * buffer.stride]
+                    energy += sample * sample
+                }
+                // Map mean-square power logarithmically so quiet syllables remain visible.
+                let decibels = 10 * log10(max(Double(energy) / Double(frames), 1e-10))
+                let level = min(1, max(0, (decibels + 58) / 48))
                 Task { @MainActor [weak self] in
                     guard let self, self.generation == token, self.active else { return }
                     self.event?("level", nil, level)
