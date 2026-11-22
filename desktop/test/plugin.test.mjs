@@ -68,14 +68,13 @@ function fakeHost() {
 }
 
 /** Call the panel API the way the desktop UI does (fake req/res on the host's web server). */
-async function panel(host, method, path, { body, cookie = 'dsh-auth=ok', type = 'application/json' } = {}) {
+async function panel(host, method, path, { body, cookie = 'dsh-auth=ok', type = 'application/json', peer } = {}) {
   const route = host.routes.find(r => r.path === plugin.PANEL_PATH);
   const req = Readable.from(body === undefined ? [] : [Buffer.from(JSON.stringify(body))]);
   Object.assign(req, { method, url: `${plugin.PANEL_PATH}${path}`, headers: { cookie, 'content-type': type } });
   const res = { status: 0, body: '', headers: {}, writeHead(s, h) { this.status = s; Object.assign(this.headers, h ?? {}); }, end(b = '') { this.body = String(b); this.done(); } };
   const done = new Promise(resolve => { res.done = resolve; });
-  route.handler(req, res);
-  await done;
+  await Promise.all([route.handler(req, res, peer), done]);
   return { status: res.status, json: res.body ? JSON.parse(res.body) : undefined };
 }
 
@@ -97,6 +96,22 @@ function pinned(port, fingerprint, { method = 'GET', path, token, body }) {
 test('safety code matches the phone formatting', () => {
   // Same fixture as Core/Tests/DSHCoreTests/PairingTests.swift (fingerprint of a known SPKI).
   assert.equal(safetyCode('37xy7YxSjXOStXHwa32paYJ4De6vIBFnfvTZklusQNE'), 'DFBC 72ED 8C52 8D73');
+});
+
+test('plugin: newer web host supplies an authenticated owner for the desktop panel', async t => {
+  const host = fakeHost();
+  delete host.ctx.connection.requestRejection;
+  const stateDir = await mkdtemp(join(tmpdir(), 'dsh-mobile-panel-auth-'));
+  t.after(async () => { await host.dispose(); await rm(stateDir, { recursive: true, force: true }); });
+  plugin.apply(host.ctx, { stateDir });
+  assert.equal(host.routes.find(r => r.path === plugin.PANEL_PATH).auth, 'required');
+  assert.equal((await panel(host, 'GET', '/status')).status, 401);
+  const signal = new AbortController().signal;
+  const owner = { principal: { kind: 'owner' }, signal };
+  const guest = { principal: { kind: 'guest' }, signal };
+  assert.equal((await panel(host, 'POST', '/enabled', { peer: guest, body: { enabled: true } })).status, 403);
+  assert.equal((await panel(host, 'GET', '/status', { peer: { ...owner, signal: AbortSignal.abort() } })).status, 401);
+  assert.equal((await panel(host, 'GET', '/status', { peer: owner })).status, 200);
 });
 
 test('plugin: panel API, in-process RPC and streams, revoke', async t => {

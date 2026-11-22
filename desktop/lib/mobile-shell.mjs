@@ -571,6 +571,7 @@ html[data-dml-native-nav] [data-conversation-header-leading]:has([data-sidebar-o
   -webkit-tap-highlight-color:transparent;
 }
 #dml-voice-button[data-recording] { color:#3381c6; background:color-mix(in srgb, currentColor 12%, transparent); }
+#dml-voice-button + button { min-inline-size:38px; min-block-size:38px; }
 #dml-voice-hud {
   position:fixed; z-index:99999; inset:auto 12px calc(84px + env(safe-area-inset-bottom, 0px)) 12px;
   margin-inline:auto; width:auto; max-width:340px; text-align:center; padding:14px 18px 12px;

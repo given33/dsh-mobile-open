@@ -10,7 +10,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createLinkService } from '../lib/link-service.mjs';
 import { inProcessUpstream } from '../lib/upstream-inprocess.mjs';
-import { mobileHostActions } from '../lib/mobile-host-actions.mjs';
+import { mobileHostActions, nativeScheduleAction } from '../lib/mobile-host-actions.mjs';
 import { createPanelRegistry } from '../lib/mobile-panels.mjs';
 import { createOfficialWeb } from '../lib/official-web.mjs';
 import { createMobileFocusTracker } from '../lib/mobile-focus.mjs';
@@ -73,7 +73,7 @@ export function apply(ctx, rawConfig = {}) {
   ctx.provide?.('mobilePanels', { register: panels.register });
   const upstream = inProcessUpstream({ connection: ctx.connection, typertGateway: ctx.typertGateway, local: {
     ...mobileHostActions(ctx), 'mobilePanels/list': panels.list, 'mobilePanels/read': panels.read, 'mobilePanels/perform': panels.perform,
-  } });
+  }, nativeLocal: method => nativeScheduleAction(ctx, method) });
 
   const officialWeb = createOfficialWeb({
     webServer: ctx.webServer,
@@ -114,8 +114,12 @@ export function apply(ctx, rawConfig = {}) {
     ready.then(created => created.close(), () => {});
   }, 'dsh-mobile-link: phone link');
 
-  async function handle(req, res) {
-    const rejection = ctx.connection.requestRejection(req);
+  async function handle(req, res, peer) {
+    // 0.2.3-alpha.2 authenticates web routes before calling the handler and
+    // passes their PeerScope. Older hosts authenticate through Connection.
+    const rejection = typeof ctx.connection.requestRejection === 'function'
+      ? ctx.connection.requestRejection(req)
+      : !peer || peer.signal?.aborted ? 401 : peer.principal?.kind !== 'owner' ? 403 : undefined;
     if (rejection !== undefined) { res.writeHead(rejection); res.end(); return; }
     const path = new URL(req.url ?? '/', 'http://host.invalid').pathname.slice(PANEL_PATH.length) || '/';
     let link;
@@ -165,6 +169,6 @@ export function apply(ctx, rawConfig = {}) {
     }
   }
 
-  ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: PANEL_PATH, handler: (req, res) => { handle(req, res); } }),
+  ctx.effect(() => ctx.webServer.register({ kind: 'prefix', path: PANEL_PATH, auth: 'required', handler: handle }),
     'dsh-mobile-link: desktop panel API');
 }

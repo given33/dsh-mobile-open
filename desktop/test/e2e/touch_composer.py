@@ -39,7 +39,7 @@ def exercise(phone, host):
     for name in ('goal', 'plan'):
         phone.evaluate("window.editorFocus=0;document.addEventListener('focusin',e=>{if(e.target.isContentEditable)editorFocus++},{capture:true,once:true})")
         plus.tap(); rows.first.wait_for()
-        assert phone.evaluate('!document.activeElement.isContentEditable && !editorFocus')
+        assert phone.evaluate('!document.activeElement.isContentEditable && !editorFocus'), name
         assert phone.evaluate('''()=>['touchmove','selectstart','contextmenu'].every(k=>
             !document.body.dispatchEvent(new Event(k,{cancelable:true,bubbles:true})))''')
         rows.filter(has_text=name).first.tap()
@@ -65,5 +65,8 @@ if __name__ == '__main__':
     assert engine in ('chromium','webkit')
     with sync_playwright() as pw:
         browser=getattr(pw,engine).launch(executable_path=os.getenv(engine.upper()+'_PATH'))
-        try: exercise(connect(browser,host)[0],host)
+        # Touch emulation alone still sends a desktop UA, enabling unrelated
+        # desktop-only editor autofocus as a freshly-created session binds.
+        device = pw.devices['iPhone 13' if engine == 'webkit' else 'Pixel 7']
+        try: exercise(connect(browser, host, user_agent=device['user_agent'])[0], host)
         finally: browser.close()

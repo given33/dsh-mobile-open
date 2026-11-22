@@ -12,11 +12,11 @@ from urllib.parse import parse_qs, urlsplit
 from playwright.sync_api import sync_playwright
 
 
-def connect(browser, host):
+def connect(browser, host, **phone_options):
     desktop = host['base'].rstrip('/')
     mobile = f"https://127.0.0.1:{host['port']}"
     phone = browser.new_context(ignore_https_errors=True, is_mobile=True, has_touch=True,
-                                locale='zh-CN', viewport={'width': 393, 'height': 745})
+                                locale='zh-CN', viewport={'width': 393, 'height': 745}, **phone_options)
     pc = browser.new_context(locale='zh-CN', viewport={'width': 1280, 'height': 850})
     name, value = host['cookie'].split('=', 1)
     pc.add_cookies([{'name': name, 'value': value, 'url': desktop}])

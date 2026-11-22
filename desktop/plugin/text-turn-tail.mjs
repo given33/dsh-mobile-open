@@ -5,7 +5,7 @@
 // turn ended. AgentLoop still owns turn/end, cancellation and queued next steps.
 export const name = 'dsh-mobile-text-turn-tail';
 const recorder = '@deepseek-ai/dsh-workspace-changes';
-const known = new Set(['0.2.2-rc.3', '0.2.2-rc.5']);
+const known = new Set(['0.2.2-rc.3', '0.2.2-rc.5', '0.2.3-alpha.2']);
 export function apply(ctx) {
   const turns = new Map();
   ctx.on('session/event', (session, { type, data }) => {

@@ -77,6 +77,7 @@ const OFFICIAL_READ_STREAM_PATTERN = /^(?:follow|list|watch|subscribe|status|eve
 export function isOfficialReadRpc(method) {
   if (typeof method !== 'string' || !method || method.length > 200 || /[?#\\\s]/.test(method)) return false;
   if (READ_RPC.has(method)) return true;
+  if (method === 'schedule/view') return true;
   if (ACTION_RPC.has(method) || TERMINAL_RPC.has(method) || method.startsWith('terminal/')) return false;
   if (method.startsWith('remoteAccess/')) return true;
   const slash = method.lastIndexOf('/');
@@ -514,7 +515,7 @@ export function createLinkServer({
         if (method === '$events/result' && !official && !claim) return json(res, 409, { error: 'interaction-unavailable' });
         try {
           const body = Buffer.from(JSON.stringify(envelope));
-          let result = await upstream.rpc(method, body, device.id);
+          let result = await upstream.rpc(method, body, device.id, { official });
           if (method === 'directoryPicker/list' || method === 'directoryPicker/createDirectory') result = await directoryPickerFallback(body, result);
           if (claim && result.status >= 200 && result.status < 300) {
             let accepted = false;

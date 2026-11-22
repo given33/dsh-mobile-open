@@ -24,10 +24,10 @@ const FORWARD_REQUEST_HEADERS = [
 ];
 
 /**
- * @param {{ connection: any, typertGateway: any, local?: Record<string, Function> }} services - injected DSH host services.
+ * @param {{ connection: any, typertGateway: any, local?: Record<string, Function>, nativeLocal?: (method: string) => Function | undefined }} services - injected DSH host services.
  * @returns the upstream interface `createLinkServer` expects.
  */
-export function inProcessUpstream({ connection, typertGateway, local = {} }) {
+export function inProcessUpstream({ connection, typertGateway, local = {}, nativeLocal }) {
   if (typeof connection?.createPeer !== 'function' || typeof connection?.createSharedFetchHandler !== 'function') {
     throw new Error('dsh-mobile-link needs DSH 0.2.1-rc.2 or later (Connection.createPeer)');
   }
@@ -51,11 +51,12 @@ export function inProcessUpstream({ connection, typertGateway, local = {} }) {
   return {
     available: () => !disposed,
     peerFor,
-    async rpc(method, body, id) {
-      if (Object.hasOwn(local, method)) {
+    async rpc(method, body, id, { official = false } = {}) {
+      const action = (!official && nativeLocal?.(method)) || (Object.hasOwn(local, method) ? local[method] : undefined);
+      if (action) {
         const envelope = JSON.parse(body);
         let result;
-        try { result = { ok: true, value: await local[method](envelope.payload.args) }; }
+        try { result = { ok: true, value: await action(envelope.payload.args, peerFor(id).signal) }; }
         catch (error) { result = { ok: false, error: { code: error.code ?? 'mobile/failed', message: error.message } }; }
         return { status: 200, body: Buffer.from(JSON.stringify({ type: 'server-response', rpcId: envelope.rpcId, result })) };
       }

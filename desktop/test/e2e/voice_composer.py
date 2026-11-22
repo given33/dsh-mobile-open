@@ -54,7 +54,7 @@ with sync_playwright() as pw:
             const b=document.getElementById('dml-voice-button'), s=b?.nextElementSibling;
             if (!s) return false;
             const a=b.getBoundingClientRect(), r=s.getBoundingClientRect();
-            return a.width>=36 && r.width>=34 && a.right<=r.left+1 && r.right<=innerWidth && Math.abs(a.y+a.height/2-r.y-r.height/2)<=3;
+            return a.width>=36 && r.width>=38 && r.height>=38 && a.right<=r.left+1 && r.right<=innerWidth && Math.abs(a.y+a.height/2-r.y-r.height/2)<=3;
         }''')
     assert not page.locator('[data-sidebar-opener]').is_visible()
     print('Button is next to send at 320, 393 and 820 px.', flush=True)

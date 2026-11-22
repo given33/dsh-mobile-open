@@ -16,6 +16,10 @@ if (process.argv.length !== 4) {
 }
 const cli = resolve(process.argv[2]);
 const bundle = resolve(process.argv[3]);
+const version = spawnSync(process.execPath, [cli, '--version'], { encoding: 'utf8', windowsHide: true, timeout: 15_000 });
+assert.equal(version.status, 0, version.stderr || String(version.error));
+const harnessVersion = version.stdout.trim().match(/\b\d+\.\d+\.\d+(?:-[\w.]+)?$/)?.[0];
+assert.ok(harnessVersion, 'Could not determine the Harness version');
 const home = await mkdtemp(join(tmpdir(), 'dsh-mobile-live-'));
 const env = { ...process.env, DSH_HOME: home };
 const workspace = join(home, 'smoke-workspace');
@@ -29,12 +33,14 @@ await writeFile(join(packageDir, 'package.json'), JSON.stringify({
 await writeFile(join(packageDir, 'host.mjs'), 'export function apply() {}\n');
 await writeFile(join(packageDir, 'cordis.patch.yml'), '- insert:\n    - id: mobile-install-smoke\n      name: dsh-mobile-install-smoke\n');
 const examplePath = fileURLToPath(new URL('../examples/native-panel/', import.meta.url));
-for (const spec of [bundle, examplePath, '@deepseek-ai/dsh-experimental-plugin-market-bundle@0.2.1-rc.3']) {
+for (const spec of [bundle, examplePath, `@deepseek-ai/dsh-experimental-plugin-market-bundle@${harnessVersion}`]) {
   const install = spawnSync(process.execPath, [cli, 'plugin', '--profile', 'web', 'add', spec], {
     env, encoding: 'utf8', windowsHide: true, timeout: 90_000,
   });
   assert.equal(install.status, 0, install.stderr || install.stdout || String(install.error));
 }
+await writeFile(join(home, 'profiles', 'web', 'cordis.patch.yml'),
+  "- id: mobile-link\n  name: 'dsh-mobile-link'\n  config:\n    port: 0\n    host: '127.0.0.1'\n    extraHosts: ['127.0.0.1']\n", 'utf8');
 await mkdir(workspace, { recursive: true });
 const child = spawn(process.execPath, [cli, '--profile', 'web', '--host', '127.0.0.1', '--port', '0', '--no-open'], {
   env, cwd: workspace, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
@@ -55,6 +61,8 @@ try {
     child.on('error', reject);
   })]);
   const auth = await exchangeLaunchURL(launch);
+  const anonymousPanel = await fetch(new URL('dsh-mobile-link/status', auth.base), { redirect: 'manual' });
+  assert.equal(anonymousPanel.status, 401, 'unauthenticated desktop panel must not expose pairing status');
   async function panel(path, value) {
     const res = await fetch(new URL('dsh-mobile-link/' + path, auth.base), {
       method: value === undefined ? 'GET' : 'POST', headers: { Cookie: auth.cookie, 'Content-Type': 'application/json' },
@@ -64,7 +72,7 @@ try {
     return res.json();
   }
   const status = await panel('enabled', { enabled: true });
-  assert.equal(status.listening, true);
+  assert.equal(status.listening, true, 'test phone link failed to start');
   await panel('actions', { enabled: true });
   const offer = new URL(status.pairing.link);
   const port = status.port;
@@ -176,13 +184,17 @@ try {
   assert.ok(createdSchedule.id, 'schedule created');
   const listedSchedule = (await rpc('schedule/list', { request: { sessionId } })).find(x => x.id === createdSchedule.id);
   assert.ok(listedSchedule);
-  const { sessionId: _owner, status: _status, lastDelivery: _last, lastScheduledAt: _timestamp, ...expected } = listedSchedule;
+  const keys = new Set(['id', 'title', 'prompt', 'kind', 'scheduledAt', 'afterSeconds', 'everySeconds', 'time', 'timeZone', 'weekdays', 'expression']);
+  const expected = Object.fromEntries(Object.entries(listedSchedule).filter(([key]) => keys.has(key)));
+  assert.equal((await rpc('schedule/history', { request: { sessionId, id: createdSchedule.id, limit: 20 } })).records.length, 0);
+  assert.equal((await rpc('schedule/update', { request: { sessionId, id: createdSchedule.id, expected: {}, title: 'stale edit' } })).updated, false);
   const updated = await rpc('schedule/update', {
     request: { sessionId, id: createdSchedule.id, expected, title: 'Updated test schedule',
       change: { kind: 'every', every_seconds: 86400 } },
   });
   assert.equal(updated.updated, true, JSON.stringify(updated));
   assert.equal(updated.record.kind, 'every');
+  assert.equal((await rpc('schedule/delete', { request: { sessionId: 'different-session', id: createdSchedule.id } })).deleted, false);
   assert.equal((await rpc('schedule/delete', { request: { sessionId, id: createdSchedule.id } })).deleted, true);
   const renamed = await rpc('session/rename', { request: { sessionId, title: 'Native smoke verification' } });
   assert.equal(renamed.title, 'Native smoke verification');
@@ -261,9 +273,9 @@ try {
     connection.terminate();
     await rpc('terminal/close', { agentId: sessionId, id });
   }
-  console.log('PASS: isolated official Harness 0.2.1-rc.3, plugin panel, TLS pair, model catalog, directory picker, search, workspace/session creation, rename, binary upload, goal create/pause/edit/clear, file tree and binary read, staged/unstaged Git diff, configuration, redacted credentials, plugin inspect/install/remove and market, native plugin write, permission and agent presets, schedule creation/recurrence/deletion, four observer streams, real PTY input/output/resize');
+  console.log(`PASS: isolated official Harness ${harnessVersion}, plugin panel, TLS pair, model catalog, directory picker, search, workspace/session creation, rename, binary upload, goal create/pause/edit/clear, file tree and binary read, staged/unstaged Git diff, configuration, redacted credentials, plugin inspect/install/remove and market, native plugin write, permission and agent presets, schedule creation/recurrence/deletion, four observer streams, real PTY input/output/resize`);
 } catch (error) {
-  console.error(error.message);
+  console.error(error.stack || error.message);
   console.error(output.replace(/([?&]token=)[^\s&]+/g, '$1[redacted]').split(/\r?\n/).slice(-18).join('\n'));
   process.exitCode = 1;
 } finally {

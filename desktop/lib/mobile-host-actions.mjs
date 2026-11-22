@@ -2,6 +2,7 @@ import { lstat, open, realpath } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { arch, cpus, freemem, hostname, loadavg, platform, totalmem, uptime } from 'node:os';
 import { basename, isAbsolute, relative, resolve, sep } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { getCachedOfficeDocument, readOfficeDocument } from './mobile-office.mjs';
 
 const FILE_LIMIT = 16 * 1024 * 1024;
@@ -12,6 +13,55 @@ function failure(code, message) {
   return Object.assign(new Error(message), { code });
 }
 const requiredString = (value, max) => typeof value === 'string' && value.trim() && value.length <= max;
+
+const SCHEDULE_SELECTORS = Object.freeze({ after: 'after_seconds', at: 'at', every: 'every_seconds', daily: 'daily', weekly: 'weekly', cron: 'cron' });
+const hasHostTaskApi = schedule => typeof schedule?.edit === 'function' && typeof schedule?.view === 'function';
+const scheduleOwner = task => task.target?.sessionId;
+const nativeScheduleRow = (task, sessionId = scheduleOwner(task)) => ({ ...task, sessionId });
+const scheduleRecordKeys = ['id', 'title', 'prompt', 'kind', 'scheduledAt', 'afterSeconds', 'everySeconds', 'time', 'timeZone', 'weekdays', 'expression'];
+const scheduleRecord = task => Object.fromEntries(scheduleRecordKeys.filter(key => Object.hasOwn(task, key)).map(key => [key, task[key]]));
+
+// The installed native app still uses the session-scoped schedule protocol.
+// Keep it working without translating the official WebView's host-task RPCs.
+export function nativeScheduleAction(ctx, method) {
+  if (!['schedule/catalog', 'schedule/list', 'schedule/history', 'schedule/update', 'schedule/delete'].includes(method)) return undefined;
+  const schedule = ctx.get?.('schedule');
+  if (!hasHostTaskApi(schedule)) return undefined;
+  return async ({ request } = {}, signal) => {
+    if (method === 'schedule/catalog' || method === 'schedule/list') {
+      const rows = (await schedule.catalog()).filter(task => scheduleOwner(task));
+      return (method === 'schedule/list' ? rows.filter(task => scheduleOwner(task) === request?.sessionId) : rows)
+        .map(task => nativeScheduleRow(task));
+    }
+    const { id, sessionId } = request ?? {};
+    if (!requiredString(id, 128) || !requiredString(sessionId, 128)) throw failure('mobileSchedule/input', '缺少任务或会话。');
+    const task = await schedule.view({ id });
+    const missing = task.code || scheduleOwner(task) !== sessionId;
+    if (method === 'schedule/history') {
+      if (missing) return { id, code: 'schedule_not_found' };
+      const { limit, before } = request;
+      return schedule.history({ id, limit, ...(before === undefined ? {} : { before }) });
+    }
+    const deleting = method === 'schedule/delete';
+    if (missing) return deleting ? { deleted: false } : { updated: false, code: 'schedule_not_found' };
+    const revision = { expectedUpdatedAt: task.updatedAt ?? null };
+    if (deleting) {
+      const result = await schedule.edit({ id, action: 'delete', ...revision }, undefined, signal);
+      return { deleted: result.deleted === true };
+    }
+    if (!isDeepStrictEqual(request.expected, scheduleRecord(task))) return { updated: false, code: 'schedule_conflict' };
+    const patch = {};
+    for (const key of ['title', 'prompt']) if (Object.hasOwn(request, key)) patch[key] = request[key];
+    if (request.change !== undefined) {
+      const kind = request.change?.kind;
+      const key = Object.hasOwn(SCHEDULE_SELECTORS, kind) ? SCHEDULE_SELECTORS[kind] : null;
+      if (!key || !Object.hasOwn(request.change, key)) throw failure('mobileSchedule/input', '无效的触发规则。');
+      patch.timing = { kind, [key]: request.change[key] };
+    }
+    const result = await schedule.edit({ id, action: 'update', patch, ...revision }, undefined, signal);
+    return result.code ? { updated: false, code: result.code } : { updated: true, record: scheduleRecord(result) };
+  };
+}
 
 function relativeParts(path) {
   if (!requiredString(path, 4096) || /[\\:\0]/.test(path) || path.startsWith('/')) {
@@ -187,7 +237,7 @@ export function mobileHostActions(ctx) {
     return path;
   }
   return {
-    async 'mobileSchedule/create'({ request }) {
+    async 'mobileSchedule/create'({ request }, signal) {
       const { sessionId, ...fields } = request ?? {};
       await sessionHeader(sessionId);
       if (!requiredString(fields.title, 120) || !requiredString(fields.prompt, 64_000)) {
@@ -195,11 +245,15 @@ export function mobileHostActions(ctx) {
       }
       const schedule = ctx.get?.('schedule');
       if (!schedule) throw failure('mobileSchedule/unavailable', '电脑尚未启用定时任务服务。');
-      const selectors = ['after_seconds', 'at', 'every_seconds', 'daily', 'weekly', 'cron'];
-      const supplied = selectors.filter(key => Object.hasOwn(fields, key));
+      const supplied = Object.entries(SCHEDULE_SELECTORS).filter(([, key]) => Object.hasOwn(fields, key));
       if (supplied.length !== 1) throw failure('mobileSchedule/input', '请选择一个触发规则。');
-      const selector = supplied[0];
-      return schedule.create(sessionId, { title: fields.title.trim(), prompt: fields.prompt.trim(), [selector]: fields[selector] });
+      const [kind, selector] = supplied[0];
+      const title = fields.title.trim(), prompt = fields.prompt.trim();
+      if (hasHostTaskApi(schedule)) {
+        return nativeScheduleRow(await schedule.create({ title, prompt, timing: { kind, [selector]: fields[selector] },
+          target: { kind: 'session', sessionId } }, undefined, signal), sessionId);
+      }
+      return schedule.create(sessionId, { title, prompt, [selector]: fields[selector] });
     },
     async 'mobileFiles/download'({ sessionId, path }) { return workspaceFile(await workspaceRoot(sessionId), path); },
     async 'mobileOffice/read'({ sessionId, path }) {
