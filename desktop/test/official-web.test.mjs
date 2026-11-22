@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { brotliDecompressSync, gunzipSync } from 'node:zlib';
 import vm from 'node:vm';
-import { PREVIEW_COMPAT_JS } from '../lib/mobile-shell.mjs';
+import { readHarnessSurface, PREVIEW_COMPAT_JS } from '../lib/mobile-shell.mjs';
 import { WebSocket } from 'ws';
 import { createLinkService } from '../lib/link-service.mjs';
 import { createOfficialWeb } from '../lib/official-web.mjs';
@@ -1151,7 +1151,7 @@ test('v0.5.1 zero-flash visual snapshot curtain, zero-reflow composer, zcode-rem
       querySelectorAll() { return []; },
       addEventListener() {},
       removeEventListener() {},
-      getElementById: id => (id === 'dml-snap-curtain' && !curtainRemoved ? curtainNode : null),
+      getElementById: id => id === 'root' ? { firstElementChild: {} } : (id === 'dml-snap-curtain' && !curtainRemoved ? curtainNode : null),
       createElement() { return { id: '', className: '', innerHTML: '', textContent: '', style: {}, setAttribute() {}, removeAttribute() {}, addEventListener() {}, appendChild() {} }; },
     },
     webkit: { messageHandlers: { dshMobile: { postMessage: m => posted.push(m) } } },
@@ -1172,7 +1172,7 @@ test('v0.5.1 zero-flash visual snapshot curtain, zero-reflow composer, zcode-rem
 
   // AMOLED pure black theme reported to native iOS header & preboot storage.
   assert.equal(attrs.get('data-dml-amoled'), 'true');
-  assert.ok(posted.some(m => m.type === 'theme' && m.dark === true && m.bgBase === '#000000'), 'AMOLED dark must report #000000');
+  assert.ok(!posted.some(m => m.type === 'theme'), 'A covered bootstrap must not overwrite the saved theme');
 
   // Expandable composer toggle.
   assert.equal(sandbox.__DSH_MOBILE_BRIDGE__.toggleComposerExpand(), true);
@@ -1200,7 +1200,39 @@ test('v0.5.1 zero-flash visual snapshot curtain, zero-reflow composer, zcode-rem
   assert.equal(curtainRemoved, false, 'curtain must still wait for 2nd frame');
   // Step 2nd rAF
   flush();
+  assert.ok(posted.some(m => m.type === 'theme' && m.confirmed && m.dark && m.bgBase === '#000000'));
   assert.equal(curtainRemoved, true, 'curtain removed cleanly on 2nd frame');
   assert.equal(attrs.has('data-dml-snap-cover'), false);
   assert.equal(doneCalled, true);
+});
+
+
+test('cold start trusts the painted Harness body, not the frozen html theme or transparent bootstrap', () => {
+  const htmlAttrs = new Map([['data-theme', 'light']]);
+  let bodyDark = false, base = '', painted = 'rgba(0, 0, 0, 0)';
+  const root = { firstElementChild: null };
+  const body = { hasAttribute: key => key === 'data-ds-dark-theme' && bodyDark };
+  const doc = { body, getElementById: () => root, documentElement: {
+    hasAttribute: key => htmlAttrs.has(key), getAttribute: key => htmlAttrs.get(key),
+  } };
+  const read = () => readHarnessSurface(doc, element => {
+    assert.equal(element, body);
+    return { getPropertyValue: key => key === '--dsw-alias-bg-base' ? base : '', backgroundColor: painted };
+  });
+  assert.equal(read(), null);
+  root.firstElementChild = {};
+  assert.equal(read(), null);
+  bodyDark = true;
+  base = '#ffffff'; // Light defaults on the root before the body theme stylesheet settles.
+  assert.deepEqual(read(), { dark: true, bgBase: '#151517', sidebarFill: '#151517' });
+  painted = 'rgb(21, 21, 23)';
+  assert.equal(read().bgBase, painted);
+  htmlAttrs.set('data-dml-amoled', 'true');
+  assert.equal(read().bgBase, '#000000');
+  htmlAttrs.set('data-dml-routing', 'dark');
+  assert.equal(read(), null);
+  htmlAttrs.clear();
+  htmlAttrs.set('data-theme', 'dark'); // The user switched to light after restoring a dark frame.
+  bodyDark = false;
+  assert.deepEqual(read(), { dark: false, bgBase: '#ffffff', sidebarFill: '#ffffff' });
 });

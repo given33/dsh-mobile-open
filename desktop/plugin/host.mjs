@@ -68,7 +68,14 @@ export function apply(ctx, rawConfig = {}) {
   const config = readConfig(rawConfig);
   const say = (...parts) => console.log('[dsh-mobile-link]', ...parts);
   let service, disposed = false;
-  ctx.on?.('session/event', (session,event) => service?.notifications?.event(session.id,event));
+  ctx.on?.('session/event', (session, event) => service?.notifications?.event(session.id, event, () => {
+    const cwd = session.header?.cwd;
+    const workspace = ctx.get?.('workspaceRegistry')?.list().find(w => w.path === cwd || w.sessionIds.includes(session.id));
+    return {
+      title: ctx.get?.('sessionTitle')?.get(session)?.title,
+      workspace: workspace?.title || cwd?.split(/[\\/]/).filter(Boolean).at(-1),
+    };
+  }));
   const panels = createPanelRegistry();
   const focus = createMobileFocusTracker();
   ctx.provide?.('mobilePanels', { register: panels.register });

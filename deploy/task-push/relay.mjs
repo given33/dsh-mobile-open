@@ -19,22 +19,29 @@ export function valid(m) {
     Number.isSafeInteger(s.updatedAt) &&
     typeof s.terminal === 'boolean' &&
     [m.title, s.label, s.detail].every((x) => typeof x === 'string' && x.length <= 64) &&
+    (!m.report || (m.method === 'bark' && [m.report.task, m.report.workspace, m.report.summary].every(x => typeof x === 'string' && x.length <= 240 && !/[\r\n]/.test(x)))) &&
     (['update', 'start', 'end'].includes(m.method)
       ? typeof m.token === 'string' && /^(?:[a-f0-9]{2}){16,256}$/.test(m.token)
       : m.method === 'bark' && id(m.token))
   );
 }
-export function payload(m, t = Math.floor(Date.now() / 1000)) {
+// Shipped DSH desktop whale, pinned so a branch change never changes the notification icon.
+const whaleIcon = 'https://raw.githubusercontent.com/given33/dsh-mobile-open/e95b74500a86665483045a6b8dd95eb628677bb4/DSHMobile/Assets.xcassets/AppIcon.appiconset/AppIcon.png';
+const terminalKinds = new Set(['completed', 'aborted', 'blocked', 'error', 'interrupted', 'max-tokens', 'ended']);
+const silentBark = m => m.method === 'bark' && m.kind !== 'test' && !(m.state?.terminal && terminalKinds.has(m.kind));
+export function payload(m, t = Math.floor(Date.now() / 1000), icon = whaleIcon) {
   const { sessionId, turn, step, phase, label, detail, terminal, updatedAt } = m.state;
   if (m.method === 'bark' && m.kind === 'test')
-    return { device_key: m.token, title: 'DSH · 推送测试', body: 'Bark 通知通道已接通。', group: 'DSH' };
+    return { device_key: m.token, title: 'DSH · 推送测试', body: 'Bark 通知通道已接通。', group: 'DSH', icon };
   if (m.method === 'bark')
     return {
       device_key: m.token,
-      title: 'DSH · ' + m.title,
-      body: `第 ${turn} 轮 · 第 ${step} 步` + (detail ? ' · ' + detail : ''),
+      title: m.report?.task || m.title,
+      subtitle: m.title + (m.report?.workspace ? ' · 工作区：' + m.report.workspace : ''),
+      body: m.report?.summary || detail || `第 ${turn} 轮已结束，共 ${step} 步。`,
+      icon,
       group: 'DSH-' + m.desktopId + '-' + sessionId,
-      level: ['question', 'approval', 'error', 'blocked'].includes(m.kind) ? 'timeSensitive' : 'active',
+      level: ['error', 'interrupted', 'blocked'].includes(m.kind) ? 'timeSensitive' : 'active',
       url: `dshmobile://task/${m.desktopId}/${sessionId}`,
     };
   const aps = {
@@ -58,13 +65,14 @@ export function providers(env) {
     issued = 0;
   const last = new Map();
   return async (m) => {
+    if (silentBark(m)) return;
     if (m.method === 'bark') {
       const r = await fetch(new URL('/push', env.BARK_ORIGIN || 'http://bark:8080'), {
         method: 'POST',
         redirect: 'error',
         signal: AbortSignal.timeout(5000),
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify(payload(m)),
+        body: JSON.stringify(payload(m, undefined, env.DSH_BARK_ICON_URL || whaleIcon)),
       });
       if (!r.ok || (await r.json()).code !== 200) throw Error('Bark failed');
       return;
@@ -170,6 +178,8 @@ export function receiver(secret, deliver) {
       nonces.set(n, now + 120000);
       const m = JSON.parse(b);
       if (!valid(m)) return end(400);
+      // Acknowledge old desktop/outbox progress without forwarding it to Bark.
+      if (silentBark(m)) return end(200);
       const key = m.eventId;
       if (seen.has(key)) return end(200);
       const prior = active.get(key);

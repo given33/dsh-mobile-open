@@ -81,13 +81,21 @@ test('paired recipients, late activity token closes correct turn, revoke stops a
   await p.configure('phone', { op: 'startToken', token: 'ab'.repeat(32) });
   await p.configure('phone', { op: 'background' });
   p.event(sid, { type: 'turn/start', seq: 1, data: { turn: 2 } });
-  p.event(sid, { type: 'turn/end', seq: 2, data: { turn: 2, reason: { kind: 'error' } } });
-  p.event(sid, { type: 'turn/start', seq: 3, data: { turn: 3 } });
+  p.event(sid, { type: 'approval/asked', seq: 2, data: { turn: 2, id: 'approval' } });
+  p.event(sid, { type: 'assistant/message', seq: 3, data: { turn: 2, message: { content: [
+    { type: 'reasoning', text: 'PRIVATE' }, { type: 'text', text: '校验了 **三处修改**。' },
+  ] } } });
+  p.event(sid, { type: 'turn/end', seq: 4, data: { turn: 2, reason: { kind: 'completed' } } },
+    () => ({title: '检查改动', workspace: '设计组'}));
+  p.event(sid, { type: 'turn/start', seq: 5, data: { turn: 3 } });
   await p.configure('phone', { op: 'activity', sessionId: sid, turn: 2, token: 'cd'.repeat(32) });
   for (let i = 0; i < 100 && !deliveries.some((m) => m.method === 'end'); i++) await pause(10);
-  assert(deliveries.some((m) => m.method === 'end' && m.state.turn === 2 && m.state.phase === 'error'));
+  assert(deliveries.some((m) => m.method === 'end' && m.state.turn === 2 && m.state.phase === 'completed'));
   assert(deliveries.some((m) => m.method === 'start'));
-  assert(deliveries.some((m) => m.method === 'bark'));
+  const notices = deliveries.filter(m => m.method === 'bark');
+  assert.deepEqual(notices.map(m => m.kind), ['completed']);
+  assert.deepEqual(notices[0].report, { task:'检查改动', workspace:'设计组', summary:'校验了 三处修改。' });
+  assert(!deliveries.some(m => m.method !== 'bark' && m.report));
   paired = false;
   remove({ type: 'removed', id: 'phone' });
   const count = deliveries.length;
@@ -190,14 +198,21 @@ test('Bark provider POSTs to the private backend and treats provider errors as u
   t.after(() => server.close());
   const deliver = providers({ BARK_ORIGIN: `http://127.0.0.1:${server.address().port}` });
   const m = {
-    kind: 'approval',
+    kind: 'error',
     method: 'bark',
-    title: '等待你审批',
+    title: '任务失败',
+    report: {task: '排版检查', workspace: '设计组', summary: '校验未通过。'},
     desktopId: 'desk',
     token: 'test-device',
-    state: { sessionId: sid, turn: 2, step: 4, detail: '', phase: 'approval' },
+    state: { sessionId: sid, turn: 2, step: 4, detail: '', phase: 'error', terminal: true },
   };
+  await deliver({...m, kind:'started', state:{...m.state, terminal:false}});
+  assert.equal(received, undefined);
   await deliver(m);
+  assert.equal(received.title, '排版检查');
+  assert.equal(received.subtitle, '任务失败 · 工作区：设计组');
+  assert.equal(received.body, '校验未通过。');
+  assert.match(received.icon, /^https:.*AppIcon.png$/);
   assert.equal(received.device_key, 'test-device');
   assert.equal(received.level, 'timeSensitive');
   assert.equal(received.url, `dshmobile://task/desk/${sid}`);

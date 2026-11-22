@@ -576,8 +576,28 @@ html[data-dml-native-nav] [data-conversation-header-leading]:has([data-sidebar-o
 [data-composer-card]:has(#dml-voice-button) span[class$="_triggerAnchor"]:has(> button:is([aria-label="开始录音"], [aria-label="打开语音输入引导"], [aria-label="Start recording"], [aria-label="Open voice input setup"], [aria-label="録音を開始"], [aria-label="音声入力のセットアップを開く"])) { display:none !important; }
 #dml-voice-button:is([data-recording], [data-pressed], [aria-pressed="true"]) { color:#079c58; background:color-mix(in srgb, currentColor 12%, transparent); }
 #dml-voice-button + button { min-inline-size:38px; min-block-size:38px; }
-#dml-voice-hold { width:100%; min-height:46px; border:0; border-radius:12px; font:600 16px/1.25 system-ui,sans-serif; color:inherit; background:color-mix(in srgb, currentColor 8%, transparent); touch-action:none; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
-#dml-voice-hold + [data-input-scroll] { display:none !important; }
+/* Dictation stays inside the real text field, above the system keyboard. */
+#dml-inline-voice { position:relative; height:0; z-index:7; }
+#dml-inline-voice > #dml-voice-button {
+  position:absolute; right:6px; top:0; width:42px; height:40px;
+  background:radial-gradient(circle, #07b967 0 12px, #07b96738 12.5px 15px, transparent 15.5px);
+  color:white;
+}
+#dml-inline-voice svg { width:15px; height:15px; stroke-width:2.3; }
+[data-composer-card]:has(#dml-inline-voice) #dml-composer-expand { visibility:hidden; }
+#dml-inline-voice + [data-input-scroll] { margin-inline-end:44px; min-height:40px; }
+/* Let the model name shrink last, instead of replacing it with a database icon. */
+[data-composer-card] [class$="_row"]:has([class$="_triggerLabel"]) {
+  flex-wrap:nowrap; gap:4px;
+  --dsh-composer-model-text-display:block !important;
+  --dsh-composer-model-icon-display:none !important;
+}
+[data-composer-card] [class$="_trailing"]:has([class$="_triggerLabel"]) { flex:1 1 0; min-width:0; justify-content:flex-end; gap:4px; }
+[data-composer-card] button:has(> [class$="_triggerLabel"]) { max-width:100%; gap:3px; padding-inline:2px; }
+@media (max-width:440px) {
+  [data-composer-card] :is([class$="_modes"], [class$="_tools"]) { gap:3px; }
+  [data-composer-card] [class$="_triggerEffort"] { display:none; }
+}
 #dml-voice-hud {
   position:fixed; inset:0; z-index:99999; overflow:hidden; display:flex; align-items:center; justify-content:center;
   background:linear-gradient(to bottom,#12151699,#151817e8); color:white; font:500 14px/1.5 system-ui,sans-serif;
@@ -1243,7 +1263,7 @@ html[data-color-scheme="dark"] .dml-reader-bar {
 }
 .dml-hub-backdrop::backdrop {
   background: rgba(0, 0, 0, 0.42);
-  animation: dml-hub-fade 150ms ease-out;
+  animation: none;
 }
 .dml-hub-sheet {
   width: min(560px, 100vw);
@@ -1259,18 +1279,6 @@ html[data-color-scheme="dark"] .dml-reader-bar {
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.22);
   overflow: hidden;
   padding-bottom: max(12px, env(safe-area-inset-bottom, 12px));
-}
-/* Start on showModal, never while its dialog is still display:none. */
-.dml-hub-backdrop[open] > .dml-hub-sheet {
-  animation: dml-hub-enter 200ms cubic-bezier(.22,.61,.36,1);
-}
-.dml-hub-backdrop[data-closing] > .dml-hub-sheet { animation: dml-hub-leave 155ms ease-in forwards; }
-.dml-hub-backdrop[data-closing]::backdrop { animation: dml-hub-fade 155ms ease-in reverse forwards; }
-@keyframes dml-hub-leave { to { transform: translateY(100%); } }
-@keyframes dml-hub-fade { from { background-color: transparent; } }
-@keyframes dml-hub-enter { from { transform: translateY(100%); } }
-@media (prefers-reduced-motion: reduce) {
-  .dml-hub-backdrop::backdrop, .dml-hub-backdrop[open] > .dml-hub-sheet { animation: none; }
 }
 @media (prefers-color-scheme: dark) {
   .dml-hub-sheet {
@@ -1340,11 +1348,18 @@ html[data-color-scheme="dark"] .dml-reader-bar {
 .dml-session-row[data-swipe] {
   gap: 0; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain;
   scroll-snap-type: x mandatory; scrollbar-width: none; border-radius: 12px;
+  border:1px solid var(--dsw-alias-border-l2, rgba(128,128,138,.16));
+  background:var(--dsw-alias-bg-layer-2, rgba(128,128,138,.07));
 }
 .dml-session-row[data-swipe]::-webkit-scrollbar { display: none; }
-.dml-session-row[data-swipe] > .dml-hub-item { flex: 0 0 100%; box-sizing: border-box; scroll-snap-align: start; }
+.dml-session-row[data-swipe]:has([data-current="true"]) { border-color:var(--dsw-alias-state-business-primary, #4176e6); }
+.dml-session-row[data-swipe] > .dml-hub-item {
+  position:sticky; left:0; flex:0 0 100%; box-sizing:border-box; scroll-snap-align:start;
+  padding-inline-end:calc(12px + var(--dml-action-reveal, 0px));
+  background:transparent; border:0; border-radius:0;
+}
 .dml-swipe-action {
-  flex: 0 0 76px; scroll-snap-align: end; border: 0; border-radius: 0 12px 12px 0;
+  position:relative; flex:0 0 72px; scroll-snap-align:end; border:0; border-radius:0;
   font: inherit; font-weight: 600; background: #315ca9; color: white; cursor: pointer;
 }
 .dml-hub-pill-btn:disabled { opacity: 0.48; cursor: default; }
@@ -1537,11 +1552,48 @@ html[data-color-scheme="dark"] .dml-reader-bar {
 }
 `;
 
+// Harness puts its light defaults on :root and the dark overrides on body.
+// Only a hydrated, uncovered page may replace the native last-known surface.
+export function readHarnessSurface(doc, computedStyle) {
+  const html = doc.documentElement;
+  const body = doc.body;
+  if (!body || !doc.getElementById('root')?.firstElementChild ||
+      html.hasAttribute('data-dml-routing') || html.hasAttribute('data-dml-snap-cover')) return null;
+
+  function brightness(color) {
+    const hex = /^#([\da-f]{3}|[\da-f]{6})$/i.exec(color);
+    let rgb;
+    if (hex) {
+      const full = hex[1].length === 3 ? [...hex[1]].map(c => c + c).join('') : hex[1];
+      rgb = full.match(/../g).map(channel => parseInt(channel, 16));
+    } else {
+      const match = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)(?:\s*,\s*1(?:\.0+)?)?\s*\)$/i.exec(color);
+      if (!match) return null;
+      rgb = match.slice(1, 4).map(Number);
+    }
+    return .299 * rgb[0] + .587 * rgb[1] + .114 * rgb[2];
+  }
+
+  const style = computedStyle(body);
+  const darkBody = body.hasAttribute('data-ds-dark-theme');
+  const base = [style.getPropertyValue('--dsw-alias-bg-base').trim(), style.backgroundColor]
+    .find(color => brightness(color) !== null && (!darkBody || brightness(color) < 128));
+  if (!base && !darkBody) return null;
+  const dark = darkBody || brightness(base) < 128;
+  const bgBase = base || '#151517';
+  if (dark && html.getAttribute('data-dml-amoled') === 'true') {
+    return { dark, bgBase: '#000000', sidebarFill: '#050507' };
+  }
+  const sidebar = style.getPropertyValue('--dsw-specific-sidebar-fill').trim();
+  return { dark, bgBase, sidebarFill: brightness(sidebar) !== null ? sidebar : bgBase };
+}
+
 export const MOBILE_SHELL_JS = `(() => {
   'use strict';
   if (globalThis.__DSH_MOBILE_SHELL_INSTALLED__) return;
   globalThis.__DSH_MOBILE_SHELL_INSTALLED__ = true;
 
+  const readSurface = ${readHarnessSurface.toString()};
   const shell = globalThis.__DSH_MOBILE_SHELL__ || {};
   const reducedMotion = () => globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
   const scrollBehavior = () => reducedMotion() ? 'auto' : 'smooth';
@@ -1611,6 +1663,7 @@ export const MOBILE_SHELL_JS = `(() => {
       settleScroll();
       try { document.getElementById('dml-snap-curtain')?.remove?.(); } catch {}
       r?.removeAttribute?.('data-dml-snap-cover');
+      reportTheme();
       if (typeof done === 'function') done();
       scheduleVisualSnapshot();
     };
@@ -1761,13 +1814,10 @@ export const MOBILE_SHELL_JS = `(() => {
         width:bounds.width+'px',height:bounds.height+'px',margin:'0'})) clone.style.setProperty(key,value,'important');
       const html = '<style>' + frozen.css.split('<').join(String.fromCharCode(92) + '3c ') + '</style>' + (clone.outerHTML || '');
       if (!html || html.length > 1500000) throw new Error('Snapshot exceeds byte budget: ' + html.length);
-      const cs = typeof getComputedStyle === 'function' ? getComputedStyle(docEl) : null;
-      const bodyCs = document.body && typeof getComputedStyle === 'function' ? getComputedStyle(document.body) : cs;
-      const rawBg = (cs?.getPropertyValue?.('--dsw-alias-bg-base')?.trim() || bodyCs?.backgroundColor || '').trim();
-      const dark = parseDark(rawBg);
-      const amoled = docEl.getAttribute('data-dml-amoled') === 'true';
-      const bg = (dark && amoled) ? '#000000' : (rawBg || (dark ? '#151517' : '#ffffff'));
-      const fg = (cs?.getPropertyValue?.('--dsw-alias-label-primary')?.trim() || bodyCs?.color || '').trim();
+      const surface = readSurface(document, getComputedStyle);
+      if (!surface) return false;
+      const { dark, bgBase: bg } = surface;
+      const fg = getComputedStyle(document.body).color;
       globalThis.localStorage.setItem('dml.visualSnap.v1', JSON.stringify({
         v: 2,
         width: innerWidth,
@@ -2223,35 +2273,18 @@ export const MOBILE_SHELL_JS = `(() => {
   }, { capture: true, passive: true });
 
   // 1. Observe DSH's actual active theme & computed surface colors so the native iOS bar blends seamlessly.
-  function parseDark(bg) {
-    const html = document.documentElement;
-    const explicit = html.dataset.theme || html.getAttribute('data-color-scheme') || '';
-    if (/dark/i.test(explicit) || html.classList.contains('dark')) return true;
-    if (/light/i.test(explicit) || html.classList.contains('light')) return false;
-    const m = /rgba?\\(\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)/i.exec(bg || '');
-    if (m) return (0.299 * +m[1] + 0.587 * +m[2] + 0.114 * +m[3]) < 128;
-    return globalThis.matchMedia?.('(prefers-color-scheme: dark)').matches ?? false;
-  }
-
   function reportTheme() {
-    const style = getComputedStyle(document.documentElement);
-    const bodyStyle = document.body ? getComputedStyle(document.body) : style;
-    const rawBg = (style.getPropertyValue('--dsw-alias-bg-base').trim() || bodyStyle.backgroundColor || '').trim();
-    const rawSidebar = (style.getPropertyValue('--dsw-specific-sidebar-fill').trim() || rawBg).trim();
-    const dark = parseDark(rawBg || bodyStyle.backgroundColor);
-    const amoled = document.documentElement?.getAttribute?.('data-dml-amoled') === 'true';
-    const bgBase = (dark && amoled) ? '#000000' : rawBg;
-    const sidebarFill = (dark && amoled) ? '#050507' : rawSidebar;
+    const surface = readSurface(document, getComputedStyle);
+    if (!surface) return;
+    const { dark, bgBase, sidebarFill } = surface;
     const key = dark + '|' + bgBase + '|' + sidebarFill;
     if (key === lastThemeKey) return;
     lastThemeKey = key;
-    if (bgBase && bgBase !== 'transparent' && !/^rgba\\(\\s*0\\s*,\\s*0\\s*,\\s*0\\s*,\\s*0\\s*\\)$/i.test(bgBase)) {
-      try {
-        localStorage.setItem('dml.surface', dark ? 'dark' : 'light');
-        localStorage.setItem('dml.bg', bgBase);
-      } catch {}
-    }
-    post({ type: 'theme', dark, bgBase, sidebarFill });
+    try {
+      localStorage.setItem('dml.surface', dark ? 'dark' : 'light');
+      localStorage.setItem('dml.bg', bgBase);
+    } catch {}
+    post({ type: 'theme', confirmed: true, ...surface });
   }
 
   // 2. Observe UI state (sidebar drawer open/closed, document title, current session id).
@@ -3217,10 +3250,21 @@ export const MOBILE_SHELL_JS = `(() => {
     });
     attrObserver.observe(document.documentElement, {
       attributes: true,
-      attributeFilter: ['class', 'style', 'data-theme', 'data-color-scheme', 'data-dml-amoled'],
+      attributeFilter: ['class', 'style', 'data-theme', 'data-color-scheme', 'data-dml-amoled', 'data-dml-routing', 'data-dml-snap-cover'],
     });
 
     if (document.body) {
+      attrObserver.observe(document.body, { attributes: true, attributeFilter: ['class', 'style', 'data-ds-dark-theme'] });
+      // A browser-only start may mount React after this shell without changing the body theme.
+      const hostRoot = document.getElementById('root');
+      if (hostRoot && !hostRoot.firstElementChild) {
+        const mountObserver = new MutationObserver(() => {
+          if (!hostRoot.firstElementChild) return;
+          mountObserver.disconnect();
+          reportTheme();
+        });
+        mountObserver.observe(hostRoot, { childList: true });
+      }
       // Only watch direct children of document.body (childList: true, subtree: false)
       // to catch portaled popups/menus with zero streaming-chat mutation overhead.
       const bodyPortalObserver = new MutationObserver((mutations) => {

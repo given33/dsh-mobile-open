@@ -1,4 +1,4 @@
-# DSH Mobile Link 0.6.0
+# DSH Mobile Link 0.6.1
 
 桌面端「手机连接」插件。需要 Node.js 22+ 和已安装的 DeepSeek Harness。首次使用须在 DSH 界面明确开启连接。
 
@@ -31,11 +31,11 @@ Windows 桌面版先从系统托盘彻底退出，再执行：
 
 ```powershell
 $dsh = Join-Path $env:LOCALAPPDATA 'Programs/DeepSeek Harness/resources/runtime/cli/bin/dsh.cmd'
-$package = (Resolve-Path 'build/dsh-mobile-link-0.6.0.tgz').Path
+$package = (Resolve-Path 'build/dsh-mobile-link-0.6.1.tgz').Path
 & $dsh plugin --profile desktop add $package
 ```
 
-若 DSH 安装在其他位置，调整 `$dsh`。Web 版使用 `dsh plugin --profile web add ./build/dsh-mobile-link-0.6.0.tgz`。
+若 DSH 安装在其他位置，调整 `$dsh`。Web 版使用 `dsh plugin --profile web add ./build/dsh-mobile-link-0.6.1.tgz`。
 
 重开 DSH，点左下角「手机连接」，开启连接，再用手机扫码。连接初次开启时先在可信局域网配对。已配对设备默认只读；需要主动发送和审批时再开启「允许手机操作」，需要输入终端指令时才启用单独的终端权限。可随时在此面板撤销配对。
 

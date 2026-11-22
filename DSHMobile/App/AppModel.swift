@@ -11,6 +11,7 @@ private struct ResumeSnapshot: Codable {
     let sessionID: String
     let capturedAt: Date
     let jpeg: Data
+    let theme: PageTheme? // Absent in snapshots saved before 0.6.1.
 }
 
 enum ClientError: LocalizedError {
@@ -29,12 +30,45 @@ struct DesktopFocus: Equatable {
     let title: String
 }
 
-struct PageTheme: Equatable {
+struct PageTheme: Equatable, Codable {
     var dark: Bool?
     var bgBase: String
     var sidebarFill: String
 
-    var backgroundUIColor: UIColor? { Self.parseColor(bgBase) }
+    var backgroundUIColor: UIColor? {
+        if let color = Self.parseColor(bgBase), color.cgColor.alpha == 1 {
+            var brightness: CGFloat = 0
+            if dark == nil || !color.getWhite(&brightness, alpha: nil) || dark == (brightness < 0.5) { return color }
+        }
+        return dark.map { $0 ? UIColor(red: 21/255, green: 21/255, blue: 23/255, alpha: 1) : .white }
+    }
+
+    /// Older records contain only pixels. Sample the WebView's header margin (not the
+    /// document itself) when its last saved appearance disagrees with the preview.
+    func matchingLegacyFrame(_ image: UIImage) -> PageTheme {
+        guard let cg = image.cgImage,
+              let strip = cg.cropping(to: CGRect(x: 0, y: 0, width: cg.width, height: max(1, cg.height / 160))),
+              let ctx = CGContext(data: nil, width: 9, height: 1, bitsPerComponent: 8, bytesPerRow: 36,
+                                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
+              let buffer = ctx.data else { return self }
+        ctx.draw(strip, in: CGRect(x: 0, y: 0, width: 9, height: 1))
+        let bytes = buffer.assumingMemoryBound(to: UInt8.self)
+        let centers = (0..<9).map { Int(bytes[$0 * 4]) }.sorted()
+        let level = centers[4]
+        guard level < 64 || level > 208 else { return self }
+        let matches = (0..<9).filter { index in
+            (0..<3).allSatisfy { abs(Int(bytes[index * 4 + $0]) - level) < 15 }
+        }
+        guard matches.count >= 6 else { return self }
+        let isDark = level < 64
+        if dark == isDark, let color = Self.parseColor(bgBase), color.cgColor.alpha == 1 {
+            var white: CGFloat = 0
+            if color.getWhite(&white, alpha: nil), (white < 0.5) == isDark { return self }
+        }
+        let offset = matches[matches.count / 2] * 4
+        let hex = String(format: "#%02x%02x%02x", bytes[offset], bytes[offset + 1], bytes[offset + 2])
+        return PageTheme(dark: isDark, bgBase: hex, sidebarFill: hex)
+    }
     var backgroundColor: Color? { backgroundUIColor.map(Color.init(uiColor:)) }
 
     static func parseColor(_ raw: String) -> UIColor? {
@@ -300,6 +334,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     func captureFrame(_ image: UIImage, for id: String, sessionID: String) {
         guard desktop?.id == id, currentSessionID == sessionID, !revoked, !needsLaunchSelection else { return }
         let url = frameURL(id)
+        let capturedTheme = pageTheme.dark == nil ? nil : pageTheme
         let shouldPersist = !ephemeral
         let generation = UUID()
         frameGeneration = generation
@@ -308,7 +343,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         frameQueue.async { [weak self] in
             guard !AppModel.isBlankFrame(image) else { return }
             if shouldPersist, let data = image.jpegData(compressionQuality: 0.78) {
-                let saved = ResumeSnapshot(sessionID: sessionID, capturedAt: Date(), jpeg: data)
+                let saved = ResumeSnapshot(sessionID: sessionID, capturedAt: Date(), jpeg: data, theme: capturedTheme)
                 if let record = try? JSONEncoder().encode(saved) {
                     try? record.write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
                 }
@@ -400,10 +435,12 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         desktop = selected
         if !ephemeral { taskPush.bind(selected,channel) }
         currentSessionID = ephemeral ? nil : UserDefaults.standard.string(forKey: "dsh.lastSession." + selected.id)
+        pageTheme = loadSavedTheme(for: selected.id)
         if !ephemeral, let data = try? Data(contentsOf: frameURL(selected.id)),
            let saved = try? JSONDecoder().decode(ResumeSnapshot.self, from: data),
            saved.sessionID == currentSessionID, Date().timeIntervalSince(saved.capturedAt) < 86400,
            let savedImg = UIImage(data: saved.jpeg), !Self.isBlankFrame(savedImg) {
+            pageTheme = saved.theme ?? pageTheme.matchingLegacyFrame(savedImg)
             resumeFrame = savedImg
         } else {
             resumeFrame = nil
@@ -417,7 +454,6 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         syncIdleTimer()
         pageTitle = ""
         desktopFocus = nil
-        pageTheme = loadSavedTheme(for: selected.id)
         // Zero-wait optimistic cold boot: instantiate WKWebView immediately at t=0 using the
         // persisted HttpOnly cookie in WKWebsiteDataStore while refreshing/racing in parallel.
         if let cached = loadCachedRoute(for: selected.id),
@@ -680,9 +716,12 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 pendingCommand = .setFollowDesktop(UUID(), true)
             }
         case "theme":
-            let dark = body["dark"] as? Bool
+            // Old plugins can report the light bootstrap document over a dark snapshot.
+            guard !needsLaunchSelection || pageTheme.dark == nil || body["confirmed"] as? Bool == true,
+                  let dark = body["dark"] as? Bool else { return }
             let bgBase = body["bgBase"] as? String ?? ""
             let sidebarFill = body["sidebarFill"] as? String ?? ""
+            guard let surface = PageTheme.parseColor(bgBase), surface.cgColor.alpha == 1 else { return }
             let next = PageTheme(dark: dark, bgBase: bgBase, sidebarFill: sidebarFill)
             pageTheme = next
             if let id = desktop?.id { saveTheme(next, for: id) }

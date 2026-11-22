@@ -56,7 +56,7 @@ export async function openOutbox(path) {
           m = r.item;
         const token =
           m.method === 'bark' ? row?.bark : row?.island && row.tokens[m.state.sessionId + ':' + m.state.turn];
-        if (r.until < Date.now() || r.pair !== row?.pair || !token || hash(token) !== r.hash) {
+        if ((m.method === 'bark' && !m.state.terminal) || r.until < Date.now() || r.pair !== row?.pair || !token || hash(token) !== r.hash) {
           pending.delete(k);
           dirty = true;
           continue;

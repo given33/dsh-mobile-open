@@ -22,6 +22,7 @@ def verify(ipa, catalog_info=None):
         require(len(names) == len(archive.infolist()), "Duplicate IPA member")
         info = plistlib.loads(archive.read(APP + "Info.plist"))
         require(info["CFBundleIdentifier"] == "app.dshmobile.client" and info["CFBundleSupportedPlatforms"] == ["iPhoneOS"], "Expected an iOS device application")
+        require(info.get("UILaunchScreen", {}).get("UIColorName") == "LaunchSurface", "Missing adaptive launch surface")
         extension = APP + "PlugIns/TaskIsland.appex/"
         widget = plistlib.loads(archive.read(extension + "Info.plist"))
         require(info.get("NSSupportsLiveActivities") is True and widget["NSExtension"]["NSExtensionPointIdentifier"] == "com.apple.widgetkit-extension", "Missing Live Activity support")
@@ -44,6 +45,7 @@ def verify(ipa, catalog_info=None):
         expected = {asset.stem for asset in catalog_source.glob("dsh-*.imageset")}
         compiled = {row.get("Name") for row in json.loads(catalog_info.read_text(encoding="utf-8"))}
         require(bool(expected), "No DSH interface image sets in source")
+        require("LaunchSurface" in compiled, "Missing compiled launch color")
         missing = expected - compiled
         require(not missing, "Missing compiled DSH interface assets: " + ", ".join(sorted(missing)))
         print(f"Verified all {len(expected)} DSH interface image sets in the IPA asset catalog")

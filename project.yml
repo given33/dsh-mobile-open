@@ -11,8 +11,8 @@ settings:
     SWIFT_VERSION: '5.0'
     TARGETED_DEVICE_FAMILY: '1,2'
     IPHONEOS_DEPLOYMENT_TARGET: '17.0'
-    MARKETING_VERSION: '0.6.0'
-    CURRENT_PROJECT_VERSION: '27'
+    MARKETING_VERSION: '0.6.1'
+    CURRENT_PROJECT_VERSION: '28'
 targets:
   DSHMobile:
     type: application
@@ -33,7 +33,6 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: app.dshmobile.client
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: DSH Mobile
-        INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_NSLocalNetworkUsageDescription: 连接你电脑上正在运行的 DSH，实时显示任务进程。
         INFOPLIST_KEY_NSCameraUsageDescription: 扫描电脑上「手机连接」显示的配对二维码。
         INFOPLIST_KEY_NSMicrophoneUsageDescription: 在手机上录音并转写到聊天草稿。
@@ -42,6 +41,8 @@ targets:
     info:
       path: DSHMobile/Info.plist
       properties:
+        UILaunchScreen:
+          UIColorName: LaunchSurface
         NSSupportsLiveActivities: true
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true

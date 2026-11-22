@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { createHmac, randomUUID } from 'node:crypto';
 import { writePrivate } from './identity.mjs';
 import { openOutbox } from './task-outbox.mjs';
-import { taskReducer, view, safeID, labels } from './task-events.mjs';
+import { taskReducer, view, safeID, labels, finalReplyExcerpt, noticeText } from './task-events.mjs';
 const hex = (s) => typeof s === 'string' && /^(?:[a-f0-9]{2}){16,256}$/.test(s);
 const bad = () => {
   throw Object.assign(new Error('invalid notification setting'), { status: 400 });
@@ -79,6 +79,7 @@ export async function taskPush({ stateDir, desktopId, devices, send, live = () =
       kind: s.kind,
       title: labels[s.kind],
       method,
+      ...(method === 'bark' && s.report ? { report: s.report } : {}),
       token,
       desktopId,
     };
@@ -145,7 +146,7 @@ export async function taskPush({ stateDir, desktopId, devices, send, live = () =
     const key = s.sessionId + ':' + s.turn,
       now = Date.now(),
       gate = id + '/' + key;
-    if (r.bark && s.notify) enqueue(id, s, 'bark', r.bark);
+    if (r.bark && s.terminal) enqueue(id, s, 'bark', r.bark);
     if (!r.island) return;
     const token = r.tokens[key];
     if (token) {
@@ -197,10 +198,34 @@ export async function taskPush({ stateDir, desktopId, devices, send, live = () =
   }, 20000);
   retry.unref();
   return {
-    event(sid, e) {
+    event(sid, e, getSessionInfo) {
       if (closed || !live()) return;
-      const s = taskReducer(states.get(sid), sid, e);
+      const previous = states.get(sid);
+      if (e?.type === 'assistant/message') {
+        if (previous && !previous.terminal && previous.turn === e.data?.turn &&
+            e.seq > previous.seq && [...rows.values()].some(r => r.bark)) {
+          previous.excerpt = finalReplyExcerpt(e.data);
+          previous.seq = e.seq;
+        }
+        return;
+      }
+      const s = taskReducer(previous, sid, e);
       if (!s) return;
+      if (previous?.turn === s.turn && e.type !== 'step/start') s.excerpt = previous.excerpt;
+      if (s.terminal && [...rows.values()].some(r => r.bark)) {
+        let info;
+        try { info = getSessionInfo?.(); } catch { /* Optional host services may be unavailable. */ }
+        s.report = {
+          task: noticeText(info?.title, 48) || '未命名任务',
+          workspace: noticeText(info?.workspace, 40) || '未分组',
+          summary: (s.kind === 'completed' && s.excerpt) || s.detail || ({
+            completed: '本轮已完成，没有文字汇报。', error: '本轮执行失败，请打开会话查看原因。',
+            aborted: '本轮已取消。', blocked: '本轮受阻，未能继续执行。',
+            interrupted: '本轮已中断。', 'max-tokens': '输出达到上限，结果可能不完整。',
+          }[s.kind] ?? '本轮已结束。'),
+        };
+        delete s.excerpt;
+      }
       const key = sid + ':' + s.turn;
       recent.delete(key);
       recent.set(key, s);

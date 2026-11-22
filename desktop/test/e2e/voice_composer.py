@@ -56,6 +56,8 @@ with sync_playwright() as pw:
             const a=b.getBoundingClientRect(), r=s.getBoundingClientRect();
             return a.width>=36 && r.width>=38 && r.height>=38 && a.right<=r.left+1 && r.right<=innerWidth && Math.abs(a.y+a.height/2-r.y-r.height/2)<=3;
         }''')
+        label = card.locator('[class$=\"_triggerLabel\"]').first
+        assert label.is_visible() and label.bounding_box()['width'] > 24
     assert not page.locator('[data-sidebar-opener]').is_visible()
     print('Button is next to send at 320, 393 and 820 px.', flush=True)
 
@@ -75,19 +77,15 @@ with sync_playwright() as pw:
 
     editor = card.locator('[contenteditable=true]').first
     mic.tap()
-    pad = page.get_by_role('button', name='按住 说话')
-    pad.wait_for()
-    assert not page.evaluate("messages.some(m=>m.type==='voice-start')")
-    box = pad.bounding_box()
-    page.mouse.move(box['x'] + box['width']/2, box['y'] + box['height']/2)
-    page.mouse.down()
+    inline = page.get_by_role('button', name='结束听写')
+    inline.wait_for()
+    assert editor.is_visible() and page.evaluate('document.activeElement.isContentEditable')
+    assert page.locator('#dml-voice-hold').count() == 0
     assert page.evaluate("messages.some(m=>m.type==='voice-start')")
-    page.screenshot(path=fixture / f'voice-active-{name}.png')
-    page.mouse.move(box['x'] + 5, box['y'])
-    page.mouse.up()
-    assert page.evaluate("messages.at(-1).type==='voice-cancel'")
-    mic.tap()
-    assert not pad.is_visible()
+    page.screenshot(path=fixture / f'voice-inline-{name}.png')
+    inline.tap()
+    page.wait_for_function("document.activeElement.isContentEditable && document.activeElement.textContent.includes('测试 voice 日本語')")
+    assert not inline.is_visible()
     x, y = down()
     page.evaluate("()=>__DSH_MOBILE_BRIDGE__.voiceEvent({id:messages.filter(m=>m.type==='voice-start').at(-1).id,status:'final',text:'should not insert early'})")
     assert 'should not insert early' not in editor.inner_text()

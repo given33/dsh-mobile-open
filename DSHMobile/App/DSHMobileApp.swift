@@ -300,7 +300,7 @@ struct RootView: View {
         }
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, minHeight: 38, maxHeight: 38)
-        .background(surfaceBackground)
+        .background { surfaceBackground.ignoresSafeArea(.container, edges: .top) }
         .overlay(alignment: .bottom) { Hairline() }
     }
 

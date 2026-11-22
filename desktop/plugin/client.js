@@ -1892,18 +1892,7 @@ window.__ModuleLoader__.load({
           }
         }, [])
 
-        // Keep the sheet in the dialog top layer until its exit slide completes.
-        const dismissSheet = React.useCallback(() => {
-          const dialog = hubDialogRef.current
-          if (!dialog || dialog.dataset.closing) return
-          if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { setHubState({ open: false }); return }
-          dialog.dataset.closing = 'true'
-          const sheet = dialog.querySelector('.dml-hub-sheet')
-          const exit = sheet?.getAnimations?.().find(a => a.animationName === 'dml-hub-leave')
-          const done = () => { if (hubDialogRef.current === dialog && dialog.open) setHubState({ open: false }) }
-          if (exit) exit.finished.then(done, done)
-          else done()
-        }, [])
+        const dismissSheet = React.useCallback(() => setHubState({ open: false }), [])
         React.useLayoutEffect(() => {
           if (!snap.open) return undefined
           const dialog = hubDialogRef.current
@@ -2041,6 +2030,7 @@ window.__ModuleLoader__.load({
                     key: s.id, className: 'dml-session-row', 'data-swipe': swipe || undefined,
                     onScroll: swipe ? e => {
                       const row = e.currentTarget
+                      row.style.setProperty('--dml-action-reveal', Math.min(72, Math.max(0, row.scrollLeft)) + 'px')
                       if (row.scrollLeft < 1 || openSwipeRow.current === row) return
                       const previous = openSwipeRow.current
                       openSwipeRow.current = row

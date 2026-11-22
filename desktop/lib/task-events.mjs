@@ -1,5 +1,22 @@
-// Maps only public lifecycle metadata. Never send prompts, tool arguments, answers,
-// raw errors, filenames, workspace paths or credentials to a lock screen.
+// Live Activities use lifecycle metadata only. Bark can additionally show a bounded
+// terminal report; never serialize the transcript, reasoning, tools or raw errors.
+export function noticeText(input, limit) {
+  if (typeof input !== 'string') return '';
+  const text = input.slice(0, 4096).replace(/```[\s\S]*?(?:```|$)/g, ' ')
+    .replace(/!?(?:\[([^\]]*)\])\([^)]+\)/g, '$1').replace(/https?:\/\/\S+/gi, '[链接]')
+    .replace(/(?:Bearer\s+|(?:api[_-]?key|token|password|secret|密码|密钥)\s*[:=：]\s*)[^\s,;，。]+/gi, '[已隐藏]')
+    .replace(/\b(?:sk-|gh[pousr]_)[A-Za-z0-9_-]{8,}/g, '[已隐藏]')
+    .replace(/(?:\*\*|__|`|^#{1,6} +)/gm, '').replace(/[\s\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]+/gu, ' ').trim();
+  const chars = Array.from(text);
+  return chars.length > limit ? chars.slice(0, limit - 1).join('') + '…' : text;
+}
+
+export function finalReplyExcerpt(data) {
+  const blocks = data?.message?.content;
+  if (data?.interrupted || !Array.isArray(blocks) || blocks.some(b => b?.type === 'tool-call')) return '';
+  return noticeText(blocks.filter(b => b?.type === 'text' && typeof b.text === 'string')
+    .map(b => b.text.slice(0, 4096)).join(' '), 120);
+}
 export const labels = Object.freeze({
   started: '任务开始',
   plan: '计划模式已更新',

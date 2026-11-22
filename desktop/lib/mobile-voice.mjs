@@ -13,7 +13,8 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
   };
   const mic = make('button', 'dml-voice-button', '<svg aria-hidden="true" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3m-7-12v2a7 7 0 0 0 14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>');
   mic.type = 'button'; mic.title = '语音输入'; mic.setAttribute('aria-label', '语音输入');
-  const pad = make('button', 'dml-voice-hold', '按住 说话'); pad.type = 'button';
+  const inlineSlot = make('div', 'dml-inline-voice', '');
+  let sendButton;
   const hud = make('div', 'dml-voice-hud', '<div class="dml-voice-bubble"><div class="dml-voice-wave" aria-hidden="true">' + '<i></i>'.repeat(13) + '</div></div><div class="dml-voice-directions" aria-hidden="true"><span data-target="cancel"><b>×</b>取消</span><span data-target="preview"><b>文</b>预览文字</span></div><div class="dml-voice-dock"><span role="status"></span></div>');
   const panel = make('dialog', 'dml-voice-panel', '<div class="dml-voice-title" tabindex="-1" autofocus>语音转文字</div><div role="status"></div><textarea rows="4" aria-label="识别结果" hidden></textarea><div class="dml-voice-actions"><button type="button" data-voice-cancel>取消</button><button type="button" data-voice-record hidden>开始录音</button><button type="button" data-voice-use hidden>插入草稿</button></div>');
   panel.setAttribute('aria-label', '语音转文字'); hud.hidden = true;
@@ -32,6 +33,7 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
     if (current) {
       clearTimeout(current.watchdog); command('cancel', current); current = undefined;
     }
+    leaveInline();
     hud.hidden = true;
     if (panel.open) panel.close();
     mic.removeAttribute('data-recording'); result.value = '';
@@ -52,13 +54,13 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
     item.watchdog = setTimeout(() => {
       if (current === item) { abandon(); showToast('语音识别未响应'); }
     }, 65000);
-    document.activeElement?.closest?.('[data-composer-card] [contenteditable]')?.blur();
+    if (mode !== 'inline') document.activeElement?.closest?.('[data-composer-card] [contenteditable]')?.blur();
     mic.setAttribute('data-recording', ''); hud.removeAttribute('data-finishing');
     if (mode === 'press') {
       hud.hidden = false; hud.dataset.action = 'draft';
       caption.textContent = '正在启动麦克风…'; directions.hidden = false;
       for (const bar of bars) bar.style.transform = 'scaleY(.14)';
-    } else showPanel('tap', '正在启动麦克风…');
+    } else if (mode === 'tap') showPanel('tap', '正在启动麦克风…');
     command('start', item, position);
     return true;
   }
@@ -73,7 +75,7 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
     }, 4600);
     if (item.mode === 'press') {
       hud.setAttribute('data-finishing', ''); directions.hidden = true; hud.dataset.action = 'draft'; caption.textContent = '正在转文字…';
-    } else showPanel('wait', '正在转文字…');
+    } else if (item.mode !== 'inline') showPanel('wait', '正在转文字…');
     if (item.final !== undefined) applyFinal(item, item.final);
     else command('stop', item);
   }
@@ -83,16 +85,31 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
     if (item.action === 'preview' || item.mode === 'tap') {
       item.phase = 'preview'; mic.removeAttribute('data-recording'); result.value = text; showPanel('preview');
     } else {
-      if (!insertDraft(text, { focus: false })) showToast('无法插入当前草稿');
-      if (pad.isConnected) togglePad(false);
+      if (!insertDraft(text, { focus: item.mode === 'inline' })) showToast('无法插入当前草稿');
       abandon();
     }
   }
-  function togglePad(on) {
-    const input = mic.closest('[data-composer-card]')?.querySelector('[data-input-scroll]');
-    if (on && input) { input.before(pad); document.activeElement?.closest('[contenteditable]')?.blur(); }
-    else pad.remove();
-    mic.setAttribute('aria-pressed', String(pad.isConnected));
+  function leaveInline() {
+    if (!inlineSlot.isConnected) return;
+    if (sendButton?.isConnected) sendButton.before(mic);
+    inlineSlot.remove();
+    mic.setAttribute('aria-label', '语音输入');
+    mic.setAttribute('aria-pressed', 'false');
+    mic.title = '语音输入';
+  }
+  function startInline(position) {
+    const card = mic.closest('[data-composer-card]');
+    const editor = card?.querySelector('[contenteditable="true"]');
+    const scroll = card?.querySelector('[data-input-scroll]');
+    if (!editor || !scroll) { showPanel('ready'); return; }
+    // Still in the trusted tap: keep the system keyboard and the actual editable draft.
+    editor.focus({ preventScroll: true });
+    scroll.before(inlineSlot);
+    inlineSlot.appendChild(mic);
+    mic.setAttribute('aria-label', '结束听写');
+    mic.setAttribute('aria-pressed', 'true');
+    mic.title = '结束听写';
+    if (!start(position, 'inline')) leaveInline();
   }
   function actionAt(e, g) {
     const dx = e.clientX - g.x, dy = e.clientY - g.y;
@@ -104,14 +121,14 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
     }
     return releaseAction(dx, dy);
   }
-  for (const control of [mic, pad]) {
+  {
+    const control = mic;
     control.addEventListener('pointerdown', e => {
-      if (!e.isTrusted || !e.isPrimary || e.button !== 0 || current || gesture || readOnly()) return;
+      if (!e.isTrusted || !e.isPrimary || e.button !== 0 || (current && current.mode !== 'inline') || gesture || readOnly()) return;
       e.preventDefault(); e.stopPropagation(); control.setPointerCapture(e.pointerId);
       mic.setAttribute('data-pressed', '');
       const g = { id: e.pointerId, x: e.clientX, y: e.clientY, position: point(e) }; gesture = g;
-      if (control === pad) g.started = start(g.position, 'press');
-      else g.timer = setTimeout(() => { if (gesture === g) g.started = start(g.position, 'press'); }, 125);
+      if (!current) g.timer = setTimeout(() => { if (gesture === g) g.started = start(g.position, 'press'); }, 125);
     });
     control.addEventListener('pointermove', e => {
       if (!gesture?.started || gesture.id !== e.pointerId || !current) return;
@@ -125,9 +142,9 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
       const g = gesture; gesture = undefined; clearTimeout(g.timer); mic.removeAttribute('data-pressed');
       e.preventDefault(); e.stopPropagation();
       if (g.started) finish(actionAt(e, g));
-      else if (control === mic && Math.hypot(e.clientX - g.x, e.clientY - g.y) < 14 && !current) {
-        if (mic.closest('[data-composer-card]')?.querySelector('[data-input-scroll]')) togglePad(!pad.isConnected);
-        else showPanel('ready');
+      else if (Math.hypot(e.clientX - g.x, e.clientY - g.y) < 14) {
+        if (current?.mode === 'inline') finish('draft');
+        else if (!current) startInline(g.position);
       }
     });
     for (const type of ['pointercancel', 'lostpointercapture']) control.addEventListener(type, e => {
@@ -135,10 +152,12 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
     });
     control.addEventListener('contextmenu', e => e.preventDefault());
   }
-  pad.addEventListener('click', e => { if (e.isTrusted && e.detail === 0 && !current) showPanel('ready'); });
   mic.addEventListener('click', e => {
     e.preventDefault(); e.stopPropagation();
-    if (e.isTrusted && e.detail === 0 && !current) showPanel('ready');
+    if (e.isTrusted && e.detail === 0) {
+      if (current?.mode === 'inline') finish('draft');
+      else if (!current) showPanel('ready');
+    }
   });
   record.addEventListener('pointerdown', e => { if (e.isTrusted && e.isPrimary && e.button === 0) panelTouch = point(e); });
   record.addEventListener('pointercancel', () => { panelTouch = undefined; });
@@ -154,7 +173,7 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
   result.addEventListener('input', () => { use.disabled = !result.value.trim(); });
   use.addEventListener('click', e => {
     if (!e.isTrusted || current?.phase !== 'preview') return;
-    if (sameSession(current) && insertDraft(result.value.trim(), { focus: false })) { togglePad(false); abandon(); }
+    if (sameSession(current) && insertDraft(result.value.trim(), { focus: false })) { abandon(); }
     else showToast('无法插入当前草稿');
   });
   window.addEventListener('keydown', e => {
@@ -169,8 +188,9 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
       const card = document.querySelector('[data-composer-card]');
       const send = card && [...card.querySelectorAll('button')].reverse().find(b => b.type === 'submit' || /^(?:发送|停止|继续生成|send|stop|resume|continue)/i.test(b.getAttribute('aria-label') || b.title || ''));
       if (current && (!sameSession(current) || current.card !== card || !send)) abandon();
-      if (readOnly() || !send) { if (panel.open || gesture) abandon(); togglePad(false); mic.remove(); return; }
-      if (mic.nextElementSibling !== send) send.before(mic);
+      if (readOnly() || !send) { if (panel.open || gesture || current) abandon(); mic.remove(); return; }
+      sendButton = send;
+      if (!inlineSlot.isConnected && mic.nextElementSibling !== send) send.before(mic);
     },
     receive(data) {
       const item = current;
@@ -194,7 +214,7 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
       if (data.status === 'final') {
         const text = typeof data.text === 'string' ? data.text.trim() : '';
         // Some OS recognizers finish at a pause before the user releases their finger.
-        if (item.phase !== 'finishing') { item.final = text; return; }
+        if (item.phase !== 'finishing' && item.mode !== 'inline') { item.final = text; return; }
         applyFinal(item, text);
       }
     },
