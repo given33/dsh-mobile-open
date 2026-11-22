@@ -1,5 +1,13 @@
 # Third-party notices
 
+## Z.AI ZCode
+
+Copyright 2026 Z.AI Co., Ltd. Licensed under Apache-2.0; see [the included license](licenses/ZCode-Apache-2.0.txt).
+`lib/zcode-webview.mjs` adapts `packages/web/src/web-remote-control/app/webRemoteControlLifecycle.ts` and
+`packages/ui/src/lib/chatSessionScrollMemory.ts` from `zai-org/ZCode` at `fec975905a2abd4c07e35c40d51fa097a2258ec9`.
+The port removes TypeScript-specific interfaces and uses DSH's direct transport and per-document session IDs.
+ZCode's relay, accounts, protocol, and desktop runtime are not used.
+
 ## Enc-hanted/zcode-remote
 
 Source and interaction reference for mobile shell controls. Upstream: https://github.com/Enc-hanted/zcode-remote

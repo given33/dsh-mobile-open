@@ -89,6 +89,46 @@ with sync_playwright() as pw:
             # After failure grace, a newly issued credential must be usable immediately.
             page.evaluate("__DSH_MOBILE_BRIDGE__.credentialsChanged()")
             assert page.evaluate("__reconnects")==3
+            page.clock.fast_forward(1600)
+            lifecycle=page.evaluate("""()=>{
+              const events = (target, ...types) => types.forEach(name=>target.dispatchEvent(new Event(name)));
+              const start = [__calls, __reconnects];
+              events(window,'pageshow');
+              let state = 'hidden';
+              Object.defineProperty(document,'visibilityState',{configurable:true,get:()=>state});
+              events(document,'visibilitychange','freeze');
+              events(window,'pagehide','offline','online','pageshow');
+              __DSH_MOBILE_BRIDGE__.wakeCheck();
+              const hidden = [__calls-start[0], __reconnects-start[1]];
+              state = 'visible';
+              events(document,'visibilitychange','resume');
+              events(window,'pageshow','online');
+              __DSH_MOBILE_BRIDGE__.wakeCheck();
+              delete document.visibilityState;
+              return {hidden, resumed:[__calls-start[0], __reconnects-start[1]]};
+            }""")
+            assert lifecycle=={"hidden":[0,0],"resumed":[1,1]}, lifecycle
+            page.evaluate("""()=>{
+              __DSH_MOBILE_ROUTE_STATE__.intent=false;
+              window.mountReading=(id,height)=>{
+                document.getElementById('root').innerHTML=`<section data-conversation-session="${id}"><div data-conversation-scroll style="height:200px;overflow:auto"><div style="height:${height}px">Message</div></div></section>`;
+                __DSH_MOBILE_CORDIS__.getCurrentSessionId=()=>id;
+                __DSH_MOBILE_BRIDGE__.reportSelection();
+              };
+              window.setReading=top=>{const e=document.querySelector('[data-conversation-scroll]');e.scrollTop=top;e.dispatchEvent(new Event('scroll'));};
+              mountReading('a',2000);
+            }""")
+            page.clock.run_for(90)
+            page.evaluate("setReading(420); mountReading('b', 2000)")
+            page.clock.run_for(90)
+            page.evaluate("setReading(1800); mountReading('a', 2400)")
+            page.clock.run_for(90)
+            top = "document.querySelector('[data-conversation-scroll]').scrollTop"
+            assert page.evaluate(top)==420, page.evaluate(top)
+            page.evaluate("mountReading('b', 2600)")
+            page.clock.run_for(90)
+            assert page.evaluate(top)==2400, page.evaluate(top)
+            print(engine.name+": single true lifecycle resume and per-session scroll restoration PASS",flush=True)
             # Modal image preview isolates the background and supports Escape.
             page.evaluate("""()=>{
               const root=document.getElementById('root');root.innerHTML='<div data-conversation-scroll><img alt="sample" width="100" height="100"></div>';

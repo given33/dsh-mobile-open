@@ -33,7 +33,7 @@ $package = (Resolve-Path 'build/dsh-mobile-link-0.5.3.tgz').Path
 & $dsh plugin --profile desktop add $package
 ```
 
-若 DSH 安装在其他位置，调整 `$dsh`。Web 版使用 `dsh plugin --profile web add ./build/dsh-mobile-link-0.5.3.tgz`。
+若 DSH 安装在其他位置，调整 `$dsh`。Web 版使用 `dsh plugin --profile web add ./build/dsh-mobile-link-0.5.4.tgz`。
 
 重开 DSH，点左下角「手机连接」，开启连接，再用手机扫码。连接初次开启时先在可信局域网配对。已配对设备默认只读；需要主动发送和审批时再开启「允许手机操作」，需要输入终端指令时才启用单独的终端权限。可随时在此面板撤销配对。
 

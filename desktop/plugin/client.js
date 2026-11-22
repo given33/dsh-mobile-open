@@ -1740,6 +1740,7 @@ window.__ModuleLoader__.load({
       function MobileHubOverlay() {
         const snap = React.useSyncExternalStore(subscribeHub, getHubSnapshot)
         const [sessionFilter, setSessionFilter] = React.useState('')
+        const [taskLimits, setTaskLimits] = React.useState({})
         const [snippets, setSnippets] = React.useState(readCustomSnippets)
         const [addingSnippet, setAddingSnippet] = React.useState(false)
         const [newTitle, setNewTitle] = React.useState('')
@@ -1757,6 +1758,7 @@ window.__ModuleLoader__.load({
         const [showTurns, setShowTurns] = React.useState(false)
         const dragStartY = React.useRef(null)
         const rightFrameRef = React.useRef(null)
+        const hubDialogRef = React.useRef(null)
 
         const bridge = globalThis.__DSH_MOBILE_CORDIS__
         const sessions = bridge?.listSessions?.() ?? []
@@ -1831,11 +1833,22 @@ window.__ModuleLoader__.load({
           }
         }, [])
 
-        React.useEffect(() => {
+        React.useLayoutEffect(() => {
           if (!snap.open) return undefined
-          const onKey = (e) => { if (e.key === 'Escape') setHubState({ open: false }) }
-          window.addEventListener?.('keydown', onKey)
-          return () => window.removeEventListener?.('keydown', onKey)
+          const dialog = hubDialogRef.current
+          if (!dialog) return undefined
+          if (!dialog.open) dialog.showModal()
+          const closeOnEscape = (e) => {
+            if (!dialog.open || e.key !== 'Escape' || e.isComposing) return
+            e.preventDefault()
+            e.stopImmediatePropagation()
+            setHubState({ open: false })
+          }
+          window.addEventListener('keydown', closeOnEscape, true)
+          return () => {
+            window.removeEventListener('keydown', closeOnEscape, true)
+            if (dialog.open) dialog.close()
+          }
         }, [snap.open])
 
         React.useEffect(() => {
@@ -1846,12 +1859,6 @@ window.__ModuleLoader__.load({
           if (snap.tab === 'git') loadGit()
           if (snap.tab === 'tools') loadHostStatus()
         }, [snap.open, snap.tab, curSessionId, loadGit, loadHostStatus])
-
-        const filteredSessions = React.useMemo(() => {
-          const q = sessionFilter.trim().toLowerCase()
-          if (!q) return sessions
-          return sessions.filter(s => s.title.toLowerCase().includes(q) || s.workspaceName.toLowerCase().includes(q))
-        }, [sessions, sessionFilter])
 
         // Observe ONLY drawer/rightbar attribute flips (subtree: false) — ZERO document.body subtree
         // observation so Lexical typing and streaming chat never trigger synchronous reflows!
@@ -1941,6 +1948,33 @@ window.__ModuleLoader__.load({
 
         let tabBody = null
         if (snap.tab === 'tasks') {
+          const groups = globalThis.__DSH_MOBILE_BRIDGE__?.groupMobileTasks?.(sessions, sessionFilter) || { history: sessions }
+          const taskSections = [['approval', '待确认'], ['running', '运行中'], ['history', '历史会话']].flatMap(([key, label]) => {
+            const rows = groups[key] || []
+            if (!rows.length) return []
+            const limit = taskLimits[key] ?? (key === 'history' ? 24 : 12)
+            return [h('section', { key, className: 'dml-hub-task-group', 'aria-labelledby': 'dml-hub-tasks-' + key },
+              h('h3', { className: 'dml-hub-task-heading', id: 'dml-hub-tasks-' + key }, label, h('span', null, rows.length)),
+              h('div', { className: 'dml-hub-list' },
+                ...rows.slice(0, limit).map(s => h('button', {
+                  key: s.id,
+                  type: 'button',
+                  className: 'dml-hub-item',
+                  'data-current': s.isCurrent ? 'true' : undefined,
+                  'aria-current': s.isCurrent ? 'true' : undefined,
+                  onClick: () => { if (bridge?.openSession?.(s.id)) setHubState({ open: false }) },
+                },
+                h('div', { className: 'dml-hub-item-main' },
+                  h('span', { className: 'dml-hub-item-title' }, s.title),
+                  s.workspaceName && h('span', { className: 'dml-hub-tag' }, s.workspaceName),
+                ),
+                s.isCurrent && h('span', { className: 'dml-hub-badge', 'data-kind': 'current' }, '当前')))),
+              rows.length > limit && h('button', {
+                type: 'button', className: 'dml-hub-pill-btn dml-hub-more',
+                onClick: () => setTaskLimits(previous => ({ ...previous, [key]: limit + 24 })),
+              }, '显示更多' + label + '（' + (rows.length - limit) + '）'),
+            )]
+          })
           tabBody = h('div', { className: 'dml-hub-section' },
             h('div', { className: 'dml-hub-actions' },
               canWrite && h('button', {
@@ -1987,32 +2021,11 @@ window.__ModuleLoader__.load({
               type: 'search',
               className: 'dml-hub-input',
               value: sessionFilter,
+              'aria-label': '搜索会话标题或工作区',
               placeholder: '搜索会话标题或工作区…',
-              onChange: (e) => setSessionFilter(e.target.value),
+              onChange: (e) => { setSessionFilter(e.target.value); setTaskLimits({}) },
             }),
-            filteredSessions.length === 0
-              ? h('div', { className: 'dml-hub-empty' }, '暂无匹配的会话')
-              : h('div', { className: 'dml-hub-list' },
-                  ...filteredSessions.slice(0, 40).map(s => h('button', {
-                    key: s.id,
-                    type: 'button',
-                    className: 'dml-hub-item',
-                    'data-current': s.isCurrent ? 'true' : undefined,
-                    onClick: () => {
-                      bridge?.openSession?.(s.id)
-                      setHubState({ open: false })
-                    },
-                  },
-                  h('div', { className: 'dml-hub-item-main' },
-                    h('span', { className: 'dml-hub-item-title' }, s.title),
-                    s.workspaceName && h('span', { className: 'dml-hub-tag' }, s.workspaceName),
-                  ),
-                  h('div', { className: 'dml-hub-item-meta' },
-                    s.pendingInteraction && h('span', { className: 'dml-hub-badge', 'data-kind': 'approval' }, '待确认'),
-                    s.running && !s.pendingInteraction && h('span', { className: 'dml-hub-badge', 'data-kind': 'running' }, '运行中'),
-                    s.isCurrent && h('span', { className: 'dml-hub-badge', 'data-kind': 'current' }, '当前'),
-                  ))),
-                ),
+            ...(taskSections.length ? taskSections : [h('div', { key: 'empty', className: 'dml-hub-empty' }, '暂无匹配的会话')]),
           )
         } else if (snap.tab === 'snippets') {
           const allSnippets = [...snippets, ...BUILTIN_SNIPPETS]
@@ -2209,12 +2222,14 @@ window.__ModuleLoader__.load({
           )
         }
 
-        return h('div', {
+        return h('dialog', {
+          ref: hubDialogRef,
           className: 'dml-hub-backdrop',
-          onMouseDown: (e) => { if (e.target === e.currentTarget) setHubState({ open: false }) },
+          'aria-label': '移动端工具箱',
+          onCancel: (e) => { e.preventDefault(); setHubState({ open: false }) },
           onClick: (e) => { if (e.target === e.currentTarget) setHubState({ open: false }) },
         },
-        h('section', { className: 'dml-hub-sheet', role: 'dialog', 'aria-modal': 'true', 'aria-label': '移动端工具箱' },
+        h('section', { className: 'dml-hub-sheet' },
           h('div', {
             className: 'dml-hub-head',
             onTouchStart: (e) => { if (e.touches?.length === 1) dragStartY.current = e.touches[0].clientY },

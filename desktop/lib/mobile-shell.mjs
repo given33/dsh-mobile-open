@@ -3,6 +3,7 @@
 // native visual design tokens, typography, icons, or workflow components.
 
 import { createHash } from 'node:crypto';
+import { createChatSessionScrollMemory, createWebRemoteControlLifecycleRecovery, groupMobileTasks } from './zcode-webview.mjs';
 
 const VIEWPORT_META = '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />';
 let cachedShellHashes = null;
@@ -1205,11 +1206,24 @@ html[data-color-scheme="dark"] .dml-reader-bar {
 .dml-hub-backdrop {
   position: fixed;
   inset: 0;
-  z-index: 950;
-  background: rgba(0, 0, 0, 0.42);
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  overflow: hidden;
+}
+.dml-hub-backdrop[open] {
   display: flex;
   align-items: flex-end;
   justify-content: center;
+}
+.dml-hub-backdrop::backdrop {
+  background: rgba(0, 0, 0, 0.42);
+  animation: dml-hub-fade 150ms ease-out;
 }
 .dml-hub-sheet {
   width: min(560px, 100vw);
@@ -1222,6 +1236,12 @@ html[data-color-scheme="dark"] .dml-reader-bar {
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.22);
   overflow: hidden;
   padding-bottom: max(12px, env(safe-area-inset-bottom, 12px));
+  animation: dml-hub-enter 200ms cubic-bezier(.22,.61,.36,1);
+}
+@keyframes dml-hub-fade { from { background-color: transparent; } }
+@keyframes dml-hub-enter { from { transform: translateY(100%); } }
+@media (prefers-reduced-motion: reduce) {
+  .dml-hub-backdrop::backdrop, .dml-hub-sheet { animation: none; }
 }
 @media (prefers-color-scheme: dark) {
   .dml-hub-sheet {
@@ -1277,10 +1297,21 @@ html[data-color-scheme="dark"] .dml-reader-bar {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
   padding: 12px 14px;
 }
 .dml-hub-section { display: flex; flex-direction: column; gap: 10px; }
+.dml-hub-task-group { display: grid; gap: 6px; }
+.dml-hub-task-heading {
+  margin: 4px 0 0;
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-secondary, #73747a);
+}
+.dml-hub-more { justify-self: start; min-height: 44px; }
 .dml-hub-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .dml-hub-pill-btn {
   padding: 6px 11px;
@@ -1756,19 +1787,57 @@ export const MOBILE_SHELL_JS = `(() => {
   let scrollTopBtn = null;
   let readLineBtn = null;
   let observedScrollEl = null;
+  let observedScrollSession = '';
+  let scrollRestore = null;
+  const scrollMemory = (${createChatSessionScrollMemory.toString()})();
   let scrollBtnRaf = 0;
+  function getScrollSession(el) {
+    if (!el || document.documentElement.hasAttribute('data-dml-routing') || globalThis.__DSH_MOBILE_ROUTE_STATE__?.intent) return '';
+    const view = el.closest?.('[data-conversation-session]');
+    const id = view?.getAttribute('data-conversation-session');
+    if (!id || view.matches('[data-content-phase="hero"], [data-phase="hero"]')) return '';
+    const selected = globalThis.__DSH_MOBILE_CORDIS__?.getCurrentSessionId?.();
+    return !selected || id === selected ? id : '';
+  }
   function onReadingScroll() {
+    if (!scrollRestore && observedScrollSession && getScrollSession(observedScrollEl) === observedScrollSession) {
+      scrollMemory.save(observedScrollSession, observedScrollEl);
+    }
     lastInputAt = Date.now();
     scheduleVisualSnapshot();
     scheduleScrollBottom();
   }
+  function cancelScrollRestore() { scrollRestore = null; }
   function bindScrollEl() {
     const el = document.querySelector('[data-conversation-scroll]');
-    if (el && el !== observedScrollEl) {
-      if (observedScrollEl) observedScrollEl.removeEventListener('scroll', onReadingScroll);
+    if (el !== observedScrollEl) {
+      for (const type of ['scroll', 'touchstart', 'wheel', 'pointerdown']) {
+        const handler = type === 'scroll' ? onReadingScroll : cancelScrollRestore;
+        observedScrollEl?.removeEventListener(type, handler);
+        el?.addEventListener(type, handler, { passive: true });
+      }
+      observedScrollSession = '';
+      cancelScrollRestore();
       observedScrollEl = el;
-      el.addEventListener('scroll', onReadingScroll, { passive: true });
     }
+    const id = getScrollSession(el);
+    if (id === observedScrollSession) return el;
+    observedScrollSession = id;
+    cancelScrollRestore();
+    const saved = id && scrollMemory.read(id);
+    if (!saved) return el;
+
+    const restore = scrollRestore = {};
+    const apply = (framesLeft) => {
+      if (scrollRestore !== restore) return;
+      if (!el.isConnected || getScrollSession(el) !== id) { cancelScrollRestore(); return; }
+      const top = scrollMemory.resolve(saved, el);
+      if (el.clientHeight > 0 && el.scrollTop !== top) el.scrollTop = top;
+      // Harness can set a default scroll position on its next layout pass.
+      if (framesLeft) requestAnimationFrame(() => apply(framesLeft - 1));
+      else cancelScrollRestore();
+    };
+    apply(2);
     return el;
   }
   function updateScrollBottom() {
@@ -1812,6 +1881,7 @@ export const MOBILE_SHELL_JS = `(() => {
   function scrollToTop() {
     const el = bindScrollEl();
     if (!el) return false;
+    cancelScrollRestore();
     haptic('light');
     if (typeof el.scrollTo === 'function') el.scrollTo({ top: 0, behavior: scrollBehavior() });
     else el.scrollTop = 0;
@@ -1820,6 +1890,7 @@ export const MOBILE_SHELL_JS = `(() => {
   function scrollToBottom() {
     const el = bindScrollEl();
     if (!el) return false;
+    cancelScrollRestore();
     haptic('light');
     if (typeof el.scrollTo === 'function') {
       el.scrollTo({ top: el.scrollHeight, behavior: scrollBehavior() });
@@ -2944,8 +3015,9 @@ export const MOBILE_SHELL_JS = `(() => {
     return false;
   }
 
-  let syncCursor = '', syncRequest = null, syncTimer, pendingPoke = false, hiddenSince = 0;
+  let syncCursor = '', syncRequest = null, syncTimer, pendingPoke = false;
   let lastSyncReset = 0, activePoke = false;
+  let lifecycle;
   function followFocus() {
     const id = desktopFocus?.sessionId;
     if (!id) { lastFollowedId = null; return; }
@@ -2955,7 +3027,7 @@ export const MOBILE_SHELL_JS = `(() => {
     if (cordis?.getCurrentSessionId?.() === id || openSession(id)) lastFollowedId = id;
   }
   async function pollSync() {
-    if (syncRequest || document.visibilityState === 'hidden') return;
+    if (syncRequest || lifecycle?.isSuspended() || document.visibilityState === 'hidden') return;
     const controller = new AbortController();
     syncRequest = controller;
     const watchdog = setTimeout(() => controller.abort(), 27000);
@@ -2998,6 +3070,7 @@ export const MOBILE_SHELL_JS = `(() => {
     }
   }
   function resetSync(poke = false) {
+    if (lifecycle?.isSuspended() || document.visibilityState === 'hidden') return;
     // pageshow, visibilitychange, network and native wake events can arrive
     // together. Keep the already-running probe instead of cancelling it.
     if (syncRequest && Date.now() - lastSyncReset < 500 && (!poke || activePoke)) return;
@@ -3008,19 +3081,18 @@ export const MOBILE_SHELL_JS = `(() => {
     void pollSync();
   }
   function wakeForeground() {
-    const awayMs = hiddenSince ? Date.now() - hiddenSince : 0;
-    hiddenSince = 0;
     // Cancel any exponential WebSocket backoff immediately when returning to foreground.
     if (wsState !== 'connected' || (latestMux && latestMux.readyState >= 2)) {
       reconnect(true);
     }
-    resetSync(awayMs >= 2500);
+    resetSync(true);
     syncViewport();
     reportTheme();
     scheduleReportUi();
   }
 
   function wakeCheck() {
+    if (lifecycle?.isSuspended() || document.visibilityState === 'hidden') return;
     if (wsState !== 'connected' || (latestMux && latestMux.readyState >= 2)) {
       reconnect(true);
     }
@@ -3052,6 +3124,7 @@ export const MOBILE_SHELL_JS = `(() => {
     setKeyboard,
     applyDisplayPrefs,
     onTaskEvent,
+    groupMobileTasks: ${groupMobileTasks.toString()},
     credentialsChanged() { resetSync(); reconnectUntil = 0; if(wsState !== 'connected') reconnect(); },
     reportUi: scheduleReportUi,
     reportSelection: scheduleReportUi,
@@ -3143,26 +3216,19 @@ export const MOBILE_SHELL_JS = `(() => {
       setTimeout(() => bootObserver.disconnect(), 8000);
     }
 
-    void pollSync();
-    document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'hidden') {
+    lifecycle = (${createWebRemoteControlLifecycleRecovery.toString()})({
+      documentTarget: document, windowTarget: globalThis,
+      onSuspend() {
         captureVisualSnapshot(true);
-        hiddenSince = Date.now();
         clearTimeout(syncTimer);
-        syncRequest?.abort(); syncRequest = null;
-        return;
-      }
-      wakeForeground();
+        lastSyncReset = 0;
+        const request = syncRequest;
+        syncRequest = null;
+        request?.abort();
+      },
+      onRecover: wakeForeground,
     });
-    globalThis.addEventListener('pagehide', () => {
-      captureVisualSnapshot(true);
-    }, { passive: true });
-    globalThis.addEventListener('online', () => {
-      if (document.visibilityState !== 'hidden') wakeForeground();
-    }, { passive: true });
-    globalThis.addEventListener('pageshow', (e) => {
-      if (e?.persisted && document.visibilityState !== 'hidden') wakeForeground();
-    }, { passive: true });
+    void pollSync();
     post({ type: 'ready', version: shell.version || '' });
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start, { once: true });

@@ -1,6 +1,6 @@
 {
   "name": "dsh-mobile-link",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "private": true,
   "type": "module",
   "description": "DSH Mobile desktop side: a DSH plugin and CLI for pairing phones, following tasks and enabling phone actions over a pinned TLS link",
@@ -20,6 +20,7 @@
     "tools",
     "examples",
     "locale",
+    "licenses",
     "cordis.patch.yml",
     "README.md",
     "THIRD_PARTY_NOTICES.md"

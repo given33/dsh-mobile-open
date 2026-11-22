@@ -188,5 +188,40 @@ print(
     "legacy cold document restores same ID; no extra session (Harness may rebind a blank by its existing ID)",
     flush=True,
 )
+if os.getenv("CHECK_TASK_HUB"):
+    # Render synthetic rows in the real Cordis slot; never create tasks just to test pagination.
+    m.evaluate("""()=>{
+      const cordis=__DSH_MOBILE_CORDIS__;
+      const history=Array.from({length:65},(_,i)=>({id:'test-'+i,title:'Sample '+i,workspaceName:'Test space'}));
+      cordis.listSessions=()=>[
+        {id:'approval',title:'Approval fixture',workspaceName:'Test space',pendingInteraction:true},
+        {id:'run',title:'Running fixture',workspaceName:'Test space',running:true},
+        ...history,
+      ];
+      __DSH_MOBILE_BRIDGE__.openHub('tasks');
+    }""")
+    hub = m.get_by_role("dialog", name="移动端工具箱")
+    hub.wait_for()
+    groups = hub.locator(".dml-hub-task-group")
+    assert groups.count() == 3
+    assert groups.nth(0).get_by_text("Approval fixture").is_visible()
+    assert groups.nth(1).get_by_text("Running fixture").is_visible()
+    history = groups.nth(2)
+    assert history.locator(".dml-hub-item").count() == 24
+    history.get_by_role("button", name="显示更多历史会话（41）").click()
+    assert history.locator(".dml-hub-item").count() == 48
+    hub.get_by_role("searchbox", name="搜索会话标题或工作区").fill("space SAMPLE 64")
+    assert hub.get_by_role("button", name="Sample 64 Test space").is_visible()
+    assert groups.count() == 1
+    hub.get_by_role("searchbox").fill("")
+    for width in (320, 393, 820):
+        m.set_viewport_size({"width": width, "height": 745})
+        assert hub.evaluate("e=>e.scrollWidth<=e.clientWidth+1"), width
+    if os.getenv("TASK_HUB_SCREENSHOT"):
+        m.set_viewport_size({"width": 393, "height": 745})
+        hub.locator(".dml-hub-sheet").screenshot(path=os.environ["TASK_HUB_SCREENSHOT"], animations="disabled")
+    m.keyboard.press("Escape")
+    hub.wait_for(state="hidden")
+    print("Task Hub on real Harness: groups, 24-row pagination, search beyond the first page and widths 320/393/820 PASS", flush=True)
 b.close()
 pw.stop()

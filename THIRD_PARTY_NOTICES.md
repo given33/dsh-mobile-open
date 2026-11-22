@@ -1,5 +1,10 @@
 # Third-party notices
 
+## Z.AI ZCode
+
+The mobile lifecycle and scroll-memory port is based on ZCode source released under Apache-2.0.
+See [desktop attribution](desktop/THIRD_PARTY_NOTICES.md#zai-zcode) and the [included license](desktop/licenses/ZCode-Apache-2.0.txt).
+
 ## Enc-hanted/zcode-remote
 
 Source and interaction reference for mobile shell controls. Upstream: https://github.com/Enc-hanted/zcode-remote
