@@ -1,0 +1,745 @@
+{
+  "rpc": {
+    "session/list": {
+      "items": [
+        {
+          "sessionId": "grouped",
+          "cwd": "/example/workspace",
+          "running": false,
+          "projections": {
+            "values": {
+              "title": "梳理演示项目结构"
+            }
+          }
+        },
+        {
+          "sessionId": "plain",
+          "cwd": "/example/workspace",
+          "running": false,
+          "projections": {
+            "values": {
+              "title": "解释游标分页"
+            }
+          }
+        },
+        {
+          "sessionId": "retry",
+          "cwd": "/example/workspace",
+          "running": false,
+          "projections": {
+            "values": {
+              "title": "演示重试失败"
+            }
+          }
+        },
+        {
+          "sessionId": "question",
+          "cwd": "/example/workspace",
+          "running": true,
+          "projections": {
+            "values": {
+              "title": "撰写演示说明"
+            }
+          }
+        },
+        {
+          "sessionId": "stream",
+          "cwd": "/example/workspace",
+          "running": true,
+          "projections": {
+            "values": {
+              "title": "重构演示模块"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "streams": {
+    "session/follow:grouped": [
+      {
+        "value": {
+          "type": "snapshot",
+          "records": [
+            {
+              "type": "event",
+              "event": {
+                "seq": 1,
+                "type": "user/message",
+                "data": {
+                  "source": {
+                    "kind": "user"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "梳理演示项目结构"
+                    }
+                  ]
+                },
+                "time": 1000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 2,
+                "type": "turn/start",
+                "data": {
+                  "turn": 1
+                },
+                "time": 2000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 3,
+                "type": "assistant/message",
+                "data": {
+                  "message": {
+                    "content": [
+                      {
+                        "type": "reasoning",
+                        "text": "先读示例文档。"
+                      }
+                    ]
+                  }
+                },
+                "time": 3000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 4,
+                "type": "tool/call",
+                "data": {
+                  "name": "todo_write",
+                  "callId": "a",
+                  "arguments": "{\"todos\": [{\"content\": \"甲\", \"status\": \"pending\"}, {\"content\": \"乙\", \"status\": \"pending\"}, {\"content\": \"丙\", \"status\": \"pending\"}]}"
+                },
+                "time": 4000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 5,
+                "type": "tool/result",
+                "data": {
+                  "message": {
+                    "toolCallId": "a",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "完成演示操作"
+                      }
+                    ]
+                  }
+                },
+                "time": 5000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 6,
+                "type": "tool/call",
+                "data": {
+                  "name": "glob",
+                  "callId": "b",
+                  "arguments": "{\"pattern\": \"*.md\"}"
+                },
+                "time": 6000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 7,
+                "type": "tool/result",
+                "data": {
+                  "message": {
+                    "toolCallId": "b",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "完成演示操作"
+                      }
+                    ]
+                  }
+                },
+                "time": 7000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 8,
+                "type": "tool/call",
+                "data": {
+                  "name": "read",
+                  "callId": "c",
+                  "arguments": "{\"file_path\": \"/example/workspace/README.md\"}"
+                },
+                "time": 8000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 9,
+                "type": "tool/result",
+                "data": {
+                  "message": {
+                    "toolCallId": "c",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "完成演示操作"
+                      }
+                    ]
+                  }
+                },
+                "time": 9000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 10,
+                "type": "assistant/message",
+                "data": {
+                  "message": {
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "下面是示例阶段结论。"
+                      }
+                    ]
+                  }
+                },
+                "time": 10000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 11,
+                "type": "tool/call",
+                "data": {
+                  "name": "grep",
+                  "callId": "d",
+                  "arguments": "{\"pattern\": \"TODO\"}"
+                },
+                "time": 11000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 12,
+                "type": "tool/result",
+                "data": {
+                  "message": {
+                    "toolCallId": "d",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "完成演示操作"
+                      }
+                    ]
+                  }
+                },
+                "time": 12000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 13,
+                "type": "tool/call",
+                "data": {
+                  "name": "pwsh",
+                  "callId": "e",
+                  "arguments": "{\"description\": \"统计示例行数\"}"
+                },
+                "time": 13000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 14,
+                "type": "tool/result",
+                "data": {
+                  "message": {
+                    "toolCallId": "e",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "完成演示操作"
+                      }
+                    ]
+                  }
+                },
+                "time": 14000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 15,
+                "type": "job/settled",
+                "data": {
+                  "toolCall": {
+                    "callId": "e"
+                  },
+                  "detail": "exit: 0"
+                },
+                "time": 15000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 16,
+                "type": "tool/call",
+                "data": {
+                  "name": "read",
+                  "callId": "f",
+                  "arguments": "{\"file_path\": \"/example/workspace/notes.md\"}"
+                },
+                "time": 16000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 17,
+                "type": "tool/result",
+                "data": {
+                  "message": {
+                    "toolCallId": "f",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "完成演示操作"
+                      }
+                    ]
+                  }
+                },
+                "time": 17000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 18,
+                "type": "tool/call",
+                "data": {
+                  "name": "todo_write",
+                  "callId": "g",
+                  "arguments": "{\"todos\": [{\"content\": \"甲\", \"status\": \"pending\"}, {\"content\": \"乙\", \"status\": \"pending\"}, {\"content\": \"丙\", \"status\": \"pending\"}]}"
+                },
+                "time": 18000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 19,
+                "type": "tool/result",
+                "data": {
+                  "message": {
+                    "toolCallId": "g",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "完成演示操作"
+                      }
+                    ]
+                  }
+                },
+                "time": 19000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 20,
+                "type": "tool/call",
+                "data": {
+                  "name": "todo_write",
+                  "callId": "h",
+                  "arguments": "{\"todos\": [{\"content\": \"甲\", \"status\": \"completed\"}, {\"content\": \"乙\", \"status\": \"completed\"}, {\"content\": \"丙\", \"status\": \"completed\"}]}"
+                },
+                "time": 20000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 21,
+                "type": "tool/result",
+                "data": {
+                  "message": {
+                    "toolCallId": "h",
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "完成演示操作"
+                      }
+                    ]
+                  }
+                },
+                "time": 21000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 22,
+                "type": "assistant/message",
+                "data": {
+                  "message": {
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "## 结论\n演示任务完成。"
+                      }
+                    ]
+                  }
+                },
+                "time": 22000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 23,
+                "type": "turn/end",
+                "data": {
+                  "reason": {
+                    "kind": "completed"
+                  }
+                },
+                "time": 23000
+              }
+            }
+          ],
+          "cursor": 23,
+          "hasMore": false
+        }
+      }
+    ],
+    "session/follow:plain": [
+      {
+        "value": {
+          "type": "snapshot",
+          "records": [
+            {
+              "type": "event",
+              "event": {
+                "seq": 1,
+                "type": "user/message",
+                "data": {
+                  "source": {
+                    "kind": "user"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "解释游标分页"
+                    }
+                  ]
+                },
+                "time": 1000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 2,
+                "type": "turn/start",
+                "data": {
+                  "turn": 1
+                },
+                "time": 2000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 3,
+                "type": "assistant/message",
+                "data": {
+                  "message": {
+                    "content": [
+                      {
+                        "type": "reasoning",
+                        "text": "思考示例。"
+                      },
+                      {
+                        "type": "text",
+                        "text": "游标分页从上一页的游标开始。"
+                      }
+                    ]
+                  }
+                },
+                "time": 3000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 4,
+                "type": "turn/end",
+                "data": {
+                  "reason": {
+                    "kind": "completed"
+                  }
+                },
+                "time": 4000
+              }
+            }
+          ],
+          "cursor": 4,
+          "hasMore": false
+        }
+      }
+    ],
+    "session/follow:retry": [
+      {
+        "value": {
+          "type": "snapshot",
+          "records": [
+            {
+              "type": "event",
+              "event": {
+                "seq": 1,
+                "type": "user/message",
+                "data": {
+                  "source": {
+                    "kind": "user"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "演示重试失败"
+                    }
+                  ]
+                },
+                "time": 1000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 2,
+                "type": "turn/start",
+                "data": {
+                  "turn": 1
+                },
+                "time": 2000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 3,
+                "type": "llm/retry",
+                "data": {
+                  "retryId": "demo-retry",
+                  "retry": 2,
+                  "maxRetries": 5,
+                  "delayMs": 100
+                },
+                "time": 3000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 4,
+                "type": "llm/retry-started",
+                "data": {
+                  "retryId": "demo-retry"
+                },
+                "time": 4000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 5,
+                "type": "llm/retry",
+                "data": {
+                  "retryId": "demo-retry",
+                  "retry": 5,
+                  "maxRetries": 5,
+                  "delayMs": 250
+                },
+                "time": 5000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 6,
+                "type": "turn/end",
+                "data": {
+                  "reason": {
+                    "kind": "error",
+                    "error": {
+                      "code": "SERVER",
+                      "message": "演示服务不可用"
+                    }
+                  }
+                },
+                "time": 6000
+              }
+            }
+          ],
+          "cursor": 6,
+          "hasMore": false
+        }
+      }
+    ],
+    "session/follow:question": [
+      {
+        "value": {
+          "type": "snapshot",
+          "records": [
+            {
+              "type": "event",
+              "event": {
+                "seq": 1,
+                "type": "user/message",
+                "data": {
+                  "source": {
+                    "kind": "user"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "撰写演示说明"
+                    }
+                  ]
+                },
+                "time": 1000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 2,
+                "type": "turn/start",
+                "data": {
+                  "turn": 1
+                },
+                "time": 2000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 3,
+                "type": "tool/call",
+                "data": {
+                  "name": "ask_user_question",
+                  "callId": "demo-question",
+                  "arguments": "{\"questions\": [{\"question\": \"示例文档用哪种语言？\"}]}"
+                },
+                "time": 3000
+              }
+            }
+          ],
+          "cursor": 3,
+          "hasMore": false
+        }
+      }
+    ],
+    "session/follow:stream": [
+      {
+        "value": {
+          "type": "snapshot",
+          "records": [
+            {
+              "type": "event",
+              "event": {
+                "seq": 1,
+                "type": "user/message",
+                "data": {
+                  "source": {
+                    "kind": "user"
+                  },
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "重构演示模块"
+                    }
+                  ]
+                },
+                "time": 1000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 2,
+                "type": "turn/start",
+                "data": {
+                  "turn": 1
+                },
+                "time": 2000
+              }
+            },
+            {
+              "type": "event",
+              "event": {
+                "seq": 3,
+                "type": "assistant/message",
+                "data": {
+                  "message": {
+                    "content": [
+                      {
+                        "type": "text",
+                        "text": "示例阶段回复已完成。"
+                      }
+                    ]
+                  }
+                },
+                "time": 3000
+              }
+            }
+          ],
+          "cursor": 3,
+          "hasMore": false,
+          "assistantStream": {
+            "revision": 2,
+            "activeAttempt": {
+              "attemptId": "demo-live",
+              "turn": 1,
+              "step": 2,
+              "startedAfterSeq": 3,
+              "nextIndex": 1,
+              "stream": [
+                {
+                  "type": "tool-call-chunks",
+                  "index": 0,
+                  "id": "pending-tool",
+                  "name": "pwsh",
+                  "args": [
+                    "{"
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    ]
+  }
+}

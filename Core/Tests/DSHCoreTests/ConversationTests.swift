@@ -1,14 +1,12 @@
 import XCTest
 @testable import DSHCore
 
-/// Uses the synthetic fixture recorded from an isolated DSH 0.2.1-rc.3 host
-/// (desktop/test/fixtures/demo.json): five sessions covering a finished
-/// multi-step turn, a plain answer, a failed turn with retries, a pending
-/// question and a turn still streaming when the recording stopped.
+/// Fabricated protocol events exercise grouped tools, retry, pending input and streaming.
+/// No recorded conversations or real host metadata are required.
 final class ConversationTests: XCTestCase {
     static let fixture: JSON = {
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        let data = try! Data(contentsOf: root.appendingPathComponent("desktop/test/fixtures/demo.json"))
+        let url = Bundle.module.url(forResource: "Conversation", withExtension: "json")!
+        let data = try! Data(contentsOf: url)
         return try! JSON.parse(data)
     }()
 
@@ -29,7 +27,7 @@ final class ConversationTests: XCTestCase {
         let (row, turns) = session("梳理")
         XCTAssertEqual(turns.count, 1)
         let turn = turns[0]
-        XCTAssertEqual(turn.opening.map(\.text), ["梳理一下这个项目的结构，找出还没做完的地方，给出改进建议"])
+        XCTAssertEqual(turn.opening.map(\.text), ["梳理演示项目结构"])
         XCTAssertEqual(turn.outcome, .completed)
         // reasoning+plan+glob+read | stage reply | grep+pwsh+read+plan×2 | final answer
         XCTAssertEqual(turn.elements.map { e -> String in
@@ -39,7 +37,7 @@ final class ConversationTests: XCTestCase {
         XCTAssertTrue(g.allSatisfy(\.closed))
         XCTAssertEqual(g[0].title(mode: .standard), "更新了计划，已搜索代码，已读取文件")
         XCTAssertEqual(g[1].title(mode: .standard), "更新了计划，已搜索代码，执行了命令等")
-        XCTAssertEqual(replies(turn)[0].text, "项目分为编辑器、存储与同步、界面三个模块，结构清晰。接下来看看还有哪些未完成的工作。")
+        XCTAssertEqual(replies(turn)[0].text, "下面是示例阶段结论。")
         XCTAssertTrue(replies(turn)[1].text.hasPrefix("## 结论"))
         XCTAssertTrue(turn.foldable)
         XCTAssertEqual(turn.finalReplyID, replies(turn)[1].id)
@@ -54,7 +52,7 @@ final class ConversationTests: XCTestCase {
         XCTAssertEqual(read.state, .ok)
         let pwsh = tools.first { $0.name == "pwsh" }!
         XCTAssertEqual(pwsh.title, "运行命令")
-        XCTAssertEqual(pwsh.summary(cwd: row.cwd), "统计源码行数")
+        XCTAssertEqual(pwsh.summary(cwd: row.cwd), "统计示例行数")
         XCTAssertEqual(pwsh.exitCode, 0)
         XCTAssertEqual(tools.first { $0.name == "grep" }!.summary(), "TODO")
         let plan = tools.first { $0.name == "todo_write" }!
@@ -73,7 +71,7 @@ final class ConversationTests: XCTestCase {
     }
 
     func testFailedTurnWithRetries() {
-        let (_, turns) = session("把 main")
+        let (_, turns) = session("演示重试失败")
         let turn = turns[0]
         guard case .failed(_, let code) = turn.outcome else { return XCTFail("\(turn.outcome)") }
         XCTAssertEqual(code, "SERVER")
@@ -92,9 +90,9 @@ final class ConversationTests: XCTestCase {
         XCTAssertEqual(turn.outcome, .running)
         let g = groups(turn)[0]
         XCTAssertFalse(g.closed)
-        XCTAssertEqual(g.title(mode: .standard), "等待你的操作 · 发布说明用哪种语言？")
+        XCTAssertEqual(g.title(mode: .standard), "等待你的操作 · 示例文档用哪种语言？")
         XCTAssertEqual(g.title(mode: .compact), "等待你的操作")
-        XCTAssertEqual(g.tools[0].summary(), "发布说明用哪种语言？")
+        XCTAssertEqual(g.tools[0].summary(), "示例文档用哪种语言？")
     }
 
     func testLiveTurnFollowsTheStream() {
@@ -106,8 +104,8 @@ final class ConversationTests: XCTestCase {
         XCTAssertFalse(open.closed)
         XCTAssertTrue(open.title(mode: .compact).hasPrefix("准备运行命令"), open.title(mode: .compact))
         XCTAssertEqual(open.tools.last?.state, .preparing)
-        // The stage reply streamed before the edit is already a settled reply.
-        XCTAssertTrue(replies(turn).contains { $0.text.contains("独立的队列类") })
+        // A settled stage reply remains visible beside a newly streaming tool.
+        XCTAssertTrue(replies(turn).contains { $0.text.contains("示例阶段回复已完成。") })
     }
 
     func testCategoryNamesAndJoins() {
