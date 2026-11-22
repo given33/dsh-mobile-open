@@ -33,7 +33,7 @@ with sync_playwright() as pw:
             payload.update(status='ok', code=95, day=False, time=timestamp - (7200 if count > 1 else 0), temp=18)
         route.fulfill(json=payload)
     page.route('**/mobile/v1/weather', mock_weather)
-    page.add_init_script("""window.__DSH_NATIVE_PANEL_HUB__=1;window.__DSH_MOBILE_LAUNCH__={mode:'new'};
+    page.add_init_script("""window.__DSH_NATIVE_PANEL_HUB__=1;window.__DSH_NATIVE_VOICE__=1;window.__DSH_MOBILE_LAUNCH__={mode:'new'};
         window.geoCalls=0;Object.defineProperty(navigator,'geolocation',{get(){window.geoCalls++;throw Error('phone location accessed')}});
         window.hubReports=[];window.webkit={messageHandlers:{dshMobile:{postMessage(m){if(m.type==='secondary-hub') hubReports.push(m)}}}};""")
     page.reload(wait_until='domcontentloaded')
@@ -51,6 +51,11 @@ with sync_playwright() as pw:
     for width,height in [(320,568),(393,745),(820,900),(393,745)]:
         page.set_viewport_size({'width':width,'height':height})
         page.wait_for_function("""() => {const box=s=>document.querySelector(s)?.getBoundingClientRect(); const c=box('[data-composer-card]'), v=box('[data-conversation-scroll]');return c && v && Math.abs(c.y+c.height/2-v.y-v.height/2)<2;}""")
+        mic = page.get_by_role('button', name='语音输入', exact=True)
+        expect(mic).to_have_count(1)
+        expect(mic).to_be_visible()
+        mic.evaluate("""m => {const next=m.nextElementSibling, a=m.getBoundingClientRect(), b=next.getBoundingClientRect();
+          if (!(next.type==='submit' || /发送|send/i.test(next.ariaLabel || next.title)) || a.width<36 || a.right>b.left+1 || b.right>innerWidth+1 || Math.abs(a.y+a.height/2-b.y-b.height/2)>3) throw Error('mic not immediately left of send');}""")
     # Capture actual changing frames from the official canvas, not just its presence.
     canvas=page.locator('canvas[data-home-whale]');canvas.wait_for()
     page.wait_for_function("performance.getEntriesByType('resource').some(r=>r.name.includes('breach-atlas'))")

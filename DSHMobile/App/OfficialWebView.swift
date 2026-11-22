@@ -230,8 +230,9 @@ struct OfficialWebView: UIViewRepresentable {
         // Native chrome owns only the leading opener. This runs before Harness paints,
         // even when the paired desktop still serves an older mobile plugin.
         private static let nativeNavigation = """
-        (()=>{const mount=()=>{const root=document.documentElement;if(!root)return false;
-        globalThis.__DSH_NATIVE_PANEL_HUB__=1;globalThis.__DSH_NATIVE_VOICE__=1;root.setAttribute('data-dml-native-nav','');const s=document.createElement('style');
+        (()=>{globalThis.__DSH_NATIVE_PANEL_HUB__=1;globalThis.__DSH_NATIVE_VOICE__=1;
+        const mount=()=>{const root=document.documentElement;if(!root)return false;
+        root.setAttribute('data-dml-native-nav','');const s=document.createElement('style');
         s.textContent='[data-sidebar-opener]{display:none!important}';root.appendChild(s);return true;};
         if(!mount()){const o=new MutationObserver(()=>{if(mount())o.disconnect()});o.observe(document,{childList:true});}})();
         """
