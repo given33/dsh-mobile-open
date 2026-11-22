@@ -63,6 +63,10 @@ for test in testOfficialDesktopUILoadsAndTogglesSidebarDrawer testOfficialDeskto
       mask_test_log "$log" | tail -85
       exit 1
     }
-  grep -Fq '** TEST SUCCEEDED **' "$log"
-  grep -F "$test]' passed" "$log"
+  if ! grep -Fq '** TEST SUCCEEDED **' "$log" || ! grep -Eq "Test Case .*${test}.* passed" "$log"; then
+    echo "Expected executed XCTest did not report a pass: $test" >&2
+    mask_test_log "$log" | tail -85
+    exit 1
+  fi
+  grep -E "Test Case .*${test}.* passed" "$log"
 done

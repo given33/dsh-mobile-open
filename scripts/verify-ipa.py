@@ -1,8 +1,9 @@
-"""Fail packaging if the iOS device binary or either app icon is missing."""
+"""Fail packaging if the iOS device binary or expected assets are missing."""
+import argparse
+import json
 import plistlib
-import sys
 import zipfile
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 
 APP = "Payload/DSHMobile.app/"
 PNG = b"\x89PNG\r\n\x1a\n"
@@ -13,7 +14,7 @@ def require(condition, message):
         raise SystemExit(message)
 
 
-def verify(ipa):
+def verify(ipa, catalog_info=None):
     with zipfile.ZipFile(ipa) as archive:
         require(archive.testzip() is None, "Corrupt IPA")
         names = set(archive.namelist())
@@ -34,6 +35,19 @@ def verify(ipa):
             require(name in names and archive.read(name).startswith(PNG), f"Missing {platform} icon bitmap")
         print(f"Verified iOS {info['CFBundleShortVersionString']} build {info['CFBundleVersion']}: arm64 device binary and iPhone/iPad icons")
 
+    if catalog_info is not None:
+        catalog_source = Path(__file__).resolve().parents[1] / "DSHMobile" / "Assets.xcassets"
+        expected = {asset.stem for asset in catalog_source.glob("dsh-*.imageset")}
+        compiled = {row.get("Name") for row in json.loads(catalog_info.read_text(encoding="utf-8"))}
+        require(bool(expected), "No DSH interface image sets in source")
+        missing = expected - compiled
+        require(not missing, "Missing compiled DSH interface assets: " + ", ".join(sorted(missing)))
+        print(f"Verified all {len(expected)} DSH interface image sets in the IPA asset catalog")
+
 
 if __name__ == "__main__":
-    verify(sys.argv[1])
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("ipa", type=Path)
+    parser.add_argument("--catalog-info", type=Path, help="Output of assetutil --info for the packaged Assets.car")
+    args = parser.parse_args()
+    verify(args.ipa, args.catalog_info)

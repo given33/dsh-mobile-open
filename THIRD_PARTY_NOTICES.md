@@ -28,9 +28,9 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
 
-## DeepSeek Harness theme
+## DeepSeek Harness theme and interface glyphs
 
-Theme tokens used in the iOS client. Upstream package: @deepseek-ai/dsh-client-ui-theme 0.2.2-rc.5.
+Theme tokens and interface glyphs used in the iOS client. Upstream packages: @deepseek-ai/dsh-client-ui-theme and @deepseek-ai/dsh-client-ui-primitives.
 
 ```text
 MIT License
@@ -57,3 +57,5 @@ SOFTWARE.
 ```
 
 The desktop host serves the installed Harness frontend at runtime. That frontend, plugin bundles installed by other vendors, and model services are not included in this source distribution.
+
+The iOS app icon uses the DeepSeek Harness desktop whale artwork. DeepSeek branding belongs to its respective owner and is not covered by the project's own MIT license. This project is not an official DeepSeek release.
