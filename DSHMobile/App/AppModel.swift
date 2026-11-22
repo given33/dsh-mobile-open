@@ -743,6 +743,10 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
 
     func removeCurrent() {
         guard let current = desktop else { return }
+        if !ephemeral, let endpoint=browser?.endpoint ?? current.preferred ?? current.endpoints.first {
+            let channel=PinnedTransport(fingerprint:current.fingerprint)
+            Task {await LinkClient(transport:channel,base:endpoint.baseURL,token:current.token).unpair();channel.invalidate()}
+        }
         cancelDocumentDeadline()
         endBackgroundKeepAlive()
         discardFrame(current.id)
@@ -751,6 +755,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         recoveryTask?.cancel()
         generation = UUID()
         browser = nil
+        UserDefaults.standard.removeObject(forKey:"dsh.island."+current.id)
         taskPush.bind(nil,nil)
         desktop = nil
         linkInterrupted = false

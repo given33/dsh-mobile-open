@@ -53,14 +53,14 @@ function pinnedRequest(port, fingerprint, { method = 'GET', path, token, body })
   });
 }
 
-async function start(t) {
+async function start(t, notifications) {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-link-srv-'));
   const harness = await fakeHarness(t);
   const identity = await loadIdentity(dir, { name: '测试电脑' });
   const devices = await new DeviceRegistry(dir).load();
   const codes = new PairingCodes();
   const events = [];
-  const link = createLinkServer({ identity, devices, codes, upstream: httpUpstream(await exchangeLaunchURL(harness.url)), log: e => events.push(e) });
+  const link = createLinkServer({ notifications, identity, devices, codes, upstream: httpUpstream(await exchangeLaunchURL(harness.url)), log: e => events.push(e) });
   const { port } = await link.listen(0, '127.0.0.1');
   // One hook, in order: stop serving, stop the fake host, then delete files (Windows refuses to delete open files).
   t.after(async () => { await link.close(); await harness.close(); await rm(dir, { recursive: true, force: true, maxRetries: 5 }); });
@@ -143,4 +143,18 @@ test('frame policy', () => {
   assert.equal(checkClientFrame({ type: 'cancel', streamId: 'a' }, open, policy), 'ok');
   assert.equal(checkClientFrame({ type: 'cancel', streamId: 'zz' }, open, policy), 'unknown-stream');
   assert.equal(checkClientFrame({ type: 'open', streamId: 'c', endpoint: 'job/list', payload: { args: [] } }, open, policy), 'bad-args');
+});
+
+test('notification settings authorize the paired device, not the recipient named by the client', async t => {
+  const updates = [];
+  const s = await start(t, {status: id => ({id}), configure: async (id, body) => updates.push([id,body.op])});
+  const path = '/mobile/v1/task-notifications';
+  const req = opts => pinnedRequest(s.port, s.identity.fingerprint, {path,...opts});
+  assert.equal((await req({})).status, 401);
+  const {json:{token}} = await pair(s);
+  assert.equal((await req({token})).json.id, 'iphone-test-0001');
+  assert.equal((await req({method:'POST',token,body:{id:'different-phone',op:'island',enabled:true}})).status, 200);
+  assert.deepEqual(updates,[['iphone-test-0001','island']]);
+  assert.equal((await req({method:'POST',token,body:{padding:'a'.repeat(4100)}})).status, 413);
+  assert.equal(updates.length,1);
 });

@@ -167,6 +167,7 @@ test('official browser session uses a separate host-only cookie, mobile shell as
   for (const flag of ['Path=/', 'Secure', 'HttpOnly', 'SameSite=Strict']) assert.ok(setCookie.includes(flag));
   assert.ok(!setCookie.includes(token));
   const cookie = setCookie.split(';')[0];
+  assert.equal((await request('/mobile/v1/task-notifications', { cookie })).status, 401, 'WebView cookies cannot manage native delivery credentials');
   assert.equal((await request('/mobile/v1/web-session', { method: 'POST', cookie })).status, 401);
 
   const page = await request('/', { cookie });
@@ -728,6 +729,7 @@ test('versioned shell assets & official bundles negotiate Brotli immutable cachi
   const setCookie = started.headers['set-cookie'][0];
   assert.match(setCookie, /Max-Age=604800/, 'browser cookie TTL should be 7 days for instant cold relaunch');
   const cookie = setCookie.split(';')[0];
+  assert.equal((await request('/mobile/v1/task-notifications', { cookie })).status, 401, 'WebView cookies cannot manage native delivery credentials');
 
   // 1. HTML injects content-hashed shell URLs; versioned requests get immutable + Brotli!
   const page = await request('/', { cookie, headers: { 'Accept-Encoding': 'br, gzip' } });

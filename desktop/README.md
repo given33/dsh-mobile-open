@@ -46,3 +46,7 @@ $package = (Resolve-Path 'build/dsh-mobile-link-0.6.0.tgz').Path
 跨网优先使用自己的私人组网。如需公网入口，使用由你控制的 TCP 透传中继，保持加密流端到端传输，并在 `cordis.patch.yml` 的插件配置中设置 `extraHosts`。示例地址 `203.0.113.12:443` 仅作格式演示，需换成你的地址。本项目没有预置公网中继。不要把配置文件、状态目录或配对二维码发给他人。
 
 Windows 可另外开启[远程启动组件](tools/WINDOWS-WAKE.md)，默认关闭。
+
+## 可选：推送任务状态到手机
+
+支持自建 Bark 与 iOS 实时活动，使用独立签名通道，不需要开放宿主 API。配置 `push-relay.json` 的位置、签名要求和测试步骤见 [部署指南](../deploy/task-push/README.md)。
