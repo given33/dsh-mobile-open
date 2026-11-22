@@ -1089,7 +1089,8 @@ test('v0.5.1 zero-flash visual snapshot curtain, zero-reflow composer, zcode-rem
   assert.doesNotMatch(MOBILE_SHELL_CSS, /body\[data-dsh-keyboard-open\]\s+\[data-composer-seat\]/);
   assert.match(MOBILE_SHELL_CSS, /#dml-composer-expand/);
   assert.match(MOBILE_SHELL_CSS, /data-dml-composer-full="true"/);
-  assert.match(MOBILE_SHELL_CSS, /\.dml-readline/);
+  assert.match(MOBILE_SHELL_CSS, /_toBottomSlot/);
+  assert.doesNotMatch(MOBILE_SHELL_CSS, /\.dml-readline/);
   assert.match(MOBILE_SHELL_CSS, /data-dml-amoled="true"/);
   assert.match(MOBILE_SHELL_CSS, /\.dml-turn-highlight/);
 

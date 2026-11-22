@@ -320,6 +320,10 @@ export function injectMobileShell(html, meta = {}) {
   return out;
 }
 
+// Prefer the host's own tail button: unlike a raw DOM scroll it resumes tail following.
+const HOST_TAIL = '#root [data-conversation-content] :is([class$="_toBottomSlot"] > button, button[aria-label="回到底部"], button[aria-label="Back to bottom"])';
+const SCROLL_BLOCKED = 'html:is([data-dml-routing], [data-dml-snap-cover], [data-dml-composer-full], [data-dml-popup-open], :has(dialog[open], [role="dialog"][aria-modal="true"]:not([hidden], [aria-hidden="true"], [data-state="closed"]), .dml-hub-backdrop:not(dialog), .dsh-lightbox, [data-trigger-menu], [data-sidebar-drawer]:not([data-sidebar-collapsed]), [data-rightbar-fullscreen], body[data-dsh-keyboard-open]))';
+
 export const MOBILE_SHELL_CSS = `/* DSH Mobile shell: preserves 100% native DSH styling while polishing iOS layout, popups, and 120Hz smoothness. */
 :root, html, body {
   /* Replace expensive 40px Gaussian backdrop blurs on iOS WKWebView with opaque elevated surfaces for 120Hz smoothness. */
@@ -772,11 +776,9 @@ html[data-dml-native-kb="true"] #dml-voice-panel {
   padding: 0;
   cursor: pointer;
   z-index: 40;
-  opacity: 0;
-  pointer-events: none;
-  will-change: transform, opacity;
-  transform: translate3d(0, calc(-1 * var(--dml-kb, 0px) + 8px), 0) scale(0.92);
-  transition: opacity 180ms ease, transform var(--dml-kb-dur, 220ms) cubic-bezier(0.32, 0.72, 0, 1);
+  display: none;
+  transform: translate3d(0, calc(-1 * var(--dml-kb, 0px)), 0);
+  transition: transform var(--dml-kb-dur, 220ms) cubic-bezier(0.32, 0.72, 0, 1);
 }
 @media (prefers-color-scheme: dark) {
   .dsh-scroll-bottom {
@@ -786,19 +788,15 @@ html[data-dml-native-kb="true"] #dml-voice-panel {
   }
 }
 .dsh-scroll-bottom[data-visible="true"] {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translate3d(0, calc(-1 * var(--dml-kb, 0px)), 0) scale(1);
+  display: flex;
 }
 .dsh-scroll-bottom:active {
   transform: translate3d(0, calc(-1 * var(--dml-kb, 0px)), 0) scale(0.92);
 }
-[data-content-phase="hero"] .dsh-scroll-bottom,
-[data-phase="hero"] .dsh-scroll-bottom,
-[data-content-phase="hero"] .dsh-scroll-top,
-[data-phase="hero"] .dsh-scroll-top {
-  opacity: 0 !important;
-  pointer-events: none !important;
+html:has(${HOST_TAIL}) .dsh-scroll-bottom,
+${SCROLL_BLOCKED} :is(.dsh-scroll-bottom, .dsh-scroll-top),
+${SCROLL_BLOCKED} ${HOST_TAIL} {
+  display: none !important;
 }
 
 .dsh-scroll-bottom[data-running="true"]::after {
@@ -832,11 +830,9 @@ html[data-dml-native-kb="true"] #dml-voice-panel {
   padding: 0;
   cursor: pointer;
   z-index: 40;
-  opacity: 0;
-  pointer-events: none;
-  will-change: transform, opacity;
-  transform: translate3d(0, calc(-1 * var(--dml-kb, 0px) + 8px), 0) scale(0.92);
-  transition: opacity 180ms ease, transform var(--dml-kb-dur, 220ms) cubic-bezier(0.32, 0.72, 0, 1);
+  display: none;
+  transform: translate3d(0, calc(-1 * var(--dml-kb, 0px)), 0);
+  transition: transform var(--dml-kb-dur, 220ms) cubic-bezier(0.32, 0.72, 0, 1);
 }
 @media (prefers-color-scheme: dark) {
   .dsh-scroll-top {
@@ -846,42 +842,9 @@ html[data-dml-native-kb="true"] #dml-voice-panel {
   }
 }
 .dsh-scroll-top[data-visible="true"] {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translate3d(0, calc(-1 * var(--dml-kb, 0px)), 0) scale(1);
+  display: flex;
 }
 .dsh-scroll-top:active { transform: translate3d(0, calc(-1 * var(--dml-kb, 0px)), 0) scale(0.92); }
-
-/* Streaming reading position pill ("新内容 ↓") adapted from zcode-remote, zero React DOM mutation. */
-.dml-readline {
-  position: fixed;
-  left: 50%;
-  bottom: calc(var(--dml-seat-h, 112px) + 14px);
-  z-index: 39;
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 12px;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, var(--dsw-alias-state-business-primary, #4176e6) 45%, transparent);
-  background: var(--dsw-specific-card, #28292e);
-  color: var(--dsw-alias-state-business-primary, #60a5fa);
-  font-size: 12px;
-  line-height: 16px;
-  font-weight: 600;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.22);
-  cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
-  will-change: transform, opacity;
-  transform: translate3d(-50%, calc(-1 * var(--dml-kb, 0px) + 8px), 0);
-  transition: opacity 180ms ease, transform var(--dml-kb-dur, 220ms) cubic-bezier(0.32, 0.72, 0, 1);
-}
-.dml-readline[data-visible="true"] {
-  opacity: 1;
-  pointer-events: auto;
-  transform: translate3d(-50%, calc(-1 * var(--dml-kb, 0px)), 0);
-}
 
 /* Expandable fullscreen composer toggle & expanded editor layout (adapted from zcode-remote). */
 #dml-composer-expand {
@@ -1262,6 +1225,8 @@ html[data-color-scheme="dark"] .dml-reader-bar {
   display: flex;
   align-items: flex-end;
   justify-content: center;
+  box-sizing: border-box;
+  padding-bottom: var(--dml-kb, 0px);
 }
 .dml-hub-backdrop::backdrop {
   background: rgba(0, 0, 0, 0.42);
@@ -1269,7 +1234,10 @@ html[data-color-scheme="dark"] .dml-reader-bar {
 }
 .dml-hub-sheet {
   width: min(560px, 100vw);
-  max-height: 82dvh;
+  height: min(76vh, 680px);
+  height: min(76dvh, 680px);
+  max-height: calc(100% - 12px);
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   border-radius: 20px 20px 0 0;
@@ -1293,6 +1261,7 @@ html[data-color-scheme="dark"] .dml-reader-bar {
   }
 }
 .dml-hub-head {
+  flex: 0 0 auto;
   padding: 8px 14px 10px;
   border-bottom: 1px solid var(--dsw-alias-border-l2, rgba(128, 128, 138, 0.18));
 }
@@ -1310,6 +1279,8 @@ html[data-color-scheme="dark"] .dml-reader-bar {
 }
 .dml-hub-tab {
   flex: 1 1 0;
+  min-width: 0;
+  min-height: 40px;
   padding: 7px 6px;
   border-radius: 10px;
   border: 0;
@@ -1325,6 +1296,7 @@ html[data-color-scheme="dark"] .dml-reader-bar {
   font-weight: 600;
 }
 .dml-hub-close {
+  flex: 0 0 auto;
   width: 30px;
   height: 30px;
   border-radius: 999px;
@@ -1336,7 +1308,7 @@ html[data-color-scheme="dark"] .dml-reader-bar {
   cursor: pointer;
 }
 .dml-hub-body {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
@@ -1344,6 +1316,15 @@ html[data-color-scheme="dark"] .dml-reader-bar {
   padding: 12px 14px;
 }
 .dml-hub-section { display: flex; flex-direction: column; gap: 10px; }
+.dml-session-row { display: flex; gap: 6px; align-items: stretch; }
+.dml-session-row > .dml-hub-item { flex: 1; min-width: 0; }
+.dml-session-row > .dml-hub-pill-btn { flex: none; min-width: 44px; }
+.dml-hub-pill-btn:disabled { opacity: 0.48; cursor: default; }
+.dml-session-check { display: grid; place-items: center; flex: 0 0 44px; cursor: pointer; }
+.dml-session-check input { width: 19px; height: 19px; accent-color: var(--dsw-alias-state-business-primary, #4176e6); }
+.dml-task-return { white-space: nowrap; min-height: 32px; }
+.dml-task-return-floating { position: fixed; z-index: 39; right: 12px; top: 6px; }
+.dml-sidebar-manage { min-height: 40px; white-space: nowrap; }
 .dml-hub-task-group { display: grid; gap: 6px; }
 .dml-hub-task-heading {
   margin: 4px 0 0;
@@ -1522,7 +1503,7 @@ html[data-color-scheme="dark"] .dml-reader-bar {
 .dml-diff-line[data-kind="hunk"] { display: inline-block; min-width: 100%; color: #93c5fd; }
 @media (prefers-reduced-motion: reduce) {
   [data-composer-seat], [data-sidebar-mask], [data-sidebar-drawer] > [data-sidebar-mask] + div,
-  .dsh-scroll-top, .dsh-scroll-bottom, .dsh-scroll-bottom::after, .dml-readline,
+  .dsh-scroll-top, .dsh-scroll-bottom, .dsh-scroll-bottom::after,
   .dml-turn-highlight, .dsh-lightbox, .dsh-lightbox img, .dsh-mobile-toast, .dml-hub-overlay {
     transition-duration: 0s !important;
     animation: none !important;
@@ -1827,7 +1808,6 @@ export const MOBILE_SHELL_JS = `(() => {
 
   let scrollBtn = null;
   let scrollTopBtn = null;
-  let readLineBtn = null;
   let observedScrollEl = null;
   let observedScrollSession = '';
   let scrollRestore = null;
@@ -1884,13 +1864,12 @@ export const MOBILE_SHELL_JS = `(() => {
   }
   function updateScrollBottom() {
     scrollBtnRaf = 0;
-    if (!scrollBtn && !scrollTopBtn && !readLineBtn) return;
+    if (!scrollBtn && !scrollTopBtn) return;
     const el = bindScrollEl();
     const hidden = !el || isDrawerOpen() || el.closest?.('[data-content-phase="hero"], [data-phase="hero"]');
     if (hidden) {
       scrollBtn?.removeAttribute('data-visible');
       scrollTopBtn?.removeAttribute('data-visible');
-      readLineBtn?.removeAttribute('data-visible');
       return;
     }
     const seat = document.querySelector('[data-composer-seat]');
@@ -1911,13 +1890,9 @@ export const MOBILE_SHELL_JS = `(() => {
       if (el.scrollTop > 720) scrollTopBtn.setAttribute('data-visible', 'true');
       else scrollTopBtn.removeAttribute('data-visible');
     }
-    if (readLineBtn) {
-      if (running && dist > 240) readLineBtn.setAttribute('data-visible', 'true');
-      else readLineBtn.removeAttribute('data-visible');
-    }
   }
   function scheduleScrollBottom() {
-    if ((!scrollBtn && !scrollTopBtn && !readLineBtn) || scrollBtnRaf) return;
+    if ((!scrollBtn && !scrollTopBtn) || scrollBtnRaf) return;
     scrollBtnRaf = requestAnimationFrame(updateScrollBottom);
   }
   function scrollToTop() {
@@ -1961,14 +1936,6 @@ export const MOBILE_SHELL_JS = `(() => {
     document.body.appendChild(topBtn);
     scrollTopBtn = topBtn;
 
-    const lineBtn = document.createElement('button');
-    lineBtn.type = 'button';
-    lineBtn.className = 'dml-readline';
-    lineBtn.setAttribute('aria-label', '跳到最新流式回复');
-    lineBtn.textContent = '新内容 ↓';
-    lineBtn.addEventListener('click', scrollToBottom);
-    document.body.appendChild(lineBtn);
-    readLineBtn = lineBtn;
     scheduleScrollBottom();
   }
 

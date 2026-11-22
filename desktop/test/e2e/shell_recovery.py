@@ -111,7 +111,7 @@ with sync_playwright() as pw:
             page.evaluate("""()=>{
               __DSH_MOBILE_ROUTE_STATE__.intent=false;
               window.mountReading=(id,height)=>{
-                document.getElementById('root').innerHTML=`<section data-conversation-session="${id}"><div data-conversation-scroll style="height:200px;overflow:auto"><div style="height:${height}px">Message</div></div></section>`;
+                document.getElementById('root').innerHTML=`<section data-conversation-content data-conversation-session="${id}"><div data-conversation-scroll style="height:200px;overflow:auto"><div style="height:${height}px">Message</div></div></section>`;
                 __DSH_MOBILE_CORDIS__.getCurrentSessionId=()=>id;
                 __DSH_MOBILE_BRIDGE__.reportSelection();
               };
@@ -129,6 +129,31 @@ with sync_playwright() as pw:
             page.clock.run_for(90)
             assert page.evaluate(top)==2400, page.evaluate(top)
             print(engine.name+": single true lifecycle resume and per-session scroll restoration PASS",flush=True)
+            page.evaluate("setReading(1000)")
+            page.clock.run_for(90)
+            fallback = page.locator('.dsh-scroll-bottom')
+            up = page.locator('.dsh-scroll-top')
+            assert fallback.is_visible() and up.is_visible()
+            page.evaluate('''()=>{
+              document.querySelector('[data-conversation-content]').insertAdjacentHTML('beforeend',
+                '<div class="x_toBottomSlot"><button aria-label="最下部へ戻る">↓</button></div>');
+            }''')
+            official = page.get_by_role('button', name='最下部へ戻る')
+            assert official.is_visible() and up.is_visible() and not fallback.is_visible()
+            page.evaluate('''()=>{
+              const dialog = document.createElement('dialog'); dialog.className='dml-hub-backdrop';
+              document.body.append(dialog); dialog.showModal();
+            }''')
+            assert not official.is_visible() and not up.is_visible() and not fallback.is_visible()
+            page.evaluate("document.querySelector('dialog').close()")
+            assert official.is_visible() and up.is_visible() and not fallback.is_visible()
+            page.evaluate("document.querySelector('.x_toBottomSlot').remove(); setReading(2400)")
+            page.clock.run_for(90)
+            assert not fallback.is_visible() and up.is_visible()
+            page.evaluate('setReading(0)')
+            page.clock.run_for(90)
+            assert fallback.is_visible() and not up.is_visible()
+            print(engine.name+": scroll directions, host-button priority and modal isolation PASS",flush=True)
             # Modal image preview isolates the background and supports Escape.
             page.evaluate("""()=>{
               const root=document.getElementById('root');root.innerHTML='<div data-conversation-scroll><img alt="sample" width="100" height="100"></div>';

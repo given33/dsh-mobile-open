@@ -126,7 +126,7 @@ function phone(readBytes) {
   return {entry, Official, changed, slots, notices, downloads, dispose: () => cleanup.reverse().forEach(f => f?.())};
 }
 
-test('workspace tree shares real blank IDs without rewriting the host, changing selection or rendering a footer', () => {
+test('workspace tree shares real blank IDs without rewriting the host or changing selection', () => {
   const ui=phone(); const local={blank:true, retainedBy:{mainView:1}}, child={blank:true,origin:'subagent'}, remote={id:'phone',blank:true,retainedBy:{}}, done={blank:false,title:'First prompt'};
   const list=Object.freeze({ids:['phone','local','child','done'],byId:Object.freeze({phone:Object.freeze(remote),local,child,done})});
   let snapshot=list;
@@ -137,7 +137,10 @@ test('workspace tree shares real blank IDs without rewriting the host, changing 
   for(const key of ['local','child','done']) assert.equal(projected.byId[key],list.byId[key]);
   assert.equal(list.byId.phone.blank,true); assert.equal(view.props.useSessions(select),projected);
   snapshot={...list,byId:{...list.byId,phone:done}}; assert.equal(view.props.useSessions(select),snapshot);
-  assert.equal(ui.slots.has('sidebar.footer.action'),false);ui.changed();ui.dispose();assert.equal(ui.entry.component,ui.Official);
+  const manage=ui.slots.get('sidebar.footer.action');
+  assert.equal(manage({wide:false}),false);
+  assert.equal(typeof manage({wide:true}).props.onClick,'function');
+  ui.changed();ui.dispose();assert.equal(ui.entry.component,ui.Official);
 });
 
 test('both download surfaces unwrap Harness results, preserve original bytes and filename', async () => {

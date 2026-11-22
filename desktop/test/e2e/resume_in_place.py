@@ -211,7 +211,7 @@ if os.getenv("CHECK_TASK_HUB"):
     history.get_by_role("button", name="显示更多历史会话（41）").click()
     assert history.locator(".dml-hub-item").count() == 48
     hub.get_by_role("searchbox", name="搜索会话标题或工作区").fill("space SAMPLE 64")
-    assert hub.get_by_role("button", name="Sample 64 Test space").is_visible()
+    assert hub.get_by_role("button", name="进入会话：Sample 64", exact=True).is_visible()
     assert groups.count() == 1
     hub.get_by_role("searchbox").fill("")
     for width in (320, 393, 820):

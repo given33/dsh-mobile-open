@@ -654,6 +654,14 @@ window.__ModuleLoader__.load({
         const vis=()=>{if(document.hidden){if(!launch.intent)remember(readCurrentSession(ctx)?.sessionId);stopLaunchWatch();launch.wasHidden=true}else{if(launch.wasHidden){reselectIfNeeded();startLaunchWatch()};launch.wasHidden=false;schedule()}}
         const transport=()=>{if(ctx.connection.state.getSnapshot()!=='connected')launch.wasDown=true;else if(launch.wasDown){launch.wasDown=false;reselectIfNeeded();startLaunchWatch()} schedule()}
         const onUserNav = (e) => {
+          const row = e?.target?.closest?.('[data-sidebar-drawer]:not([data-sidebar-collapsed]) [data-row-key^="session:"]')
+          if (row) {
+            const action = e.target.closest('button, a, [role="button"], [role="menuitem"]')
+            if (!action || action === row || !row.contains(action)) {
+              const id = row.getAttribute('data-row-key').slice('session:'.length)
+              if (id) setHubState({ returnSession: id, returnTarget: 'sidebar' })
+            }
+          }
           if (e?.target?.closest?.('[data-sidebar-drawer] button, [data-sidebar-drawer] a, [data-sidebar-drawer] [role="button"]')) {
             if (launch.intent) {
               launch.intent = false; launch.awaiting = undefined; launch.settleWaitStart = 0
@@ -854,7 +862,9 @@ window.__ModuleLoader__.load({
           const sessions = ctx.get?.('sessions') ?? ctx.sessions
           const list = sessions?.list?.getSnapshot?.()
           if (!list?.ids || !list?.byId) return []
-          const spaces = (ctx.get?.('workspaces') ?? ctx.workspaces)?.list?.getSnapshot?.()?.items ?? []
+          const workspaceList = (ctx.get?.('workspaces') ?? ctx.workspaces)?.list?.getSnapshot?.()
+          const spaces = workspaceList?.items ?? []
+          const archivedIds = new Set(workspaceList?.archivedSessionIds ?? [])
           const wsMap = new Map()
           for (const ws of spaces) {
             const label = ws.name || ws.title || String(ws.cwd || '').split(/[\\/]/).filter(Boolean).pop() || ''
@@ -878,6 +888,7 @@ window.__ModuleLoader__.load({
               running,
               pendingInteraction,
               updatedAt,
+              archived: archivedIds.has(id),
               isCurrent: id === curId,
             })
           }
@@ -888,10 +899,29 @@ window.__ModuleLoader__.load({
           ))
           return out
         },
+        async setSessionsArchived(ids, archive) {
+          if (globalThis.__DSH_MOBILE_SHELL__?.readOnly) throw Error('电脑未开启手机操作权限')
+          const nav = ctx.get?.('uiWorkspace') ?? ctx.uiWorkspace
+          const action = archive ? nav?.archiveSession : nav?.unarchiveSession
+          if (typeof action !== 'function') throw Error('当前电脑端不支持此操作')
+          const rows = new Map(api.listSessions().map(row => [row.id, row]))
+          const changed = [], failed = []
+          // Use the official workspace service: it checks access/activity again on
+          // the host and publishes the updated archive set to both clients.
+          for (const id of new Set(ids)) {
+            const row = rows.get(id)
+            if (!row || row.archived === archive || (archive && (row.running || row.pendingInteraction))) {
+              failed.push(id)
+              continue
+            }
+            try { await action.call(nav, id); changed.push(id) } catch { failed.push(id) }
+          }
+          return { changed, failed }
+        },
         getPendingApprovals() {
           const curId = readCurrentSession(ctx)?.sessionId ?? null
           return api.listSessions()
-            .filter(s => s.pendingInteraction)
+            .filter(s => s.pendingInteraction && !s.archived)
             .map(s => ({ sessionId: s.id, title: s.title, isCurrent: s.id === curId }))
         },
         getSavedDraft(sessionId) {
@@ -959,11 +989,13 @@ window.__ModuleLoader__.load({
             if (list.phase === 'ready' || list.ids.length > 0) seeded = true
           }
           globalThis.__DSH_MOBILE_BRIDGE__?.reportUi?.()
-          notifyHub()
+          setHubState({})
         }
         const offs = []
         if (typeof status?.subscribe === 'function') offs.push(status.subscribe(scan))
         if (typeof sessions?.list?.subscribe === 'function') offs.push(sessions.list.subscribe(scan))
+        const workspaces = (ctx.get?.('workspaces') ?? ctx.workspaces)?.list
+        if (typeof workspaces?.subscribe === 'function') offs.push(workspaces.subscribe(() => setHubState({})))
         scan()
         return () => {
           for (const off of offs) {
@@ -1653,6 +1685,7 @@ window.__ModuleLoader__.load({
 
     function installMobileHub(ctx) {
       if (typeof React?.createElement !== 'function' || typeof ctx.slots?.register !== 'function') return
+      const sessionTime = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 
       const BUILTIN_SNIPPETS = [
         { id: 'b-summary', title: '总结进展', text: '请简要总结目前完成的改动、验证结果和剩余待办。' },
@@ -1718,10 +1751,21 @@ window.__ModuleLoader__.load({
             setHubState({ headerCount: Math.max(0, (hubState.headerCount || 0) - 1) })
           }
         }, [variant])
-        const list = globalThis.__DSH_MOBILE_CORDIS__?.listSessions?.() ?? []
+        const list = (globalThis.__DSH_MOBILE_CORDIS__?.listSessions?.() ?? []).filter(s => !s.archived)
         const pendingCount = list.filter(s => s.pendingInteraction).length
         const runningCount = list.filter(s => s.running).length
         const badge = pendingCount > 0 ? 'approval' : runningCount > 0 ? 'running' : undefined
+        const cordis = globalThis.__DSH_MOBILE_CORDIS__
+        if (!snap.open && snap.returnSession && snap.returnSession === cordis?.getCurrentSessionId?.()) {
+          return h('button', {
+            type: 'button', className: 'dml-hub-pill-btn dml-task-return' + (variant === 'floating' ? ' dml-task-return-floating' : ''),
+            'aria-label': '返回会话列表',
+            onClick: () => {
+              if (snap.returnTarget === 'sidebar' && cordis?.toggleSidebar?.()) setHubState({ returnSession: null })
+              else setHubState({ open: true, tab: 'tasks', returnSession: null })
+            },
+          }, '‹ 列表')
+        }
         return h('button', {
           type: 'button',
           'data-dml-hub-trigger': variant,
@@ -1741,6 +1785,10 @@ window.__ModuleLoader__.load({
         const snap = React.useSyncExternalStore(subscribeHub, getHubSnapshot)
         const [sessionFilter, setSessionFilter] = React.useState('')
         const [taskLimits, setTaskLimits] = React.useState({})
+        const [archivedView, setArchivedView] = React.useState(false)
+        const [selection, setSelection] = React.useState(null)
+        const [archiveBusy, setArchiveBusy] = React.useState(false)
+        const [archiveNotice, setArchiveNotice] = React.useState('')
         const [snippets, setSnippets] = React.useState(readCustomSnippets)
         const [addingSnippet, setAddingSnippet] = React.useState(false)
         const [newTitle, setNewTitle] = React.useState('')
@@ -1759,14 +1807,45 @@ window.__ModuleLoader__.load({
         const dragStartY = React.useRef(null)
         const rightFrameRef = React.useRef(null)
         const hubDialogRef = React.useRef(null)
+        const hubBodyRef = React.useRef(null)
+        const taskScroll = React.useRef(0)
+        const archiveInFlight = React.useRef(false)
 
         const bridge = globalThis.__DSH_MOBILE_CORDIS__
         const sessions = bridge?.listSessions?.() ?? []
         const curSessionId = bridge?.getCurrentSessionId?.() ?? null
         const curSession = sessions.find(s => s.isCurrent) || null
-        const otherPending = sessions.find(s => s.pendingInteraction && !s.isCurrent) || null
+        const otherPending = sessions.find(s => s.pendingInteraction && !s.isCurrent && !s.archived) || null
         const savedDraft = !snap.open && curSessionId && dismissedDraftFor !== curSessionId ? readDraftStorage(curSessionId) : null
         const canWrite = !globalThis.__DSH_MOBILE_SHELL__?.readOnly
+        const toggleSelected = (id) => setSelection(previous => {
+          const next = new Set(previous)
+          if (!next.delete(id)) next.add(id)
+          return next
+        })
+        const changeArchived = async (ids) => {
+          if (!canWrite || archiveInFlight.current || !ids.length) return
+          archiveInFlight.current = true
+          setArchiveBusy(true)
+          setArchiveNotice('')
+          const label = archivedView ? '恢复' : '归档'
+          try {
+            const { changed, failed } = await bridge.setSessionsArchived(ids, !archivedView)
+            setSelection(previous => previous && new Set([...previous].filter(id => !changed.includes(id))))
+            setArchiveNotice(`已${label} ${changed.length} 个会话${failed.length ? `；${failed.length} 个未能${label}（会话可能已变化或无权限）` : ''}`)
+          } catch (error) {
+            setArchiveNotice(error?.message || `${label}失败`)
+          } finally {
+            archiveInFlight.current = false
+            setArchiveBusy(false)
+          }
+        }
+        const openListedSession = (id) => {
+          if (!bridge?.openSession?.(id)) return
+          taskScroll.current = hubBodyRef.current?.scrollTop ?? 0
+          if (document.querySelector('[data-sidebar-drawer]:not([data-sidebar-collapsed])')) bridge.toggleSidebar?.()
+          setHubState({ open: false, returnSession: id, returnTarget: 'tasks' })
+        }
         const editorEmpty = (() => {
           try {
             return !(document.querySelector?.('[data-composer-card] [contenteditable="true"]')?.textContent || '').trim()
@@ -1850,6 +1929,11 @@ window.__ModuleLoader__.load({
             if (dialog.open) dialog.close()
           }
         }, [snap.open])
+
+        React.useLayoutEffect(() => {
+          if (!snap.open || !hubBodyRef.current) return
+          hubBodyRef.current.scrollTop = snap.tab === 'tasks' ? taskScroll.current : 0
+        }, [snap.open, snap.tab, archivedView])
 
         React.useEffect(() => {
           if (!snap.open) return
@@ -1948,27 +2032,49 @@ window.__ModuleLoader__.load({
 
         let tabBody = null
         if (snap.tab === 'tasks') {
-          const groups = globalThis.__DSH_MOBILE_BRIDGE__?.groupMobileTasks?.(sessions, sessionFilter) || { history: sessions }
-          const taskSections = [['approval', '待确认'], ['running', '运行中'], ['history', '历史会话']].flatMap(([key, label]) => {
+          const candidates = sessions.filter(s => !!s.archived === archivedView)
+          const groups = globalThis.__DSH_MOBILE_BRIDGE__?.groupMobileTasks?.(candidates, sessionFilter) || { history: candidates }
+          const selectable = Object.values(groups).flat().filter(s => archivedView || !(s.running || s.pendingInteraction))
+          const selectedIds = selectable.filter(s => selection?.has(s.id)).map(s => s.id)
+          const taskSections = [['approval', '待确认'], ['running', '运行中'], ['history', archivedView ? '已归档' : '历史会话']].flatMap(([key, label]) => {
             const rows = groups[key] || []
             if (!rows.length) return []
             const limit = taskLimits[key] ?? (key === 'history' ? 24 : 12)
             return [h('section', { key, className: 'dml-hub-task-group', 'aria-labelledby': 'dml-hub-tasks-' + key },
               h('h3', { className: 'dml-hub-task-heading', id: 'dml-hub-tasks-' + key }, label, h('span', null, rows.length)),
               h('div', { className: 'dml-hub-list' },
-                ...rows.slice(0, limit).map(s => h('button', {
-                  key: s.id,
-                  type: 'button',
-                  className: 'dml-hub-item',
-                  'data-current': s.isCurrent ? 'true' : undefined,
-                  'aria-current': s.isCurrent ? 'true' : undefined,
-                  onClick: () => { if (bridge?.openSession?.(s.id)) setHubState({ open: false }) },
-                },
-                h('div', { className: 'dml-hub-item-main' },
-                  h('span', { className: 'dml-hub-item-title' }, s.title),
-                  s.workspaceName && h('span', { className: 'dml-hub-tag' }, s.workspaceName),
-                ),
-                s.isCurrent && h('span', { className: 'dml-hub-badge', 'data-kind': 'current' }, '当前')))),
+                ...rows.slice(0, limit).map(s => {
+                  const enabled = canWrite && (archivedView || !(s.running || s.pendingInteraction))
+                  const date = Number.isFinite(s.updatedAt) && s.updatedAt > 0 ? new Date(s.updatedAt) : null
+                  const hasDate = date && Number.isFinite(date.getTime())
+                  return h('div', { key: s.id, className: 'dml-session-row' },
+                    h('button', {
+                      type: 'button', className: 'dml-hub-item',
+                      'data-current': s.isCurrent ? 'true' : undefined,
+                      'aria-current': s.isCurrent ? 'true' : undefined,
+                      'aria-label': '进入会话：' + s.title,
+                      onClick: () => openListedSession(s.id),
+                    },
+                    h('div', { className: 'dml-hub-item-main' },
+                      h('span', { className: 'dml-hub-item-title' }, s.title),
+                      s.workspaceName && h('span', { className: 'dml-hub-tag' }, s.workspaceName),
+                      hasDate && h('time', { className: 'dml-hub-tag', dateTime: date.toISOString() }, '更新于 ' + sessionTime.format(date)),
+                    ),
+                    s.isCurrent && h('span', { className: 'dml-hub-badge', 'data-kind': 'current' }, '当前'),
+                    h('span', { 'aria-hidden': 'true' }, '›')),
+                    canWrite && (selection !== null
+                      ? h('label', { className: 'dml-session-check' }, h('input', {
+                        type: 'checkbox', 'aria-label': '选择会话：' + s.title,
+                        checked: selection.has(s.id), disabled: !enabled || archiveBusy,
+                        onChange: () => toggleSelected(s.id),
+                      }))
+                      : h('button', {
+                        type: 'button', className: 'dml-hub-pill-btn', disabled: !enabled || archiveBusy,
+                        'aria-label': (archivedView ? '恢复会话：' : '归档会话：') + s.title,
+                        onClick: () => changeArchived([s.id]),
+                      }, archivedView ? '恢复' : '归档')),
+                  )
+                })),
               rows.length > limit && h('button', {
                 type: 'button', className: 'dml-hub-pill-btn dml-hub-more',
                 onClick: () => setTaskLimits(previous => ({ ...previous, [key]: limit + 24 })),
@@ -2023,8 +2129,23 @@ window.__ModuleLoader__.load({
               value: sessionFilter,
               'aria-label': '搜索会话标题或工作区',
               placeholder: '搜索会话标题或工作区…',
-              onChange: (e) => { setSessionFilter(e.target.value); setTaskLimits({}) },
+              onChange: (e) => { setSessionFilter(e.target.value); setTaskLimits({}); setSelection(previous => previous === null ? null : new Set()) },
             }),
+            h('div', { className: 'dml-hub-actions', 'aria-label': '会话管理操作' },
+              h('button', { type: 'button', className: 'dml-hub-pill-btn', disabled: archiveBusy,
+                onClick: () => { taskScroll.current = 0; setArchivedView(!archivedView); setSelection(null); setArchiveNotice(''); setTaskLimits({}) },
+              }, archivedView ? '返回未归档' : '查看已归档'),
+              canWrite && h('button', { type: 'button', className: 'dml-hub-pill-btn', disabled: archiveBusy,
+                onClick: () => { setSelection(selection === null ? new Set() : null); setArchiveNotice('') },
+              }, selection !== null ? '取消多选' : '多选'),
+              canWrite && selection !== null && h('button', { type: 'button', className: 'dml-hub-pill-btn', disabled: archiveBusy || !selectable.length,
+                onClick: () => setSelection(new Set(selectedIds.length === selectable.length ? [] : selectable.map(s => s.id))),
+              }, selectable.length > 0 && selectedIds.length === selectable.length ? '取消全选' : '全选筛选结果'),
+              canWrite && selection !== null && h('button', { type: 'button', className: 'dml-hub-pill-btn', disabled: archiveBusy || !selectedIds.length,
+                onClick: () => changeArchived(selectedIds),
+              }, `${archivedView ? '恢复' : '归档'}所选 (${selectedIds.length})`),
+            ),
+            archiveNotice && h('div', { className: 'dml-hub-hint', role: 'status' }, archiveNotice),
             ...(taskSections.length ? taskSections : [h('div', { key: 'empty', className: 'dml-hub-empty' }, '暂无匹配的会话')]),
           )
         } else if (snap.tab === 'snippets') {
@@ -2249,7 +2370,10 @@ window.__ModuleLoader__.load({
               className: 'dml-hub-tab',
               'aria-selected': snap.tab === key ? 'true' : 'false',
               'data-active': snap.tab === key ? 'true' : undefined,
-              onClick: () => setHubState({ tab: key }),
+              onClick: () => {
+                if (snap.tab === 'tasks') taskScroll.current = hubBodyRef.current?.scrollTop ?? 0
+                setHubState({ tab: key })
+              },
             }, label)),
             h('button', {
               type: 'button',
@@ -2258,7 +2382,7 @@ window.__ModuleLoader__.load({
               onClick: () => setHubState({ open: false }),
             }, '×'),
           )),
-          h('div', { className: 'dml-hub-body' }, tabBody),
+          h('div', { className: 'dml-hub-body', ref: hubBodyRef }, tabBody),
         ))
       }
 
@@ -2266,6 +2390,12 @@ window.__ModuleLoader__.load({
         ctx.slots.register({ name: 'conversation.session.header.utilities', id: 'dsh-mobile-hub-btn', order: -100, label: '移动端工具箱' }, MobileHubTrigger))
       ctx.slots.inject('shell.overlay', () =>
         ctx.slots.register({ name: 'shell.overlay', id: 'dsh-mobile-hub-overlay', order: 120, label: '移动端工具箱' }, MobileHubOverlay))
+      ctx.slots.inject('sidebar.footer.action', () =>
+        ctx.slots.register({ name: 'sidebar.footer.action', id: 'dsh-mobile-session-manager', label: '管理会话' },
+          ({ wide }) => wide && h('button', {
+            type: 'button', className: 'dml-hub-pill-btn dml-sidebar-manage',
+            onClick: () => setHubState({ open: true, tab: 'tasks', returnSession: null }),
+          }, '管理会话')))
     }
 
     function apply(ctx) {
