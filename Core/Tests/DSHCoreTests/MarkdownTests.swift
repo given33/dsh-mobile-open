@@ -6,19 +6,19 @@ final class MarkdownTests: XCTestCase {
         let (_, turns) = ConversationTests.session("梳理")
         guard case .reply(let reply)? = turns[0].elements.last else { return XCTFail("no final reply") }
         let blocks = Markdown.parse(reply.text)
-        XCTAssertEqual(blocks.count, 6)
+        guard blocks.count == 6 else { return XCTFail("Expected 6 blocks, got \(blocks.count)") }
         XCTAssertEqual(blocks[0], MarkdownBlock.heading(level: 2, text: "结论"))
-        XCTAssertEqual(blocks[1], MarkdownBlock.paragraph("项目结构清晰，共 3 个模块、12 个源文件。最需要先处理的是**同步冲突**："))
+        XCTAssertEqual(blocks[1], MarkdownBlock.paragraph("以下是**演示数据**。"))
         guard case .table(let header, let alignments, let rows) = blocks[2] else { return XCTFail("\(blocks[2])") }
         XCTAssertEqual(header, ["优先级", "位置", "建议"])
         XCTAssertEqual(alignments, [MarkdownBlock.Alignment.leading, .leading, .leading])
         XCTAssertEqual(rows.count, 3)
-        XCTAssertEqual(rows[0], ["高", "`src/store/sync.ts`", "冲突时保留两份副本，并在界面上提示"])
+        XCTAssertEqual(rows[0], ["高", "`notes.md`", "核对标题"])
         guard case .code(let language, let code) = blocks[4] else { return XCTFail("\(blocks[4])") }
         XCTAssertEqual(language, "ts")
-        XCTAssertTrue(code.hasPrefix("it('keeps both copies on conflict'"))
+        XCTAssertTrue(code.hasPrefix("it('formats the example'"))
         XCTAssertTrue(code.hasSuffix("})"))
-        XCTAssertEqual(blocks[5], MarkdownBlock.paragraph("需要的话，我可以接着实现冲突副本的保存逻辑。"))
+        XCTAssertEqual(blocks[5], MarkdownBlock.paragraph("示例检查完成。"))
     }
 
     func testListsNestAndContinue() {

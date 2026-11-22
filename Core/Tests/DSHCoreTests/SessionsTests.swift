@@ -20,23 +20,23 @@ final class SessionsTests: XCTestCase {
         XCTAssertEqual(d.status(of: id(d, "撰写")).compactLabel, "待回答")
         XCTAssertEqual(d.status(of: id(d, "重构")), .running)
         XCTAssertEqual(d.status(of: id(d, "梳理")), .idle)
-        XCTAssertEqual(d.pending(for: id(d, "撰写")).first?.summary, "发布说明用哪种语言？")
+        XCTAssertEqual(d.pending(for: id(d, "撰写")).first?.summary, "示例文档用哪种语言？")
         XCTAssertTrue(d.rows[id(d, "梳理")]!.todos! == (3, 3))
     }
 
     func testGroupsFallBackToUngrouped() {
         let d = directory()
         XCTAssertEqual(d.groups.map(\.title), ["未分组"])
-        XCTAssertEqual(d.groups[0].sessions.first?.title, "重构存储层，拆出同步队列", "newest first")
+        XCTAssertEqual(d.groups[0].sessions.first?.title, "重构演示模块", "newest first")
     }
 
     func testWorkspacesPinsAndArchive() {
         var d = directory()
         let review = id(d, "梳理"), api = id(d, "解释")
         d.receiveWorkspace(.object(["type": .string("baseline"), "value": .object([
-            "items": .array([.object(["workspaceId": .string("w1"), "path": .string("C:\\Users\\demo\\Projects\\lumen-notes"), "title": .string("")])]),
+            "items": .array([.object(["workspaceId": .string("w1"), "path": .string("/example/workspace"), "title": .string("")])]),
             "archivedSessionIds": .array([.string(api)]), "pinnedSessionIds": .array([.string(review)])])]))
-        XCTAssertEqual(d.groups.map(\.title), ["lumen-notes"])
+        XCTAssertEqual(d.groups.map(\.title), ["workspace"])
         XCTAssertEqual(d.groups[0].sessions.first?.id, review, "pinned first")
         XCTAssertFalse(d.visible.contains { $0.id == api }, "archived rows are hidden")
     }
@@ -90,7 +90,7 @@ final class SessionsTests: XCTestCase {
     }
 
     func testRetryKeepsTheFailureReason() {
-        let (_, turns) = ConversationTests.session("把 main")
+        let (_, turns) = ConversationTests.session("演示重试失败")
         guard case .retry(let retry)? = turns[0].elements.first(where: { if case .retry = $0 { return true }; return false }) else { return XCTFail() }
         XCTAssertTrue(retry.failure.hasPrefix("503"), retry.failure)
         XCTAssertEqual(retry.status(settled: true), "已重试模型请求（5/5） · 8s")

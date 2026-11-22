@@ -8,9 +8,41 @@
           "running": false,
           "projections": {
             "values": {
-              "title": "梳理演示项目结构"
+              "title": "梳理演示项目结构",
+              "sessionStats": {
+                "turns": 1,
+                "steps": 6,
+                "decodeMs": 1000,
+                "decodeTokens": 88
+              },
+              "tokenUsage": {
+                "uncachedInputTokens": 15000,
+                "outputTokens": 340
+              },
+              "contextPressure": {
+                "contextWindow": 100000,
+                "pressureTokens": 2000
+              },
+              "permissions": {
+                "currentValue": "workspace-write"
+              },
+              "todos": [
+                {
+                  "content": "事项 1",
+                  "status": "completed"
+                },
+                {
+                  "content": "事项 2",
+                  "status": "completed"
+                },
+                {
+                  "content": "事项 3",
+                  "status": "completed"
+                }
+              ]
             }
-          }
+          },
+          "updatedAt": 1000
         },
         {
           "sessionId": "plain",
@@ -20,7 +52,8 @@
             "values": {
               "title": "解释游标分页"
             }
-          }
+          },
+          "updatedAt": 2000
         },
         {
           "sessionId": "retry",
@@ -30,7 +63,8 @@
             "values": {
               "title": "演示重试失败"
             }
-          }
+          },
+          "updatedAt": 3000
         },
         {
           "sessionId": "question",
@@ -40,7 +74,8 @@
             "values": {
               "title": "撰写演示说明"
             }
-          }
+          },
+          "updatedAt": 4000
         },
         {
           "sessionId": "stream",
@@ -48,9 +83,28 @@
           "running": true,
           "projections": {
             "values": {
-              "title": "重构演示模块"
+              "title": "重构演示模块",
+              "todos": [
+                {
+                  "content": "事项 1",
+                  "status": "in_progress"
+                },
+                {
+                  "content": "事项 2",
+                  "status": "pending"
+                },
+                {
+                  "content": "事项 3",
+                  "status": "pending"
+                },
+                {
+                  "content": "事项 4",
+                  "status": "pending"
+                }
+              ]
             }
-          }
+          },
+          "updatedAt": 5000
         }
       ]
     }
@@ -407,7 +461,7 @@
                     "content": [
                       {
                         "type": "text",
-                        "text": "## 结论\n演示任务完成。"
+                        "text": "## 结论\n\n以下是**演示数据**。\n\n| 优先级 | 位置 | 建议 |\n| --- | --- | --- |\n| 高 | `notes.md` | 核对标题 |\n| 中 | `example.ts` | 添加示例 |\n| 低 | `index.md` | 更新目录 |\n\n- 第一项\n- 第二项\n\n```ts\nit('formats the example', () => {\n  expect(format(42)).toBe('42')\n})\n```\n\n示例检查完成。"
                       }
                     ]
                   }
@@ -579,7 +633,10 @@
                   "retryId": "demo-retry",
                   "retry": 5,
                   "maxRetries": 5,
-                  "delayMs": 250
+                  "delayMs": 8000,
+                  "failure": {
+                    "message": "503 演示服务不可用"
+                  }
                 },
                 "time": 5000
               }
@@ -737,6 +794,29 @@
                 }
               ]
             }
+          }
+        }
+      }
+    ],
+    "$events": [
+      {
+        "value": {
+          "type": "ready",
+          "clientId": "demo-client"
+        }
+      },
+      {
+        "value": {
+          "type": "waterfall",
+          "eventId": "demo-event",
+          "agentId": "question",
+          "event": "user-questions/request",
+          "request": {
+            "questions": [
+              {
+                "question": "示例文档用哪种语言？"
+              }
+            ]
           }
         }
       }
