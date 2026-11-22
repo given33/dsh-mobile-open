@@ -3,6 +3,23 @@ import XCTest
 final class DSHMobileUITests: XCTestCase {
     override func setUpWithError() throws { continueAfterFailure = false }
 
+    @MainActor
+    func testOfficialDesktopStalledFirstPaintCanBeRetried() throws {
+        let link = try XCTUnwrap(ProcessInfo.processInfo.environment["DSH_UI_LINK"])
+        let app = XCUIApplication()
+        app.launchEnvironment["DSH_DEMO_LINK"] = link
+        app.launchEnvironment["DSH_TEST_HOLD_FIRST_LAUNCH"] = "1"
+        app.launch()
+        XCTAssertTrue(app.webViews["official-web-view"].firstMatch.waitForExistence(timeout: 25))
+        let retry = app.buttons["document-reload"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 22), "A missing first-paint acknowledgement must not trap the user")
+        retry.tap()
+        let status = app.buttons["connection-status-pill"]
+        expectation(for: NSPredicate(format: "value BEGINSWITH 'doc:2|' AND value CONTAINS 'connected|busy:false'"), evaluatedWith: status)
+        waitForExpectations(timeout: 30)
+        XCTAssertTrue(retry.waitForNonExistence(timeout: 8))
+    }
+
     /// Optional live probe. The supplied offer must use an intentionally invalid
     /// code, so it can prove the TLS and HTTP path without registering a device.
     @MainActor

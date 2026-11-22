@@ -173,6 +173,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     @Published private(set) var recoveryFailures = 0
     @Published private(set) var revoked = false
     @Published private(set) var needsLaunchSelection = true
+    @Published private(set) var documentRecoveryNeeded = false
+    private var documentDeadline: Task<Void, Never>?
     @Published private(set) var resumeFrame: UIImage?
     private let frameQueue = DispatchQueue(label: "app.dshmobile.snapshot", qos: .utility)
     private var frameGeneration = UUID()
@@ -391,6 +393,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     private func use(_ selected: PairedDesktop, transport channel: PinnedTransport) {
         transport?.invalidate()
         transport = channel
+        cancelDocumentDeadline()
         needsLaunchSelection = true; recoveryFailures = 0; revoked = false
         desktop = selected
         currentSessionID = ephemeral ? nil : UserDefaults.standard.string(forKey: "dsh.lastSession." + selected.id)
@@ -461,7 +464,11 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
 
     func reloadPage() {
         if browser == nil { beginConnection(preservePage: false) }
-        else { reloadID = UUID(); problem = nil; wsHealth = .connecting }
+        else {
+            cancelDocumentDeadline()
+            needsLaunchSelection = true
+            reloadID = UUID(); problem = nil; wsHealth = .connecting
+        }
     }
 
     func toggleSidebar() {
@@ -594,7 +601,27 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         if !ephemeral { UserDefaults.standard.set(id, forKey: "dsh.lastSession." + desktop.id) }
     }
 
-    func restoringDocument() { needsLaunchSelection = true }
+    private func cancelDocumentDeadline() {
+        documentDeadline?.cancel()
+        documentDeadline = nil
+        if documentRecoveryNeeded { documentRecoveryNeeded = false }
+    }
+
+    func restoringDocument() {
+        cancelDocumentDeadline()
+        if !needsLaunchSelection { needsLaunchSelection = true }
+        // HTTP and the socket can be ready before the target conversation paints.
+        // Keep its snapshot, but never leave the user stuck behind the cover.
+        var delay = 12.0
+        #if DEBUG
+        if ephemeral && ProcessInfo.processInfo.environment["DSH_TEST_HOLD_FIRST_LAUNCH"] == "1" { delay = 5.0 }
+        #endif
+        documentDeadline = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+            guard let self, self.needsLaunchSelection, self.browser != nil, !self.revoked else { return }
+            self.documentRecoveryNeeded = true
+        }
+    }
 
     func pageLoaded() {
         if ephemeral { testDocumentCount += 1 }
@@ -614,6 +641,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     func pageProcessTerminated() {
         guard desktop != nil else { return }
         // Immediately restore the last captured snapshot cover before reloading in background.
+        cancelDocumentDeadline()
         needsLaunchSelection = true
         if browser != nil {
             reloadID = UUID()
@@ -632,6 +660,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         guard let type = body["type"] as? String else { return }
         switch type {
         case "launch-applied":
+            cancelDocumentDeadline()
             needsLaunchSelection = false
             remember(body["sessionId"] as? String)
         case "ready":
@@ -702,6 +731,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
 
     func removeCurrent() {
         guard let current = desktop else { return }
+        cancelDocumentDeadline()
         endBackgroundKeepAlive()
         discardFrame(current.id)
         clearCachedRoute(for: current.id)

@@ -90,12 +90,17 @@ struct RootView: View {
                             }
                             .ignoresSafeArea(.all, edges: .bottom)
                             .overlay(alignment: .bottom) {
-                                if showSnapshotCover && model.problem != nil && model.recoveryFailures >= 2 {
+                                if showSnapshotCover && !model.documentRecoveryNeeded && model.problem != nil && model.recoveryFailures >= 2 {
                                     snapshotReconnectBanner
                                 }
                             }
                             .opacity(showSnapshotCover ? 1 : 0)
                             .allowsHitTesting(showSnapshotCover)
+                        }
+                    }
+                    .overlay(alignment: .bottom) {
+                        if model.documentRecoveryNeeded && model.browser != nil && !model.revoked {
+                            documentRecoveryBanner
                         }
                     }
                     .ignoresSafeArea(.all, edges: .bottom)
@@ -310,6 +315,23 @@ struct RootView: View {
     }
 
     private var syncAccessibilityStatus: String { model.wsHealth == .connected ? "已连接" : "正在连接" }
+
+    private var documentRecoveryBanner: some View {
+        HStack(spacing: 12) {
+            Text("会话还未加载完成")
+                .font(.subheadline)
+                .accessibilityIdentifier("document-recovery")
+            Button("重新加载") { model.reloadPage() }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Theme.business)
+                .frame(minHeight: 44)
+                .accessibilityIdentifier("document-reload")
+        }
+        .padding(.horizontal, 16)
+        .background(.regularMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(Theme.borderL2, lineWidth: 0.5))
+        .padding(.bottom, 26)
+    }
 
     private var snapshotReconnectBanner: some View {
         HStack(spacing: 10) {

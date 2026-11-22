@@ -119,6 +119,9 @@ struct OfficialWebView: UIViewRepresentable {
         var session: BrowserSession
         var reloadID: UUID
         var lastCommandID: UUID?
+        #if DEBUG
+        private let initialReloadID: UUID
+        #endif
         let onRestoring: () -> Void
         var onLoaded: () -> Void
         var onError: (String) -> Void
@@ -140,6 +143,9 @@ struct OfficialWebView: UIViewRepresentable {
         ) {
             self.session = session
             self.reloadID = reloadID
+            #if DEBUG
+            self.initialReloadID = reloadID
+            #endif
             self.onRestoring = onRestoring
             self.onLoaded = onLoaded
             self.onError = onError
@@ -290,6 +296,7 @@ struct OfficialWebView: UIViewRepresentable {
         private func coverCurrentDocument() {
             guard loaded, cover == nil, let webView, let image = webView.snapshotView(afterScreenUpdates: false) else { return }
             image.frame = webView.bounds; image.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            image.isUserInteractionEnabled = false
             image.isAccessibilityElement = false; image.accessibilityElementsHidden = true
             webView.addSubview(image); cover = image
         }
@@ -322,7 +329,7 @@ struct OfficialWebView: UIViewRepresentable {
         func loadHome() {
             guard let webView else { return }
             frameRequestID = UUID()
-            loaded = false; loadingStarted = true; routePainted = false; onRestoring()
+            loaded = false; loadingStarted = true; routePainted = false
             webView.load(URLRequest(url: session.url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 20))
         }
 
@@ -367,6 +374,10 @@ struct OfficialWebView: UIViewRepresentable {
             guard message.frameInfo.isMainFrame, let source = message.frameInfo.request.url, local(source), message.name == "dshMobile", let payload = message.body as? [String: Any] else { return }
             let type = payload["type"] as? String
             if type == "launch-applied" {
+                #if DEBUG
+                if reloadID == initialReloadID,
+                   ProcessInfo.processInfo.environment["DSH_TEST_HOLD_FIRST_LAUNCH"] == "1" { return }
+                #endif
                 routePainted = true
                 uncover()
                 onBridgeMessage(payload)
@@ -441,6 +452,10 @@ struct OfficialWebView: UIViewRepresentable {
             } else {
                 decisionHandler(response.canShowMIMEType ? .allow : .download)
             }
+        }
+
+        func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            onRestoring()
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
