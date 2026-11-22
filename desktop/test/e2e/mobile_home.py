@@ -67,21 +67,31 @@ with sync_playwright() as pw:
     page.emulate_media(reduced_motion='no-preference')
     expect(chip).to_have_attribute('data-scene', 'storm')
     assert received == [{'mode':'weather'}]
-    chip.click()
     expected_clock = page.evaluate("t=>new Intl.DateTimeFormat('en-GB',{timeZone:'Asia/Tokyo',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(t)", timestamp*1000)
-    expect(page.locator('#dml-weather-info strong')).to_contain_text(expected_clock)
-    page.get_by_role('button',name='仅显示电脑时间').click()
-    expect(page.locator('#dml-weather-info p')).to_contain_text('配对电脑时间')
+    assert expected_clock in chip.get_attribute('aria-label')
+    assert chip.get_attribute('role') == 'img' and chip.get_attribute('title') is None
+    assert chip.evaluate('e => e.tabIndex') == -1
+    chip.tap()
+    expect(page.locator('dialog[open], #dml-weather-info')).to_have_count(0)
+    assert received == [{'mode':'weather'}]
+    page.evaluate("__DSH_MOBILE_BRIDGE__.openHub('tools')")
+    pref = page.get_by_role('checkbox',name='显示电脑所在地天气（Open-Meteo）')
+    pref.uncheck()
     page.wait_for_function("document.querySelector('#dml-weather').dataset.scene!=='storm'")
-    page.get_by_role('button',name='显示电脑所在地天气').click()
-    expect(page.locator('#dml-weather-info p')).to_contain_text('暂不可用')
+    pref.check()
+    page.wait_for_function("document.querySelector('#dml-weather').getAttribute('aria-label').includes('暂不可用')")
+    page.get_by_role('button',name='关闭工具箱').click()
     assert page.evaluate('geoCalls') == 0
     assert {'mode':'clock'} in received
-    page.locator('#dml-weather-info [data-close]').click()
     for title in ['插件','自动化任务']:
         page.evaluate('__DSH_MOBILE_BRIDGE__.toggleSidebar()')
         page.get_by_role('button', name=title, exact=True).first.click()
         page.wait_for_function("hubReports.at(-1)?.visible===true")
+        heading = page.locator('[data-global-panel] h1').first
+        heading.wait_for()
+        offset = heading.evaluate("e=>e.getBoundingClientRect().top-e.closest('[data-global-panel]').getBoundingClientRect().top")
+        assert 8 <= offset <= 24, (title, offset)
+
         expect(page.locator('[data-dml-hub-trigger]:visible')).to_have_count(0)
         page.evaluate("__DSH_MOBILE_BRIDGE__.openHub('tasks')")
         close=page.get_by_role('button',name='关闭工具箱');close.wait_for()
@@ -89,4 +99,15 @@ with sync_playwright() as pw:
     page.evaluate('__DSH_MOBILE_BRIDGE__.newSession()')
     expect(page.locator('[data-dml-hub-trigger]:visible')).to_have_count(1)
     page.wait_for_function("hubReports.at(-1)?.visible===false")
+    # Pass the cold_history.py seed ID to also check the actual text run, not
+    # the padded breadcrumb box. Blank sessions deliberately have no title.
+    if len(sys.argv) > 3:
+        page.evaluate('sid => __DSH_MOBILE_BRIDGE__.openSession(sid)', sys.argv[3])
+        crumb = page.locator('header nav [class$="_crumbCurrent"]').first
+        crumb.wait_for(timeout=30000)
+        for width in [320, 393, 430]:
+            page.set_viewport_size({'width':width,'height':745})
+            x = crumb.evaluate("e=>{const r=document.createRange();r.selectNodeContents(e);return r.getBoundingClientRect().left}")
+            assert abs(x - 60) <= 1, (engine, width, x)
+        page.screenshot(path=fixture / ('conversation-title-'+engine+'.png'))
     print(engine, 'PASS: centered card, animated whale, weather, panel navigation and return to conversation')

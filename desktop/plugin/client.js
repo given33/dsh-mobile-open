@@ -1791,6 +1791,7 @@ window.__ModuleLoader__.load({
         const [pingStats, setPingStats] = React.useState({ running: false, samples: [], error: '' })
         const [fontScale, setFontScale] = React.useState(() => readPref('dml.pref.fontScale', '100'))
         const [codeWrap, setCodeWrap] = React.useState(() => readPref('dml.pref.codeWrap', 'false') === 'true')
+        const [desktopWeather, setDesktopWeather] = React.useState(() => readPref('dml.weather.desktop.v1', 'true') !== 'false')
         const [amoledMode, setAmoledMode] = React.useState(() => readPref('dml.pref.amoled', 'false') === 'true')
         const [taskAlerts, setTaskAlerts] = React.useState(() => readPref('dml.pref.taskAlerts', 'true') !== 'false')
         const [dismissedDraftFor, setDismissedDraftFor] = React.useState('')
@@ -2295,6 +2296,13 @@ window.__ModuleLoader__.load({
                   type: 'checkbox',
                   checked: codeWrap,
                   onChange: (e) => { setCodeWrap(e.target.checked); writePref('dml.pref.codeWrap', e.target.checked ? 'true' : 'false') },
+                }),
+              ),
+              h('label', { className: 'dml-hub-toggle' },
+                h('span', null, '显示电脑所在地天气（Open-Meteo）'),
+                h('input', {
+                  type: 'checkbox', checked: desktopWeather,
+                  onChange: (e) => { setDesktopWeather(e.target.checked); writePref('dml.weather.desktop.v1', e.target.checked) },
                 }),
               ),
               h('label', { className: 'dml-hub-toggle' },

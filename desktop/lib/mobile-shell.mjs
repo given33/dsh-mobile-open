@@ -575,7 +575,21 @@ body > [data-dsh-submenu-parent],
 html[data-dml-native-nav] [data-sidebar-opener] { display:none !important; }
 html[data-dml-native-nav] [data-slot="shell.leading"]:has([data-sidebar-opener]):not(:has(button:not([data-sidebar-opener]))) { display:none !important; }
 html[data-dml-native-nav] [data-conversation-header-leading]:empty,
-html[data-dml-native-nav] [data-conversation-header-leading]:has([data-sidebar-opener]):not(:has(button:not([data-sidebar-opener]))) { display:none !important; }
+html[data-dml-native-nav] [data-conversation-header-leading]:has([data-sidebar-opener]):not(:has(#dml-weather,button:not([data-sidebar-opener]))) { display:none !important; }
+/* The native toolbar already owns secondary navigation. Do not collapse the web-only fallback. */
+html[data-dml-panel-toolbar] [data-sidebar-drawer] [data-global-panel] { padding-top:0 !important; }
+html[data-dml-panel-toolbar] [data-sidebar-drawer] [data-plugin-panel] { --plugin-page-top-inset:16px; }
+html[data-dml-panel-toolbar] [data-sidebar-drawer] [data-testid="task-manager-page"] div:has(> h1 + div [role="group"]) { padding-top:16px; }
+
+/* Align the first breadcrumb's ink, not its padded hit box, with the device name.
+   iOS: 8 inset + 34 sidebar + 6 gap + 7 dot + 5 gap; Android: 4 inset + 48 sidebar. */
+html[data-dml-native-nav] { --dml-device-name-start:60px; }
+html[data-dml-native-nav="android"] { --dml-device-name-start:52px; }
+html[data-dml-native-nav] [data-sidebar-drawer] header:has(> [data-conversation-header-leading] #dml-weather):has(nav) {
+  --dsh-frame-leading-clearance:0px;
+  padding-inline-start:20px;
+  grid-template-columns:calc(var(--dml-device-name-start) - 20px - 8px) minmax(0,1fr);
+}
 #dml-voice-button {
   box-sizing:border-box; display:inline-grid; place-items:center; flex:none;
   width:40px; height:42px; padding:0; border:0; border-radius:50%; background:none;
@@ -1604,7 +1618,8 @@ export const MOBILE_SHELL_JS = `(() => {
   const shell = globalThis.__DSH_MOBILE_SHELL__ || {};
   const reducedMotion = () => globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
   const scrollBehavior = () => reducedMotion() ? 'auto' : 'smooth';
-  if(globalThis.__DSH_MOBILE_LAUNCH__ || globalThis.webkit?.messageHandlers?.dshMobile) document.documentElement.setAttribute('data-dml-native-nav','');
+  if(globalThis.__DSH_MOBILE_LAUNCH__ || globalThis.webkit?.messageHandlers?.dshMobile) document.documentElement.setAttribute('data-dml-native-nav',globalThis.DSHNative ? 'android' : '');
+  if (globalThis.__DSH_NATIVE_PANEL_HUB__ === 1 && globalThis.webkit?.messageHandlers?.dshMobile) document.documentElement.setAttribute('data-dml-panel-toolbar','');
   const anchorApi = globalThis.__DSH_MOBILE_ANCHORS__ || {
     anchors: new Map(),
     varAnchors: new Map(),
@@ -1858,10 +1873,12 @@ export const MOBILE_SHELL_JS = `(() => {
     }, 1600);
   }
 
+  let weather = null;
   function applyDisplayPrefs() {
     const html = document.documentElement;
     if (!html) return;
     try {
+      weather?.setEnabled(globalThis.localStorage?.getItem('dml.weather.desktop.v1') !== 'false');
       const scale = globalThis.localStorage?.getItem('dml.pref.fontScale');
       if (scale && ['90', '110', '120'].includes(scale)) {
         html.setAttribute('data-dml-font-scale', scale);
@@ -2319,7 +2336,6 @@ export const MOBILE_SHELL_JS = `(() => {
 
   let lastReportedSessionId = null;
   let mobileVoice = null;
-  let weather = null;
   function reportUi() {
     uiRaf = 0;
     const cordis = globalThis.__DSH_MOBILE_CORDIS__;
@@ -3238,7 +3254,7 @@ export const MOBILE_SHELL_JS = `(() => {
 
   // Start lightweight observers once DOM is ready (no subtree:true on document.body!).
   const start = () => {
-    if (typeof document.createElement === 'function' && typeof HTMLDialogElement !== 'undefined') weather = (${installWeather.toString()})(${weatherScene.toString()});
+    if (typeof document.createElement === 'function' && typeof HTMLElement !== 'undefined') weather = (${installWeather.toString()})(${weatherScene.toString()});
     mobileVoice = (${installMobileVoice.toString()})({
       post, readOnly: () => !!shell.readOnly,
       session: () => globalThis.__DSH_MOBILE_CORDIS__?.getCurrentSessionId?.()

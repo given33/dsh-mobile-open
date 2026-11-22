@@ -14,11 +14,9 @@ export function weatherScene(code, day) {
 }
 
 export function installWeather(sceneFor) {
-  const btn = document.createElement('button');
-  btn.type = 'button'; btn.id = 'dml-weather';
-  const panel = document.createElement('dialog');
-  panel.id = 'dml-weather-info'; panel.setAttribute('aria-label', '时间与当地天气');
-  panel.innerHTML = '<strong></strong><p></p><small>天气数据：Open-Meteo。使用配对电脑的位置；手机不参与定位。</small><footer><button type="button" data-mode></button><button type="button" data-close>关闭</button></footer>';
+  const indicator = document.createElement('span');
+  indicator.id = 'dml-weather';
+  indicator.setAttribute('role', 'img');
   const names = {dawn:'清晨', morning:'上午', noon:'中午', afternoon:'下午', dusk:'傍晚', night:'夜间', sun:'晴', moon:'晴夜', partly:'局部多云', partlyNight:'夜间局部多云', cloud:'阴', fog:'雾', drizzle:'毛毛雨', ice:'冻雨', rain:'雨', snow:'雪', storm:'雷暴', hail:'雷暴伴冰雹'};
   const sun = '<g class="orbit" stroke="#e6a237"><circle cx="16" cy="16" r="5" fill="#ffd674"/><path d="M16 3v3m0 20v3M3 16h3m20 0h3M7 7l2 2m14 14 2 2M7 25l2-2M23 9l2-2"/></g>';
   const moon = '<path class="float" d="M22 22A11 11 0 0 1 12 6a10 10 0 1 0 10 16Z" fill="#bbbcfb" stroke="#9299d8"/><path class="shine" d="m23 5 .8 2.2L26 8l-2.2.8L23 11l-.8-2.2L20 8l2.2-.8Z" fill="#edc570" stroke="none"/>';
@@ -56,16 +54,13 @@ export function installWeather(sceneFor) {
     const fresh = reading && age >= -120000 && age < 30 * 60000;
     const period = hour < 5 ? 'night' : hour < 7 ? 'dawn' : hour < 11 ? 'morning' : hour < 14 ? 'noon' : hour < 18 ? 'afternoon' : hour < 20 ? 'dusk' : 'night';
     const scene = fresh ? sceneFor(reading.code, reading.day) : period;
-    if (btn.dataset.scene !== scene) { btn.dataset.scene = scene; btn.innerHTML = icon(scene); }
+    if (indicator.dataset.scene !== scene) { indicator.dataset.scene = scene; indicator.innerHTML = icon(scene); }
     const title = (fresh ? names[scene] + ' · ' + Math.round(reading.temp) + '°C' : names[scene]) + ' · ' + clock;
-    btn.title = title; btn.setAttribute('aria-label', title + '，电脑时间与天气');
-    panel.querySelector('strong').textContent = title;
-    panel.querySelector('p').textContent = fresh ? '电脑所在地 · 天气时刻 ' + new Intl.DateTimeFormat('en-GB', opts).format(reading.time * 1000)
-      : error || (busy && enabled ? '正在查询电脑所在地天气…' : '按配对电脑时间显示');
-    panel.querySelector('[data-mode]').textContent = enabled ? '仅显示电脑时间' : '显示电脑所在地天气';
+    const detail = fresh ? '电脑所在地天气，Open-Meteo' : error || '按配对电脑时间显示';
+    indicator.setAttribute('aria-label', title + '，' + detail);
   }
   async function refresh() {
-    if (busy || document.hidden || !btn.isConnected || Date.now() < next) return;
+    if (busy || document.hidden || !indicator.isConnected || Date.now() < next) return;
     const run = ++generation;
     busy = true; error = ''; draw();
     try {
@@ -92,22 +87,20 @@ export function installWeather(sceneFor) {
   }
   function tick() {
     clearTimeout(timer);
-    if (document.hidden || !btn.isConnected) return;
+    if (document.hidden || !indicator.isConnected) return;
     draw(); void refresh(); timer = setTimeout(tick, 60000 - (Date.now() + clockOffset) % 60000 + 20);
   }
-  panel.querySelector('[data-mode]').onclick = () => {
-    enabled = !enabled;
-    try { localStorage.setItem('dml.weather.desktop.v1', String(enabled)); } catch {}
+  function setEnabled(value) {
+    if (enabled === value) return;
+    enabled = value;
     ++generation; busy = false; next = 0; reading = null; error = ''; tick();
-  };
-  panel.querySelector('[data-close]').onclick=()=>panel.close();
-  btn.onclick=()=>{if(!panel.isConnected)document.body.append(panel);draw();panel.showModal();};
+  }
   document.addEventListener('visibilitychange',()=>{++generation;busy=false;reading=null;next=0;tick();});
-  return {mount(){const seat=document.querySelector('#root [data-conversation-header-leading]'); if(seat && btn.parentElement!==seat){seat.append(btn);tick();}}};
+  return {setEnabled, mount(){const seat=document.querySelector('#root [data-conversation-header-leading]'); if(seat && indicator.parentElement!==seat){seat.append(indicator);tick();}}};
 }
 
 export const WEATHER_CSS = `
-#dml-weather {display:grid;place-items:center;width:30px;height:32px;flex:none;padding:0;border:0;border-radius:8px;background:none;cursor:pointer;}
+#dml-weather {display:grid;place-items:center;width:30px;height:32px;flex:none;padding:0;border:0;border-radius:8px;background:none;cursor:default;}
 #dml-weather svg {width:27px;height:27px;overflow:visible;}
 #dml-weather .orbit {transform-origin:16px 16px;animation:dml-orbit 20s linear infinite;}
 #dml-weather .float {animation:dml-drift 3.2s ease-in-out infinite alternate;}
@@ -118,6 +111,4 @@ export const WEATHER_CSS = `
 @keyframes dml-orbit {to{transform:rotate(360deg)}} @keyframes dml-drift {to{transform:translate(1.6px,-1px)}}
 @keyframes dml-fall {from{opacity:.25;transform:translateY(-1px)}to{opacity:.9;transform:translateY(2px)}} @keyframes dml-shine {to{opacity:.23}}
 @media(prefers-reduced-motion:reduce){#dml-weather svg *{animation:none!important}}
-#dml-weather-info {border:1px solid var(--dsw-alias-border-secondary,#8885);border-radius:16px;padding:18px;max-width:min(82vw,320px);background:var(--dsw-alias-bg-base,Canvas);color:var(--dsw-alias-label-primary,CanvasText);}
-#dml-weather-info::backdrop {background:#0005;} #dml-weather-info small {display:block;opacity:.72;} #dml-weather-info footer {display:flex;justify-content:flex-end;gap:12px;margin-top:16px;} #dml-weather-info button {font:inherit;color:inherit;border:0;border-radius:8px;padding:8px;background:var(--dsw-alias-interactive-bg-hover,#8882);}
 `;
