@@ -16,6 +16,14 @@ with sync_playwright() as pw:
     browser = getattr(pw, name).launch(executable_path=os.getenv(name.upper() + '_PATH'))
     phone = browser.new_context(ignore_https_errors=True, locale='zh-CN',
                                 viewport={'width': 393, 'height': 752}, is_mobile=True, has_touch=True)
+    assert Path(h['workspace']).resolve() == Path(h['home']).resolve() / 'test-workspace'
+    # Enable the built-in model catalog only on this disposable test profile; never call a model.
+    rpc = 'credentials/set'
+    setup = phone.request.post(h['base'] + 'api/' + rpc, headers={'Cookie': h['cookie']}, data={
+        'type': 'client-request', 'rpcId': 'voice-fixture', 'method': rpc,
+        'payload': {'args': {'ref': 'DEEPSEEK_API_KEY', 'value': 'synthetic-fixture-not-a-key'}},
+    })
+    assert setup.ok and setup.json()['result']['ok']
     pair = phone.request.post(h['base'] + 'dsh-mobile-link/code', headers={'Cookie': h['cookie']}, data={}).json()
     code = parse_qs(urlsplit(pair['pairing']['link']).query)['c'][0]
     token = phone.request.post(base + '/mobile/v1/pair', data={'code': code, 'device': {'id': 'voice-qa-' + name, 'name': 'Voice test'}}).json()['token']
@@ -48,7 +56,17 @@ with sync_playwright() as pw:
         onboarding.locator('button').first.click()
         onboarding.wait_for(state='hidden')
     mic.wait_for(timeout=12000)
-    for width in (320, 393, 820, 393):
+    model = card.locator('[data-slot="conversation.input.model"] button').first
+    effort = model.locator('[class$="_triggerEffort"]')
+    effort.wait_for(state='attached', timeout=15000)
+    model.tap()
+    setting = page.get_by_role('menuitem').filter(has_text='推理等级')
+    setting.wait_for()
+    assert effort.text_content() in setting.inner_text()
+    page.keyboard.press('Escape')
+    setting.wait_for(state='hidden')
+
+    def check_toolbar(width):
         page.set_viewport_size({'width': width, 'height': 752})
         page.wait_for_function('''() => {
             const b=document.getElementById('dml-voice-button'), s=b?.nextElementSibling;
@@ -56,10 +74,18 @@ with sync_playwright() as pw:
             const a=b.getBoundingClientRect(), r=s.getBoundingClientRect();
             return a.width>=36 && r.width>=38 && r.height>=38 && a.right<=r.left+1 && r.right<=innerWidth && Math.abs(a.y+a.height/2-r.y-r.height/2)<=3;
         }''')
-        label = card.locator('[data-slot="conversation.input.model"] [class$=\"_triggerLabel\"]').first
+        label = model.locator('[class$="_triggerLabel"]')
         assert label.is_visible() and label.bounding_box()['width'] > 24
+        assert not effort.is_visible(), (width, model.inner_text())
+        label_box = label.bounding_box()
+        assert label_box['x'] + label_box['width'] <= mic.bounding_box()['x'] + 1
+        if width >= 393 and label.inner_text() == 'DeepSeek-V4.1-Flash':
+            assert label.evaluate('el => el.scrollWidth <= el.clientWidth + 1')
+
+    widths = (320, 360, 375, 393, 430, 820, 393)
+    for width in widths:
+        check_toolbar(width)
     assert not page.locator('[data-sidebar-opener]').is_visible()
-    print('Button is next to send at 320, 393 and 820 px.', flush=True)
 
     def down():
         box = mic.bounding_box()
@@ -82,10 +108,13 @@ with sync_playwright() as pw:
     assert editor.is_visible() and page.evaluate('document.activeElement.isContentEditable')
     assert page.locator('#dml-voice-hold').count() == 0
     assert page.evaluate("messages.some(m=>m.type==='voice-start')")
-    page.screenshot(path=fixture / f'voice-inline-{name}.png')
+    for width in widths:
+        check_toolbar(width)
+    page.screenshot(path=fixture / f'voice-toolbar-{name}.png')
     inline.tap()
     page.wait_for_function("document.activeElement.isContentEditable && document.activeElement.textContent.includes('测试 voice 日本語')")
     assert not inline.is_visible()
+    check_toolbar(393)
     x, y = down()
     page.evaluate("()=>__DSH_MOBILE_BRIDGE__.voiceEvent({id:messages.filter(m=>m.type==='voice-start').at(-1).id,status:'final',text:'should not insert early'})")
     assert 'should not insert early' not in editor.inner_text()

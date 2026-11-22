@@ -576,27 +576,24 @@ html[data-dml-native-nav] [data-conversation-header-leading]:has([data-sidebar-o
 [data-composer-card]:has(#dml-voice-button) span[class$="_triggerAnchor"]:has(> button:is([aria-label="开始录音"], [aria-label="打开语音输入引导"], [aria-label="Start recording"], [aria-label="Open voice input setup"], [aria-label="録音を開始"], [aria-label="音声入力のセットアップを開く"])) { display:none !important; }
 #dml-voice-button:is([data-recording], [data-pressed], [aria-pressed="true"]) { color:#079c58; background:color-mix(in srgb, currentColor 12%, transparent); }
 #dml-voice-button + button { min-inline-size:38px; min-block-size:38px; }
-/* Dictation stays inside the real text field, above the system keyboard. */
-#dml-inline-voice { position:relative; height:0; z-index:7; }
-#dml-inline-voice > #dml-voice-button {
-  position:absolute; right:6px; top:0; width:42px; height:40px;
+/* Recording changes the mic's appearance, not its hit target or toolbar position. */
+#dml-voice-button[aria-pressed="true"] {
   background:radial-gradient(circle, #07b967 0 12px, #07b96738 12.5px 15px, transparent 15.5px);
   color:white;
 }
-#dml-inline-voice svg { width:15px; height:15px; stroke-width:2.3; }
-[data-composer-card]:has(#dml-inline-voice) #dml-composer-expand { visibility:hidden; }
-#dml-inline-voice + [data-input-scroll] { margin-inline-end:44px; min-height:40px; }
-/* Let the model name shrink last, instead of replacing it with a database icon. */
-[data-composer-card] [class$="_row"]:has([class$="_triggerLabel"]) {
+#dml-voice-button[aria-pressed="true"] svg { width:15px; height:15px; stroke-width:2.3; }
+[data-composer-card] [class$="_row"]:has([data-slot="conversation.input.model"]) {
   flex-wrap:nowrap; gap:4px;
   --dsh-composer-model-text-display:block !important;
   --dsh-composer-model-icon-display:none !important;
 }
-[data-composer-card] [class$="_trailing"]:has([class$="_triggerLabel"]) { flex:1 1 0; min-width:0; justify-content:flex-end; gap:4px; }
-[data-composer-card] button:has(> [class$="_triggerLabel"]) { max-width:100%; gap:3px; padding-inline:2px; }
+[data-composer-card] [class$="_trailing"]:has([data-slot="conversation.input.model"]) { flex:1 1 0; min-width:0; justify-content:flex-end; gap:4px; }
+[data-composer-card] [data-slot="conversation.input.model"] { min-width:0; }
+[data-composer-card] [data-slot="conversation.input.model"] button:has(> [class$="_triggerLabel"]) { max-width:100%; gap:3px; padding-inline:2px; }
+/* Keep effort in the model picker, not in the mobile composer toolbar. */
+[data-composer-card] [data-slot="conversation.input.model"] button > [class$="_triggerEffort"] { display:none; }
 @media (max-width:440px) {
-  [data-composer-card] :is([class$="_modes"], [class$="_tools"]) { gap:3px; }
-  [data-composer-card] [class$="_triggerEffort"] { display:none; }
+  [data-composer-card] :is([class$="_modes"], [class$="_tools"], [class$="_standardControls"]) { gap:3px; }
 }
 #dml-voice-hud {
   position:fixed; inset:0; z-index:99999; overflow:hidden; display:flex; align-items:center; justify-content:center;

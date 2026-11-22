@@ -13,8 +13,6 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
   };
   const mic = make('button', 'dml-voice-button', '<svg aria-hidden="true" viewBox="0 0 24 24" width="19" height="19" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19v3m-7-12v2a7 7 0 0 0 14 0v-2"/><rect x="9" y="2" width="6" height="13" rx="3"/></svg>');
   mic.type = 'button'; mic.title = '语音输入'; mic.setAttribute('aria-label', '语音输入');
-  const inlineSlot = make('div', 'dml-inline-voice', '');
-  let sendButton;
   const hud = make('div', 'dml-voice-hud', '<div class="dml-voice-bubble"><div class="dml-voice-wave" aria-hidden="true">' + '<i></i>'.repeat(13) + '</div></div><div class="dml-voice-directions" aria-hidden="true"><span data-target="cancel"><b>×</b>取消</span><span data-target="preview"><b>文</b>预览文字</span></div><div class="dml-voice-dock"><span role="status"></span></div>');
   const panel = make('dialog', 'dml-voice-panel', '<div class="dml-voice-title" tabindex="-1" autofocus>语音转文字</div><div role="status"></div><textarea rows="4" aria-label="识别结果" hidden></textarea><div class="dml-voice-actions"><button type="button" data-voice-cancel>取消</button><button type="button" data-voice-record hidden>开始录音</button><button type="button" data-voice-use hidden>插入草稿</button></div>');
   panel.setAttribute('aria-label', '语音转文字'); hud.hidden = true;
@@ -33,7 +31,7 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
     if (current) {
       clearTimeout(current.watchdog); command('cancel', current); current = undefined;
     }
-    leaveInline();
+    resetMicLabel();
     hud.hidden = true;
     if (panel.open) panel.close();
     mic.removeAttribute('data-recording'); result.value = '';
@@ -89,10 +87,7 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
       abandon();
     }
   }
-  function leaveInline() {
-    if (!inlineSlot.isConnected) return;
-    if (sendButton?.isConnected) sendButton.before(mic);
-    inlineSlot.remove();
+  function resetMicLabel() {
     mic.setAttribute('aria-label', '语音输入');
     mic.setAttribute('aria-pressed', 'false');
     mic.title = '语音输入';
@@ -100,16 +95,13 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
   function startInline(position) {
     const card = mic.closest('[data-composer-card]');
     const editor = card?.querySelector('[contenteditable="true"]');
-    const scroll = card?.querySelector('[data-input-scroll]');
-    if (!editor || !scroll) { showPanel('ready'); return; }
+    if (!editor) { showPanel('ready'); return; }
     // Still in the trusted tap: keep the system keyboard and the actual editable draft.
     editor.focus({ preventScroll: true });
-    scroll.before(inlineSlot);
-    inlineSlot.appendChild(mic);
     mic.setAttribute('aria-label', '结束听写');
     mic.setAttribute('aria-pressed', 'true');
     mic.title = '结束听写';
-    if (!start(position, 'inline')) leaveInline();
+    if (!start(position, 'inline')) resetMicLabel();
   }
   function actionAt(e, g) {
     const dx = e.clientX - g.x, dy = e.clientY - g.y;
@@ -189,8 +181,7 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
       const send = card && [...card.querySelectorAll('button')].reverse().find(b => b.type === 'submit' || /^(?:发送|停止|继续生成|send|stop|resume|continue)/i.test(b.getAttribute('aria-label') || b.title || ''));
       if (current && (!sameSession(current) || current.card !== card || !send)) abandon();
       if (readOnly() || !send) { if (panel.open || gesture || current) abandon(); mic.remove(); return; }
-      sendButton = send;
-      if (!inlineSlot.isConnected && mic.nextElementSibling !== send) send.before(mic);
+      if (mic.nextElementSibling !== send) send.before(mic);
     },
     receive(data) {
       const item = current;
