@@ -95,6 +95,6 @@ struct TaskPushSection: View {
         Button(settings.bark ? "更新 Bark 设备" : "启用 Bark 通知"){settings.configure(["op":"bark","key":key]);key=""}.disabled(settings.busy || key.isEmpty)
         if settings.bark {Button("发送一条测试通知"){settings.configure(["op":"test"])}.disabled(settings.busy);Button("停用 Bark 通知"){settings.configure(["op":"bark","key":""]) }.disabled(settings.busy)}
         Toggle("锁屏实时活动 / 灵动岛",isOn:Binding(get:{settings.island},set:{settings.configure(["op":"island","enabled":$0])})).disabled(settings.busy)
-        Text(settings.message.isEmpty ? (settings.relay ? "只推送状态、轮次及步骤，不发送聊天正文。" : "未发现云推送配置；实时活动仍可在应用打开时更新。") : settings.message).font(.footnote).foregroundStyle(.secondary)
+        Text(settings.message.isEmpty ? (settings.relay ? "Bark 仅在任务结束时通知。任务标题、工作区和简短结果可能显示在锁屏上。" : "未发现云推送配置；实时活动仍可在应用打开时更新。") : settings.message).font(.footnote).foregroundStyle(.secondary)
     }.onAppear{settings.poll()} }
 }

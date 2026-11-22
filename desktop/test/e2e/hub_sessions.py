@@ -102,7 +102,9 @@ with sync_playwright() as pw:
     expect(search).to_have_value(prefix)
     archive = hub.get_by_role('button', name='归档会话：' + titles[2], exact=True)
     assert archive.evaluate('b=>b.getBoundingClientRect().left>=b.parentElement.getBoundingClientRect().right-1')
+    label_x = archive.evaluate("b=>b.parentElement.querySelector('.dml-hub-item-title').getBoundingClientRect().left")
     archive.evaluate('b=>b.parentElement.scrollLeft=b.parentElement.scrollWidth')
+    assert abs(archive.evaluate("b=>b.parentElement.querySelector('.dml-hub-item-title').getBoundingClientRect().left") - label_x) <= 1
     assert archive.evaluate('b=>b.getBoundingClientRect().right<=b.parentElement.getBoundingClientRect().right+1')
     archive.click()
     expect(hub.locator('.dml-hub-hint[role=status]')).to_contain_text('已归档 1 个会话')

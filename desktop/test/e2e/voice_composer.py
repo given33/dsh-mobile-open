@@ -56,7 +56,7 @@ with sync_playwright() as pw:
             const a=b.getBoundingClientRect(), r=s.getBoundingClientRect();
             return a.width>=36 && r.width>=38 && r.height>=38 && a.right<=r.left+1 && r.right<=innerWidth && Math.abs(a.y+a.height/2-r.y-r.height/2)<=3;
         }''')
-        label = card.locator('[class$=\"_triggerLabel\"]').first
+        label = card.locator('[data-slot="conversation.input.model"] [class$=\"_triggerLabel\"]').first
         assert label.is_visible() and label.bounding_box()['width'] > 24
     assert not page.locator('[data-sidebar-opener]').is_visible()
     print('Button is next to send at 320, 393 and 820 px.', flush=True)
