@@ -3,6 +3,7 @@
 // native visual design tokens, typography, icons, or workflow components.
 
 import { createHash } from 'node:crypto';
+import { installMobileVoice, voiceReleaseAction } from './mobile-voice.mjs';
 import { createChatSessionScrollMemory, createWebRemoteControlLifecycleRecovery, groupMobileTasks } from './zcode-webview.mjs';
 
 const VIEWPORT_META = '<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover, interactive-widget=resizes-content" />';
@@ -557,6 +558,47 @@ body > [data-dsh-submenu-parent],
 /* Only native clients already have a navigation button above the web content. */
 html[data-dml-native-nav] [data-sidebar-opener] { display:none !important; }
 html[data-dml-native-nav] [data-slot="shell.leading"]:has([data-sidebar-opener]):not(:has(button:not([data-sidebar-opener]))) { display:none !important; }
+html[data-dml-native-nav] [data-conversation-header-leading]:empty,
+html[data-dml-native-nav] [data-conversation-header-leading]:has([data-sidebar-opener]):not(:has(button:not([data-sidebar-opener]))) { display:none !important; }
+#dml-voice-button {
+  box-sizing:border-box; display:inline-grid; place-items:center; flex:none;
+  width:40px; height:42px; padding:0; border:0; border-radius:50%; background:none;
+  color:inherit; touch-action:none; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none;
+  -webkit-tap-highlight-color:transparent;
+}
+#dml-voice-button[data-recording] { color:#3381c6; background:color-mix(in srgb, currentColor 12%, transparent); }
+#dml-voice-hud {
+  position:fixed; z-index:99999; inset:auto 12px calc(84px + env(safe-area-inset-bottom, 0px)) 12px;
+  margin-inline:auto; width:auto; max-width:340px; text-align:center; padding:14px 18px 12px;
+  box-sizing:border-box; border-radius:18px; background:#242428; color:#fff; box-shadow:0 6px 28px #0004;
+  font:500 14px/1.5 system-ui,sans-serif; pointer-events:none; user-select:none;
+}
+#dml-voice-hud[data-action="cancel"] { background:#a62e38; }
+#dml-voice-hud[data-action="preview"] { background:#205c8f; }
+.dml-voice-wave { display:flex; justify-content:center; align-items:center; height:31px; gap:4px; }
+.dml-voice-wave i { background:currentColor; width:4px; height:25px; border-radius:4px; transform:scaleY(.14); transition:transform 90ms linear; }
+.dml-voice-directions { display:flex; justify-content:space-between; margin-top:5px; color:#ffffffc9; font-size:12px; }
+#dml-voice-panel {
+  position:fixed; inset:auto 0 calc(10px + env(safe-area-inset-bottom, 0px)) 0;
+  margin:0 auto; box-sizing:border-box; width:min(calc(100% - 20px), 390px); max-height:85%;
+  border:1px solid #8884; border-radius:18px; padding:16px; background:var(--dsw-color-bg-base, Canvas); color:CanvasText;
+  font:500 14px/1.5 system-ui,sans-serif;
+}
+#dml-voice-panel::backdrop { background:#0005; }
+html[data-dml-native-kb="true"] #dml-voice-panel {
+  bottom:calc(10px + max(env(safe-area-inset-bottom, 0px), var(--dml-kb, 0px)));
+  max-height:calc(100% - 25px - var(--dml-kb, 0px));
+}
+#dml-voice-panel .dml-voice-title { font-size:16px; font-weight:650; outline:none; }
+#dml-voice-panel [role=status]:not(:empty) { margin-top:8px; }
+#dml-voice-panel textarea { box-sizing:border-box; width:100%; margin-top:10px; padding:8px; border:1px solid #8886; border-radius:8px; font:400 16px/1.45 system-ui,sans-serif; background:Field; color:FieldText; }
+.dml-voice-actions { display:flex; gap:8px; justify-content:flex-end; margin-top:8px; }
+.dml-voice-actions button { min-height:44px; padding:0 12px; border-radius:8px; border:0; background:color-mix(in srgb, CanvasText 8%, Canvas); color:CanvasText; }
+.dml-voice-actions [data-voice-use], .dml-voice-actions [data-voice-record] { background:#266ec6; color:white; }
+.dml-voice-actions button:disabled { opacity:.45; }
+#dml-voice-hud[hidden], #dml-voice-panel [hidden], .dml-voice-directions[hidden] { display:none !important; }
+@media (max-width:360px) { #dml-voice-button { width:38px; } }
+@media (prefers-reduced-motion:reduce) { .dml-voice-wave i { transition:none; } }
 .dml-reader {
   flex: 1 1 auto;
   min-height: 0;
@@ -2239,6 +2281,7 @@ export const MOBILE_SHELL_JS = `(() => {
   }
 
   let lastReportedSessionId = null;
+  let mobileVoice = null;
   function reportUi() {
     uiRaf = 0;
     const cordis = globalThis.__DSH_MOBILE_CORDIS__;
@@ -2248,6 +2291,7 @@ export const MOBILE_SHELL_JS = `(() => {
     const pendingCount = cordis?.getPendingApprovals?.()?.length ?? 0;
     const drawerOpen = isDrawerOpen();
     ensureComposerExpandButton();
+    mobileVoice?.refresh();
     if (currentSessionId !== lastReportedSessionId) {
       lastReportedSessionId = currentSessionId;
       if (document.documentElement?.getAttribute?.('data-dml-composer-full') === 'true') {
@@ -3108,6 +3152,7 @@ export const MOBILE_SHELL_JS = `(() => {
     openSession,
     newSession,
     insertDraft,
+    voiceEvent(data) { mobileVoice?.receive(data); },
     openHub,
     scrollToTop,
     scrollToBottom,
@@ -3154,6 +3199,12 @@ export const MOBILE_SHELL_JS = `(() => {
 
   // Start lightweight observers once DOM is ready (no subtree:true on document.body!).
   const start = () => {
+    mobileVoice = (${installMobileVoice.toString()})({
+      post, readOnly: () => !!shell.readOnly,
+      session: () => globalThis.__DSH_MOBILE_CORDIS__?.getCurrentSessionId?.()
+        ?? document.querySelector('[data-conversation-content]')?.dataset.conversationSession ?? null,
+      insertDraft, showToast, haptic, releaseAction: ${voiceReleaseAction.toString()},
+    });
     applyDisplayPrefs();
     reportTheme();
     reportUi();

@@ -213,17 +213,6 @@ struct RootView: View {
             Spacer(minLength: 4)
 
             if model.browser != nil, model.actionsEnabled {
-                Button { showDictation = true } label: {
-                    Image(systemName: "mic")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(Theme.labelPrimary)
-                        .frame(width: 30, height: 34)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("语音输入")
-                .accessibilityIdentifier("voice-dictation-button")
-
                 Button { model.startNewSession() } label: {
                     Image(systemName: "square.and.pencil")
                         .font(.system(size: 15, weight: .medium))
@@ -246,7 +235,7 @@ struct RootView: View {
                     }
                     if model.actionsEnabled {
                         Button { showDictation = true } label: {
-                            Label("语音输入", systemImage: "mic")
+                            Label("语音语言与辅助输入", systemImage: "mic")
                         }
                         Button { model.startNewSession() } label: {
                             Label("新建会话", systemImage: "square.and.pencil")

@@ -811,7 +811,7 @@ window.__ModuleLoader__.load({
             return true
           }
           const editor = document.querySelector?.('[data-composer-card] [contenteditable="true"]')
-          if (editor && typeof editor.focus === 'function') {
+          if (opts.focus !== false && editor && typeof editor.focus === 'function') {
             editor.focus()
             if (typeof document.execCommand === 'function') {
               document.execCommand('insertText', false, text)

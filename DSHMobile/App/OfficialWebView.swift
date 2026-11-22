@@ -1,6 +1,7 @@
 import QuickLook
 import SwiftUI
 import UIKit
+import UIKit.UIGestureRecognizerSubclass
 import WebKit
 import Security
 
@@ -11,6 +12,17 @@ private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         delegate?.userContentController(controller, didReceive: message)
     }
+}
+
+/// Observes the real touch without delaying or taking ownership of WebKit gestures.
+private final class VoiceTouchObserver: UIGestureRecognizer {
+    var began: ((CGPoint) -> Void)?
+    override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+        if touches.count == 1, let view, let touch = touches.first { began?(touch.location(in: view)) }
+        state = .failed
+    }
+    override func canPrevent(_ preventedGestureRecognizer: UIGestureRecognizer) -> Bool { false }
+    override func canBePrevented(by preventingGestureRecognizer: UIGestureRecognizer) -> Bool { false }
 }
 
 /// The running desktop supplies every application page, workflow panel and plugin asset.
@@ -69,9 +81,16 @@ struct OfficialWebView: UIViewRepresentable {
         web.scrollView.delegate = context.coordinator
         web.accessibilityIdentifier = "official-web-view"
         context.coordinator.webView = web
+        let touch = VoiceTouchObserver(target: nil, action: nil)
+        touch.cancelsTouchesInView = false
+        touch.delaysTouchesBegan = false
+        touch.delaysTouchesEnded = false
+        touch.began = { [weak coordinator = context.coordinator] point in coordinator?.recordVoiceTouch(point) }
+        web.addGestureRecognizer(touch)
         context.coordinator.onFrame = onFrame
         NotificationCenter.default.addObserver(context.coordinator, selector: #selector(Coordinator.captureFrame), name: UIApplication.willResignActiveNotification, object: nil)
         NotificationCenter.default.addObserver(context.coordinator, selector: #selector(Coordinator.captureFrame), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        NotificationCenter.default.addObserver(context.coordinator, selector: #selector(Coordinator.cancelVoice), name: UIApplication.didEnterBackgroundNotification, object: nil)
         NotificationCenter.default.addObserver(context.coordinator, selector: #selector(Coordinator.keyboardWillChangeFrame(_:)), name: UIResponder.keyboardWillChangeFrameNotification, object: nil)
         NotificationCenter.default.addObserver(context.coordinator, selector: #selector(Coordinator.keyboardWillHide(_:)), name: UIResponder.keyboardWillHideNotification, object: nil)
         context.coordinator.bind(session, initial: true)
@@ -106,6 +125,7 @@ struct OfficialWebView: UIViewRepresentable {
     static func dismantleUIView(_ web: WKWebView, coordinator: Coordinator) {
         NotificationCenter.default.removeObserver(coordinator)
         coordinator.stopBackgroundTimers()
+        coordinator.cancelVoice()
         web.stopLoading()
         web.configuration.userContentController.removeScriptMessageHandler(forName: "dshMobile")
         web.navigationDelegate = nil
@@ -130,6 +150,50 @@ struct OfficialWebView: UIViewRepresentable {
         var onBridgeMessage: ([String: Any]) -> Void
         weak var webView: WKWebView?
         private var downloads: [ObjectIdentifier: URL] = [:]
+        private let voice = LocalDictation()
+        private var voiceID: String?
+        private var voiceTouch: (point: CGPoint, time: TimeInterval)?
+
+        func recordVoiceTouch(_ point: CGPoint) { voiceTouch = (point, ProcessInfo.processInfo.systemUptime) }
+
+        @objc func cancelVoice() {
+            voiceID = nil
+            voiceTouch = nil
+            voice.cancel()
+        }
+
+        private func handleVoice(_ type: String, _ payload: [String: Any]) {
+            guard let id = payload["id"] as? String, id.hasPrefix("dml-"), id.count < 64 else { return }
+            if type == "voice-cancel", voiceID == id { cancelVoice(); return }
+            if type == "voice-stop", voiceID == id {
+                if !voice.requesting { voice.stop() }
+                return
+            }
+            guard type == "voice-start", voiceID == nil, routePainted, session.actions,
+                  UIApplication.shared.applicationState == .active, let web = webView,
+                  let touch = voiceTouch, ProcessInfo.processInfo.systemUptime - touch.time < 1.2,
+                  let x = payload["x"] as? Double, let y = payload["y"] as? Double,
+                  let width = payload["width"] as? Double, width > 0, width.isFinite else { return }
+            let scale = web.bounds.width / CGFloat(width)
+            guard hypot(touch.point.x - CGFloat(x) * scale, touch.point.y - CGFloat(y) * scale) < 44 else { return }
+            voiceTouch = nil
+            voiceID = id
+            voice.text = ""
+            voice.event = { [weak self] status, message, level in
+                guard let self, self.voiceID == id else { return }
+                var result: [String: Any] = ["id": id, "status": status]
+                if let message { result[status == "final" ? "text" : "message"] = message }
+                if let level { result["level"] = level }
+                if let data = try? JSONSerialization.data(withJSONObject: result), let value = String(data: data, encoding: .utf8) {
+                    self.webView?.evaluateJavaScript("globalThis.__DSH_MOBILE_BRIDGE__?.voiceEvent?.(\(value))", completionHandler: nil)
+                }
+                if status == "final" || status == "error" || status == "permission-ready" { self.voiceID = nil }
+            }
+            Task { [weak self] in
+                guard let self, self.voiceID == id else { return }
+                await self.voice.start(locale: UserDefaults.standard.string(forKey: "dsh.voice.locale") ?? "", freshGestureAfterPermissions: true)
+            }
+        }
 
         init(
             session: BrowserSession,
@@ -167,7 +231,7 @@ struct OfficialWebView: UIViewRepresentable {
         // even when the paired desktop still serves an older mobile plugin.
         private static let nativeNavigation = """
         (()=>{const mount=()=>{const root=document.documentElement;if(!root)return false;
-        root.setAttribute('data-dml-native-nav','');const s=document.createElement('style');
+        globalThis.__DSH_NATIVE_VOICE__=1;root.setAttribute('data-dml-native-nav','');const s=document.createElement('style');
         s.textContent='[data-sidebar-opener]{display:none!important}';root.appendChild(s);return true;};
         if(!mount()){const o=new MutationObserver(()=>{if(mount())o.disconnect()});o.observe(document,{childList:true});}})();
         """
@@ -373,6 +437,7 @@ struct OfficialWebView: UIViewRepresentable {
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.frameInfo.isMainFrame, let source = message.frameInfo.request.url, local(source), message.name == "dshMobile", let payload = message.body as? [String: Any] else { return }
             let type = payload["type"] as? String
+            if let type, type.hasPrefix("voice-") { handleVoice(type, payload); return }
             if type == "launch-applied" {
                 #if DEBUG
                 if reloadID == initialReloadID,
@@ -455,6 +520,7 @@ struct OfficialWebView: UIViewRepresentable {
         }
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+            cancelVoice()
             onRestoring()
         }
 
@@ -467,6 +533,7 @@ struct OfficialWebView: UIViewRepresentable {
         func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { failed(error) }
         func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { failed(error) }
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            cancelVoice()
             loaded = false; loadingStarted = false; routePainted = false
             // Tell AppModel first so the saved snapshot covers the WebView before reloading silently in background.
             // Keep any active cover pinned until the reloaded live session posts launch-applied.
