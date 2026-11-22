@@ -68,5 +68,16 @@ if __name__ == '__main__':
         # Touch emulation alone still sends a desktop UA, enabling unrelated
         # desktop-only editor autofocus as a freshly-created session binds.
         device = pw.devices['iPhone 13' if engine == 'webkit' else 'Pixel 7']
-        try: exercise(connect(browser, host, user_agent=device['user_agent'])[0], host)
-        finally: browser.close()
+        try:
+            phone, desktop = connect(browser, host, user_agent=device['user_agent'])
+            assert desktop.evaluate('''async()=>{
+              const method='credentials/set';
+              const res=await fetch('/api/'+method,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+                type:'client-request',rpcId:'touch-onboarding',method,payload:{args:{ref:'DEEPSEEK_API_KEY',value:'synthetic-fixture-not-a-key'}}})});
+              return (await res.json()).result.ok;
+            }''')
+            phone.reload(wait_until='domcontentloaded')
+            phone.locator('[data-composer-card]').first.wait_for(timeout=40000)
+            exercise(phone, host)
+        finally:
+            browser.close()
