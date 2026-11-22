@@ -265,6 +265,12 @@ test('workspaceOffice enforces workspace confinement, rejects XXE, and serves LR
     assert.equal(second.blocks[0].text, '工作区正文');
     assert.equal(second.cached, true);
 
+    // A trusted workspace root may be an alias (e.g. macOS /var).
+    const alias = join(dir, 'workspace-alias');
+    await symlink(work, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    assert.equal((await workspaceOffice(alias, join(alias, 'report.docx'))).cached, true);
+    await assert.rejects(workspaceOffice(alias, join(alias, 'ext', 'secret.docx')), e => e.code === 'mobileOffice/type');
+
     // Traversal, symlink escape, outside absolute path, and XXE are rejected.
     await assert.rejects(workspaceOffice(work, '../outside/secret.docx'), e => e.code === 'mobileOffice/path');
     await assert.rejects(workspaceOffice(work, 'ext/secret.docx'), e => e.code === 'mobileOffice/type');

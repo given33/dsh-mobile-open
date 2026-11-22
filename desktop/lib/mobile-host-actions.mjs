@@ -122,10 +122,13 @@ export async function workspaceOffice(root, path) {
   const base = await realpath(root);
   let relPath = path.replace(/\\/g, '/');
   if (isAbsolute(path)) {
-    const rel = relative(base, resolve(path));
-    if (!rel || rel === '..' || rel.startsWith('..' + sep) || isAbsolute(rel)) {
-      throw failure('mobileOffice/path', '路径超出了工作区。');
-    }
+    // A host can report either the configured root or its canonical path
+    // (for example /var vs /private/var on macOS). Match the lexical root
+    // first, then resolve each child beneath the canonical root below.
+    const absolute = resolve(path);
+    const rel = [resolve(root), base].map(parent => relative(parent, absolute))
+      .find(suffix => suffix && suffix !== '..' && !suffix.startsWith('..' + sep) && !isAbsolute(suffix));
+    if (!rel) throw failure('mobileOffice/path', '路径超出了工作区。');
     relPath = rel.split(sep).join('/');
   } else {
     relPath = relPath.replace(/^(?:\.\/)+/, '');
