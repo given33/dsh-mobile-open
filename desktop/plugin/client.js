@@ -1679,6 +1679,17 @@ window.__ModuleLoader__.load({
       if (typeof React?.createElement !== 'function' || typeof ctx.slots?.register !== 'function') return
       const sessionTime = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 
+      // The layout store, unlike the selected session ID, distinguishes every global panel from chat.
+      const panelInfo = ctx.get?.('layout')?.panelInfo
+      const nativeHub = globalThis.__DSH_NATIVE_PANEL_HUB__ === 1 && !!globalThis.webkit?.messageHandlers?.dshMobile
+      if (nativeHub && panelInfo) ctx.effect(() => {
+        const sync = () => {
+          const secondary = panelInfo.getSnapshot().activePanelId != null
+          if (hubState.secondary !== secondary) setHubState({ secondary })
+        }
+        sync()
+        return panelInfo.subscribe(sync)
+      })
       const BUILTIN_SNIPPETS = [
         { id: 'b-summary', title: '总结进展', text: '请简要总结目前完成的改动、验证结果和剩余待办。' },
         { id: 'b-debug', title: '排查修复', text: '请定位当前报错或异常的根本原因，给出最小修复并运行验证。' },
@@ -1747,6 +1758,7 @@ window.__ModuleLoader__.load({
         const pendingCount = list.filter(s => s.pendingInteraction).length
         const runningCount = list.filter(s => s.running).length
         const badge = pendingCount > 0 ? 'approval' : runningCount > 0 ? 'running' : undefined
+        if (nativeHub && snap.secondary) return null
         return h('button', {
           type: 'button',
           'data-dml-hub-trigger': variant,
@@ -1952,7 +1964,7 @@ window.__ModuleLoader__.load({
             const rf = rightFrameRef.current
             const rightOpen = !!(rf && rf.isConnected && !rf.hasAttribute('data-rightbar-collapsed') && document.querySelector('[data-sidebar-right-toggle]'))
             const headerMounted = (snap.headerCount || 0) > 0
-            const next = !snap.open && !drawerOpen && !rightOpen && !headerMounted
+            const next = !snap.open && !drawerOpen && !rightOpen && (!headerMounted || (nativeHub && snap.secondary))
             setShowFloating(prev => prev === next ? prev : next)
           }
           const sched = () => { if (!raf && typeof requestAnimationFrame === 'function') raf = requestAnimationFrame(check) }
@@ -1965,11 +1977,22 @@ window.__ModuleLoader__.load({
             mo?.disconnect()
             window.removeEventListener?.('resize', sched)
           }
-        }, [snap.open, snap.headerCount, curSessionId])
+        }, [snap.open, snap.headerCount, snap.secondary, curSessionId])
+
+        const nativeVisible = !!(nativeHub && snap.secondary && !snap.open && showFloating)
+        const nativeBadge = sessions.some(s => !s.archived && s.pendingInteraction) ? 'approval'
+          : sessions.some(s => !s.archived && s.running) ? 'running' : ''
+        React.useLayoutEffect(() => {
+          if (!nativeHub) return
+          globalThis.webkit.messageHandlers.dshMobile.postMessage({ type:'secondary-hub', visible:nativeVisible, badge:nativeBadge, writable:canWrite })
+        }, [nativeVisible, nativeBadge, canWrite])
+        React.useEffect(() => () => {
+          if (nativeHub) globalThis.webkit.messageHandlers.dshMobile.postMessage({type:'secondary-hub', visible:false})
+        }, [])
 
         if (!snap.open) {
           return h(React.Fragment, null,
-            showFloating && h(MobileHubTrigger, { variant: 'floating' }),
+            showFloating && !(nativeHub && snap.secondary) && h(MobileHubTrigger, { variant: 'floating' }),
             h('div', { className: 'dml-floating-pills' },
             otherPending && h('button', {
               type: 'button',
@@ -2361,6 +2384,44 @@ window.__ModuleLoader__.load({
         ))
       }
 
+      // The upstream frame owns its atlas, reduced-motion policy and playback lifecycle.
+      // Ask that frame to play once after restoration; never dispatch input to the editor.
+      function MobileHomeLayout() {
+        const marker = React.useRef(null)
+        React.useLayoutEffect(() => {
+          const content = marker.current?.closest('[data-content-phase="hero"]')
+          const seat = content?.querySelector('[data-composer-seat]')
+          const card = seat?.querySelector('[data-composer-card]')
+          const scroll = content?.querySelector('[data-conversation-scroll]')
+          if (!seat || !card || !scroll) return
+          const stack = card.closest('[class$="_composerHero"]')
+          if (!stack) return
+          const align = () => {
+            const box = stack.getBoundingClientRect(), input = card.getBoundingClientRect()
+            const offset = (input.top - box.top) - (box.bottom - input.bottom)
+            seat.style.setProperty('--dml-hero-balance', Math.max(0, Math.min(offset, scroll.clientHeight - box.height)) + 'px')
+          }
+          align()
+          const size = new ResizeObserver(align)
+          for (const element of [scroll, stack, card]) size.observe(element)
+          const canvas = content.querySelector('canvas[data-home-whale]')
+          let played = false, frame = 0
+          const play = () => {
+            if (played || !canvas || document.hidden || document.documentElement.matches('[data-dml-routing],[data-dml-snap-cover]') ||
+                matchMedia('(prefers-reduced-motion: reduce)').matches || !canvas.clientHeight) return
+            played = true
+            canvas.dispatchEvent(new MouseEvent('click', { bubbles:true, button:0 }))
+          }
+          const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(play) }
+          const cover = new MutationObserver(schedule)
+          cover.observe(document.documentElement, {attributes:true, attributeFilter:['data-dml-routing','data-dml-snap-cover']})
+          document.addEventListener('visibilitychange', schedule)
+          schedule()
+          return () => { size.disconnect(); cover.disconnect(); cancelAnimationFrame(frame); document.removeEventListener('visibilitychange', schedule); seat.style.removeProperty('--dml-hero-balance') }
+        }, [])
+        return h('span', {ref:marker, hidden:true})
+      }
+      ctx.slots.inject('conversation.hero.options', () => ctx.slots.register({ name:'conversation.hero.options', id:'mobile-home-layout' }, MobileHomeLayout))
       ctx.slots.inject('conversation.session.header.utilities', () =>
         ctx.slots.register({ name: 'conversation.session.header.utilities', id: 'dsh-mobile-hub-btn', order: -100, label: '移动端工具箱' }, MobileHubTrigger))
       ctx.slots.inject('shell.overlay', () =>

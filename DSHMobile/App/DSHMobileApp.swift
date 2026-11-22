@@ -213,6 +213,27 @@ struct RootView: View {
 
             Spacer(minLength: 4)
 
+            if model.browser != nil, let badge = model.secondaryHubBadge, !showSnapshotCover, !model.drawerOpen {
+                Button { model.openHub("tasks") } label: {
+                    Image(systemName: "square.grid.2x2")
+                        .font(.system(size: 15, weight: .medium))
+                        .overlay(alignment: .topTrailing) {
+                            if !badge.isEmpty {
+                                Circle().fill(badge == "approval" ? Theme.warn : Theme.success)
+                                    .frame(width: 6, height: 6).offset(x: 3, y: -2)
+                            }
+                        }
+                        .frame(width: 34, height: 36)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.labelPrimary)
+                .fixedSize()
+                .layoutPriority(2)
+                .accessibilityLabel("移动端工具箱")
+                .accessibilityIdentifier("secondary-hub-button")
+            }
+
             if model.browser != nil, model.actionsEnabled {
                 Button { model.startNewSession() } label: {
                     Image(systemName: "square.and.pencil")

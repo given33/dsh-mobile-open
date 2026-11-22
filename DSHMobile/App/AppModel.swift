@@ -174,6 +174,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     @Published private(set) var desktopFocus: DesktopFocus?
     @Published private(set) var pageTheme = PageTheme(dark: nil, bgBase: "", sidebarFill: "")
     @Published private(set) var followDesktop = false
+    @Published private(set) var secondaryHubBadge: String?
     @Published private(set) var taskRunning = false
     @Published private(set) var pendingApprovalsCount = 0
     @Published private(set) var notificationsEnabled = false
@@ -448,6 +449,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         linkInterrupted = false
         wsHealth = .connecting
         drawerOpen = false
+        secondaryHubBadge = nil
         taskRunning = false
         pendingApprovalsCount = 0
         lastLatencyMs = nil
@@ -743,6 +745,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 wsHealth = .disconnected
                 scheduleRecoveryCheck(delaySeconds: 0.05)
             }
+        case "secondary-hub":
+            secondaryHubBadge = body["visible"] as? Bool == true ? (body["badge"] as? String ?? "") : nil
         case "ui":
             if let open = body["drawerOpen"] as? Bool { drawerOpen = open }
             if let title = body["title"] as? String { pageTitle = title }
@@ -802,6 +806,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         problem = nil
         reconnecting = false
         connecting = false
+        secondaryHubBadge = nil
         taskRunning = false
         pendingApprovalsCount = 0
         lastLatencyMs = nil

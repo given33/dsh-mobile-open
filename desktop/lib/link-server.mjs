@@ -20,6 +20,7 @@ import { dirname, join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { brotliCompressSync, constants as zlibConstants, gzip, gzipSync } from 'node:zlib';
 import { promisify } from 'node:util';
+import { createDesktopWeather } from './desktop-weather.mjs';
 import { directoryPickerFallback } from './directory-picker.mjs';
 import { writePrivate } from './identity.mjs';
 import { MOBILE_SHELL_CSS, MOBILE_SHELL_JS } from './mobile-shell.mjs';
@@ -200,6 +201,8 @@ export function createLinkServer({
   actions = () => false, terminal = () => false,
 }) {
   const allowTerminal = () => actions() && terminal();
+  const desktopWeather = createDesktopWeather();
+  const weatherLimit = new RateLimit(6, 60000);
   const pairLimit = new RateLimit(20, 60e3), helloLimit = new RateLimit(120, 60e3);
   const sockets = new Map(); // deviceId -> Set<WebSocket>
   const browserSessions = new Map();
@@ -336,6 +339,16 @@ export function createLinkServer({
       }
       const device = authorize(req);
       if (!device) return json(res, 401, { error: 'pairing-required' }, { 'WWW-Authenticate': 'Bearer' });
+      if (path === '/mobile/v1/weather' && req.method === 'POST') {
+        if (!weatherLimit.allow(device.id)) return json(res, 429, { error:'rate-limited' });
+        let body;
+        try { body = JSON.parse((await readBody(req, 256)).toString('utf8')); }
+        catch (e) { return json(res, e.status ?? 400, {error: 'bad-request'}); }
+        if (!body || Object.keys(body).length !== 1 || !['clock', 'weather'].includes(body.mode)) {
+          return json(res, 400, {error: 'expected-desktop-weather-mode'});
+        }
+        return json(res, 200, await desktopWeather(body.mode), {'Cache-Control': 'no-store'});
+      }
       if (path === '/mobile/v1/task-notifications' && notifications) {
         // Native paired-device token only; never expose push credentials or controls to WebView scripts.
         if (!devices.verify(bearer(req))) return json(res, 401, {error:'bearer-required'});
