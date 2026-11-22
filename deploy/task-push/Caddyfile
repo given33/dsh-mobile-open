@@ -1,0 +1,12 @@
+{$PUSH_DOMAIN} {
+  handle /v1/event {
+    reverse_proxy relay:8081
+  }
+  # Bark iOS registration; do not expose the public push API on this host.
+  @bark path /register /register/* /ping /healthz /info
+  handle @bark {
+    reverse_proxy bark:8080
+  }
+  respond 404
+}
+

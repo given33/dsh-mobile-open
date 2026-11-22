@@ -1,0 +1,31 @@
+services:
+  edge:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports: ["443:443", "80:80"]
+    environment:
+      PUSH_DOMAIN: ${PUSH_DOMAIN:?set your TLS hostname}
+    volumes: ["./Caddyfile:/etc/caddy/Caddyfile:ro", "caddy-data:/data", "caddy-config:/config"]
+  bark:
+    logging: {driver: none} # Upstream request logs contain registration and device keys.
+    image: finab/bark-server:${BARK_TAG:-v2.4.0}
+    restart: unless-stopped
+    volumes: ["bark-data:/data"]
+  relay:
+    image: node:22-alpine
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command: ["node", "/srv/relay.mjs"]
+    environment:
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_SANDBOX: ${APNS_SANDBOX:-false}
+      APNS_BUNDLE_ID: ${APNS_BUNDLE_ID:-app.dshmobile.client}
+    volumes: ["./relay.mjs:/srv/relay.mjs:ro", "./secrets:/run/secrets:ro"]
+volumes:
+  bark-data: {}
+  caddy-data: {}
+  caddy-config: {}
+

@@ -111,7 +111,8 @@ struct RootView: View {
         }
         .onOpenURL { url in
             guard url.scheme?.lowercased() == "dshmobile" else { return }
-            model.presentPairing(url.absoluteString)
+            if url.host?.lowercased() == "task" { model.openTaskURL(url) }
+            else if url.host?.lowercased() == "pair" { model.presentPairing(url.absoluteString) }
         }
         .sheet(isPresented: Binding(get: { model.desktop != nil && model.showPairing },
                                     set: { if !$0 { model.closePairing() } })) {
@@ -414,6 +415,7 @@ private struct ConnectionDetailSheet: View {
                             .disabled(model.pinging)
                         }
                     }
+                    TaskPushSection(settings:model.taskPush)
                     Section("桌面端同步") {
                         Toggle("自动跟随桌面当前会话", isOn: Binding(
                             get: { model.followDesktop },

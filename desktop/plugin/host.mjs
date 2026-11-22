@@ -68,6 +68,7 @@ export function apply(ctx, rawConfig = {}) {
   const config = readConfig(rawConfig);
   const say = (...parts) => console.log('[dsh-mobile-link]', ...parts);
   let service, disposed = false;
+  ctx.on?.('session/event', (session,event) => service?.notifications?.event(session.id,event));
   const panels = createPanelRegistry();
   const focus = createMobileFocusTracker();
   ctx.provide?.('mobilePanels', { register: panels.register });

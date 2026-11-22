@@ -11,8 +11,8 @@ settings:
     SWIFT_VERSION: '5.0'
     TARGETED_DEVICE_FAMILY: '1,2'
     IPHONEOS_DEPLOYMENT_TARGET: '17.0'
-    MARKETING_VERSION: '0.5.6'
-    CURRENT_PROJECT_VERSION: '26'
+    MARKETING_VERSION: '0.6.0'
+    CURRENT_PROJECT_VERSION: '27'
 targets:
   DSHMobile:
     type: application
@@ -22,10 +22,14 @@ targets:
         excludes:
           - Views
           - Connection/LinkSession.swift
+      - path: SharedTaskUI
     dependencies:
       - package: DSHCore
+      - target: TaskIsland
+        embed: true
     settings:
       base:
+        CODE_SIGN_ENTITLEMENTS: DSHMobile/DSHMobile.entitlements
         PRODUCT_BUNDLE_IDENTIFIER: app.dshmobile.client
         GENERATE_INFOPLIST_FILE: YES
         INFOPLIST_KEY_CFBundleDisplayName: DSH Mobile
@@ -38,6 +42,7 @@ targets:
     info:
       path: DSHMobile/Info.plist
       properties:
+        NSSupportsLiveActivities: true
         NSAppTransportSecurity:
           NSAllowsLocalNetworking: true
           # Direct IP addresses are supplied by the pairing offer at runtime.
@@ -55,6 +60,21 @@ targets:
             CFBundleURLSchemes: [dshmobile]
         CADisableMinimumFrameDurationOnPhone: true
         UIFileSharingEnabled: false
+  TaskIsland:
+    type: app-extension
+    platform: iOS
+    sources: [TaskIsland, SharedTaskUI]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.dshmobile.client.TaskIsland
+        APPLICATION_EXTENSION_API_ONLY: YES
+        SKIP_INSTALL: YES
+    info:
+      path: TaskIsland/Info.plist
+      properties:
+        CFBundleDisplayName: DSH 实时活动
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
   DSHMobileUITests:
     type: bundle.ui-testing
     platform: iOS

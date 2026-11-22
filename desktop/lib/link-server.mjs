@@ -195,7 +195,7 @@ const SHELL_ASSETS = {
  * @param {(event: object) => void} [o.log]
  */
 export function createLinkServer({
-  identity, devices, codes, upstream, officialWeb, focus, wake, endpoints, stateDir,
+  identity, devices, codes, upstream, officialWeb, focus, wake, endpoints, stateDir, notifications,
   policy = { rpc: READ_RPC, streams: READ_STREAMS }, log = () => {}, appVersion = '',
   actions = () => false, terminal = () => false,
 }) {
@@ -336,6 +336,15 @@ export function createLinkServer({
       }
       const device = authorize(req);
       if (!device) return json(res, 401, { error: 'pairing-required' }, { 'WWW-Authenticate': 'Bearer' });
+      if (path === '/mobile/v1/task-notifications' && notifications) {
+        // Native paired-device token only; never expose push credentials or controls to WebView scripts.
+        if (!devices.verify(bearer(req))) return json(res, 401, {error:'bearer-required'});
+        if (req.method === 'GET') return json(res,200,notifications.status(device.id));
+        if (req.method !== 'POST') return json(res,405,{error:'method'});
+        try { await notifications.configure(device.id, JSON.parse((await readBody(req,4096)).toString('utf8'))); }
+        catch(e){return json(res,e instanceof SyntaxError?400:e.status??500,{error:'notification-config-failed'});}
+        return json(res,200,{ok:true});
+      }
       if (path === '/mobile/v1/web-session' && req.method === 'POST') {
         if (!devices.verify(bearer(req))) return json(res, 401, { error: 'bearer-required' });
         if (!officialWeb?.available()) return json(res, 503, { error: 'official-web-unavailable' });

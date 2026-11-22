@@ -147,6 +147,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     @Published private(set) var pinging = false
     @Published private(set) var pendingCommand: WebViewCommand?
 
+    let taskPush = TaskPushSettings()
+    private var linkedTask: (desktop: String, session: String)?
     private let notificationRouter = NotificationRouter()
 
     private var connectionTask: Task<Void, Never>?
@@ -396,6 +398,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         cancelDocumentDeadline()
         needsLaunchSelection = true; recoveryFailures = 0; revoked = false
         desktop = selected
+        if !ephemeral { taskPush.bind(selected,channel) }
         currentSessionID = ephemeral ? nil : UserDefaults.standard.string(forKey: "dsh.lastSession." + selected.id)
         if !ephemeral, let data = try? Data(contentsOf: frameURL(selected.id)),
            let saved = try? JSONDecoder().decode(ResumeSnapshot.self, from: data),
@@ -508,6 +511,14 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         pendingCommand = .toggleRightPanel(UUID())
     }
 
+    func openTaskURL(_ url: URL) {
+        let parts=url.path.split(separator:"/").map(String.init)
+        guard parts.count==2, let known=savedDesktops.first(where:{$0.id==parts[0]}),
+              parts[1].range(of:"^[a-zA-Z0-9_-]{1,128}$",options:.regularExpression) != nil else{return}
+        if desktop?.id != known.id {use(known)}
+        linkedTask=(known.id,parts[1]);openNotificationSession(parts[1]);if browser != nil && !needsLaunchSelection {linkedTask=nil}
+    }
+
     func openNotificationSession(_ sessionId: String) {
         guard !sessionId.isEmpty else { return }
         if browser != nil {
@@ -562,7 +573,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     }
 
     private func deliverTaskNotification(kind: String, sessionId: String?, title: String) {
-        guard !ephemeral, !isForeground, notificationsEnabled else { return }
+        guard !ephemeral, !isForeground, notificationsEnabled, !taskPush.bark else { return }
         let content = UNMutableNotificationContent()
         content.title = kind == "approval" ? "任务需要确认审批" : "DSH 任务已完成"
         content.body = title.isEmpty ? "点击返回查看详情" : title
@@ -663,6 +674,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             cancelDocumentDeadline()
             needsLaunchSelection = false
             remember(body["sessionId"] as? String)
+            if let target=linkedTask, target.desktop==desktop?.id {linkedTask=nil;openNotificationSession(target.session)}
         case "ready":
             if followDesktop {
                 pendingCommand = .setFollowDesktop(UUID(), true)
@@ -739,6 +751,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         recoveryTask?.cancel()
         generation = UUID()
         browser = nil
+        taskPush.bind(nil,nil)
         desktop = nil
         linkInterrupted = false
         transport?.invalidate(); transport = nil
@@ -768,6 +781,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
 
     func sceneChanged(_ phase: ScenePhase) {
         isForeground = (phase == .active)
+        if !ephemeral {taskPush.scene(isForeground)}
         syncIdleTimer()
         guard phase == .active else {
             if phase == .background {
@@ -924,6 +938,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 self.terminalEnabled = ready.terminal
                 if let latency = ready.latencyMs { self.lastLatencyMs = latency }
                 if self.ephemeral, let previous = self.browser, previous.id != ready.id { self.testRenewals += 1 }
+                if !self.ephemeral { self.taskPush.connected(ready.endpoint) }
                 self.browser = ready
                 self.syncIdleTimer()
                 self.connecting = false
@@ -940,7 +955,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 self.linkInterrupted = true
                 self.wsHealth = .disconnected
                 if (error as? LinkError) == .unpaired {
-                    self.revoked = true; self.discardFrame(current.id); self.clearCachedRoute(for: current.id); self.browser = nil
+                    self.taskPush.bind(nil,nil); self.revoked = true; self.discardFrame(current.id); self.clearCachedRoute(for: current.id); self.browser = nil
                     self.taskRunning = false; self.syncIdleTimer()
                 } else {
                     let delays = [0.12, 0.35, 0.8, 1.6, 3.2, 6.0]

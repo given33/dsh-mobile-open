@@ -1,6 +1,7 @@
 // One phone link for one computer: identity, paired phones, one-time codes,
 // the TLS link server, and the state the desktop panel shows. Shared by the
 // DSH plugin (plugin/host.mjs) and the standalone CLI (bin/dsh-mobile-link.mjs).
+import { taskPush } from './task-push.mjs';
 import { wakeRoutes } from './wake.mjs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -44,6 +45,7 @@ export async function createLinkService({
   let settingWrites = Promise.resolve();
   let server = null, address = null, lastError = null, starting = null, closed = false;
 
+  const notifications = await taskPush({stateDir, desktopId:identity.id, devices, live:()=>!!server && !closed && wanted});
   const changed = () => { for (const fn of listeners) { try { fn(); } catch {} } };
   const record = event => {
     log(event);
@@ -56,7 +58,7 @@ export async function createLinkService({
     if (server || closed) return;
     if (starting) return starting;
     starting = (async () => {
-      const link = createLinkServer({ identity, devices, codes, upstream, officialWeb, focus, stateDir, wake: () => wakeRoutes(stateDir), endpoints: () => endpoints().map(authority), log: record, appVersion, actions: () => allowActions, terminal: () => allowTerminal });
+      const link = createLinkServer({ notifications, identity, devices, codes, upstream, officialWeb, focus, stateDir, wake: () => wakeRoutes(stateDir), endpoints: () => endpoints().map(authority), log: record, appVersion, actions: () => allowActions, terminal: () => allowTerminal });
       try {
         address = await link.listen(port, host).catch(error => {
           if (host || !['EAFNOSUPPORT', 'EADDRNOTAVAIL'].includes(error?.code)) throw error;
@@ -148,7 +150,7 @@ export async function createLinkService({
   if (wanted) await start();
 
   return {
-    identity, devices, codes,
+    identity, devices, codes, notifications,
     start, stop, setEnabled, setActions, setTerminal, status,
     hasPhones: () => !!server?.connected().length,
     get listening() { return !!server; },
@@ -156,6 +158,6 @@ export async function createLinkService({
     rotateCode: () => { codes.rotate(); },
     removeDevice: id => devices.remove(id),
     onChange(fn) { listeners.add(fn); return () => listeners.delete(fn); },
-    async close() { closed = true; await settingWrites; await stop(); await upstream.dispose?.(); await devices.flush?.(); },
+    async close() { closed = true; await notifications.close(); await settingWrites; await stop(); await upstream.dispose?.(); await devices.flush?.(); },
   };
 }

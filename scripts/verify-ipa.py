@@ -22,6 +22,10 @@ def verify(ipa, catalog_info=None):
         require(len(names) == len(archive.infolist()), "Duplicate IPA member")
         info = plistlib.loads(archive.read(APP + "Info.plist"))
         require(info["CFBundleIdentifier"] == "app.dshmobile.client" and info["CFBundleSupportedPlatforms"] == ["iPhoneOS"], "Expected an iOS device application")
+        extension = APP + "PlugIns/TaskIsland.appex/"
+        widget = plistlib.loads(archive.read(extension + "Info.plist"))
+        require(info.get("NSSupportsLiveActivities") is True and widget["NSExtension"]["NSExtensionPointIdentifier"] == "com.apple.widgetkit-extension", "Missing Live Activity support")
+        require(extension + widget["CFBundleExecutable"] in names, "Missing widget executable")
         with archive.open(APP + info["CFBundleExecutable"]) as executable:
             require(executable.read(8) == bytes.fromhex("cffaedfe0c000001"), "Expected the arm64 device executable")
         require(archive.getinfo(APP + "Assets.car").file_size > 0, "Asset catalog is empty")

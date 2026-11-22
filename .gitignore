@@ -30,3 +30,8 @@ pair.txt
 devices.json
 link-settings.json
 .dsh/
+
+*.p8
+push-relay.json
+task-push-devices.json
+TaskIsland/Info.plist
