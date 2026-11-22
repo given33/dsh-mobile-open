@@ -1099,7 +1099,7 @@ test('v0.5.1 zero-flash visual snapshot curtain, zero-reflow composer, zcode-rem
   assert.doesNotMatch(clientSrc, /mo\?\.observe\(document\.body,\s*\{[^}]*subtree:\s*true/);
   assert.match(clientSrc, /onLaunchHydrated/);
   assert.match(clientSrc, /data-dml-amoled-toggle/);
-  assert.match(clientSrc, /data-dml-turn-nav-toggle/);
+  assert.doesNotMatch(clientSrc, /data-dml-turn-nav-toggle|dsh-mobile-session-manager|dml-task-return/);
 
   // 4. Runtime VM test: AMOLED theme reporting, expandable composer toggle, Turn Navigator, and 2-frame snapshot curtain release.
   const posted = [], frames = [], attrs = new Map(), vars = new Map();

@@ -74,6 +74,29 @@ with sync_playwright() as pw:
     phone.evaluate("id=>__DSH_MOBILE_BRIDGE__.openSession(id)",SID)
     phone.get_by_text(LATEST,exact=True).wait_for(timeout=30000)
     phone.wait_for_function("!!document.querySelector('[data-conversation-scroll]')")
+    # Actual upstream ChatView, not a mock: leave follow-tail, then use the one
+    # visible mobile control to restore the host's streaming follow state.
+    phone.emulate_media(reduced_motion='reduce')
+    sc = phone.locator('[data-conversation-scroll]').first
+    if name == 'webkit':
+        # Mobile WebKit has no wheel input in Playwright. Deliver reading intent
+        # and move the real scroller; the UI and scroll handlers are unmodified.
+        sc.dispatch_event('pointerdown', {'pointerType':'touch','isPrimary':True})
+        sc.evaluate('el => { el.scrollTop = Math.max(0, el.scrollTop - 1400) }')
+    else:
+        sc.hover()
+        phone.mouse.wheel(0, -1400)
+    native_tail = phone.locator('#root [class$="_toBottomSlot"] > button')
+    native_tail.wait_for(state='attached', timeout=6000)
+    own_tail = phone.locator('.dsh-scroll-bottom')
+    own_tail.wait_for(state='visible')
+    assert not native_tail.is_visible()
+    assert phone.get_by_role('button', name='回到底部', exact=True).count() == 1
+    own_tail.click()
+    native_tail.wait_for(state='detached', timeout=6000)
+    own_tail.wait_for(state='hidden')
+    assert phone.locator('[data-chat-following-tail]').count() > 0
+    print(name+": only the mobile tail button is visible; host follow-tail restored PASS", flush=True)
     phone.evaluate("""id=>{
       localStorage.setItem('dml.lastSession',id);
       const sc=document.querySelector('[data-conversation-scroll]');sc.scrollTop=0;

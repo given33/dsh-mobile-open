@@ -138,22 +138,25 @@ with sync_playwright() as pw:
               document.querySelector('[data-conversation-content]').insertAdjacentHTML('beforeend',
                 '<div class="x_toBottomSlot"><button aria-label="最下部へ戻る">↓</button></div>');
             }''')
-            official = page.get_by_role('button', name='最下部へ戻る')
-            assert official.is_visible() and up.is_visible() and not fallback.is_visible()
+            official = page.locator('.x_toBottomSlot button')
+            official.evaluate("b => b.onclick = () => { window.followed = true; setReading(2400) }")
+            assert not official.is_visible() and up.is_visible() and fallback.is_visible()
             page.evaluate('''()=>{
               const dialog = document.createElement('dialog'); dialog.className='dml-hub-backdrop';
               document.body.append(dialog); dialog.showModal();
             }''')
             assert not official.is_visible() and not up.is_visible() and not fallback.is_visible()
             page.evaluate("document.querySelector('dialog').close()")
-            assert official.is_visible() and up.is_visible() and not fallback.is_visible()
+            assert not official.is_visible() and up.is_visible() and fallback.is_visible()
+            fallback.click()
+            assert page.evaluate("window.followed")
             page.evaluate("document.querySelector('.x_toBottomSlot').remove(); setReading(2400)")
             page.clock.run_for(90)
             assert not fallback.is_visible() and up.is_visible()
             page.evaluate('setReading(0)')
             page.clock.run_for(90)
             assert fallback.is_visible() and not up.is_visible()
-            print(engine.name+": scroll directions, host-button priority and modal isolation PASS",flush=True)
+            print(engine.name+": scroll directions, custom-only button and host follow-tail and modal isolation PASS",flush=True)
             # Modal image preview isolates the background and supports Escape.
             page.evaluate("""()=>{
               const root=document.getElementById('root');root.innerHTML='<div data-conversation-scroll><img alt="sample" width="100" height="100"></div>';

@@ -320,9 +320,11 @@ export function injectMobileShell(html, meta = {}) {
   return out;
 }
 
-// Prefer the host's own tail button: unlike a raw DOM scroll it resumes tail following.
-const HOST_TAIL = '#root [data-conversation-content] :is([class$="_toBottomSlot"] > button, button[aria-label="回到底部"], button[aria-label="Back to bottom"])';
-const SCROLL_BLOCKED = 'html:is([data-dml-routing], [data-dml-snap-cover], [data-dml-composer-full], [data-dml-popup-open], :has(dialog[open], [role="dialog"][aria-modal="true"]:not([hidden], [aria-hidden="true"], [data-state="closed"]), .dml-hub-backdrop:not(dialog), .dsh-lightbox, [data-trigger-menu], [data-sidebar-drawer]:not([data-sidebar-collapsed]), [data-rightbar-fullscreen], body[data-dsh-keyboard-open]))';
+// ChatView mounts its tail control next to the flow, not necessarily in the scrolling element.
+// Scope by component identity, not visible/translated text; our floating button lives outside #root.
+const HOST_TAIL_SLOT = '[class$="_toBottomSlot"], [class*="_toBottomSlot_"]';
+const HOST_TAIL = `#root :is(${HOST_TAIL_SLOT}), #root [data-conversation-content] button:is([aria-label="回到底部"], [aria-label="Back to bottom"])`;
+const SCROLL_BLOCKED = 'html:is([data-dml-routing], [data-dml-snap-cover], [data-dml-composer-full], [data-dml-popup-open], :has(dialog[open], [role="dialog"][aria-modal="true"]:not([hidden], [aria-hidden="true"], [data-state="closed"]), .dml-hub-backdrop:not(dialog), .dsh-lightbox, [data-trigger-menu], [data-sidebar-drawer]:not([data-sidebar-collapsed]), [data-rightbar-fullscreen], body[data-dsh-keyboard-open], #dml-voice-hud:not([hidden])))';
 
 export const MOBILE_SHELL_CSS = `/* DSH Mobile shell: preserves 100% native DSH styling while polishing iOS layout, popups, and 120Hz smoothness. */
 :root, html, body {
@@ -570,19 +572,30 @@ html[data-dml-native-nav] [data-conversation-header-leading]:has([data-sidebar-o
   color:inherit; touch-action:none; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none;
   -webkit-tap-highlight-color:transparent;
 }
-#dml-voice-button[data-recording] { color:#3381c6; background:color-mix(in srgb, currentColor 12%, transparent); }
+/* alpha.2's optional voice-input plugin renders another mic. Keep its desktop UI intact. */
+[data-composer-card]:has(#dml-voice-button) span[class$="_triggerAnchor"]:has(> button:is([aria-label="开始录音"], [aria-label="打开语音输入引导"], [aria-label="Start recording"], [aria-label="Open voice input setup"], [aria-label="録音を開始"], [aria-label="音声入力のセットアップを開く"])) { display:none !important; }
+#dml-voice-button:is([data-recording], [data-pressed], [aria-pressed="true"]) { color:#079c58; background:color-mix(in srgb, currentColor 12%, transparent); }
 #dml-voice-button + button { min-inline-size:38px; min-block-size:38px; }
+#dml-voice-hold { width:100%; min-height:46px; border:0; border-radius:12px; font:600 16px/1.25 system-ui,sans-serif; color:inherit; background:color-mix(in srgb, currentColor 8%, transparent); touch-action:none; user-select:none; -webkit-user-select:none; -webkit-touch-callout:none; }
+#dml-voice-hold + [data-input-scroll] { display:none !important; }
 #dml-voice-hud {
-  position:fixed; z-index:99999; inset:auto 12px calc(84px + env(safe-area-inset-bottom, 0px)) 12px;
-  margin-inline:auto; width:auto; max-width:340px; text-align:center; padding:14px 18px 12px;
-  box-sizing:border-box; border-radius:18px; background:#242428; color:#fff; box-shadow:0 6px 28px #0004;
-  font:500 14px/1.5 system-ui,sans-serif; pointer-events:none; user-select:none;
+  position:fixed; inset:0; z-index:99999; overflow:hidden; display:flex; align-items:center; justify-content:center;
+  background:linear-gradient(to bottom,#12151699,#151817e8); color:white; font:500 14px/1.5 system-ui,sans-serif;
+  pointer-events:none; user-select:none; -webkit-user-select:none;
 }
-#dml-voice-hud[data-action="cancel"] { background:#a62e38; }
-#dml-voice-hud[data-action="preview"] { background:#205c8f; }
-.dml-voice-wave { display:flex; justify-content:center; align-items:center; height:31px; gap:4px; }
-.dml-voice-wave i { background:currentColor; width:4px; height:25px; border-radius:4px; transform:scaleY(.14); transition:transform 90ms linear; }
-.dml-voice-directions { display:flex; justify-content:space-between; margin-top:5px; color:#ffffffc9; font-size:12px; }
+.dml-voice-bubble { position:relative; display:grid; place-items:center; min-width:116px; height:62px; margin-bottom:12vh; border-radius:22px; background:#90ed91; color:#164424; }
+.dml-voice-bubble::after { content:""; position:absolute; bottom:-7px; left:calc(50% - 8px); width:16px; height:16px; transform:rotate(45deg); background:inherit; }
+.dml-voice-wave { display:flex; align-items:center; height:32px; gap:3px; }
+.dml-voice-wave i { background:currentColor; width:3px; height:25px; border-radius:4px; transform:scaleY(.14); transition:transform 80ms linear; }
+.dml-voice-directions { position:absolute; bottom:max(18%, 85px); inset-inline:12%; display:flex; justify-content:space-between; text-align:center; }
+.dml-voice-directions span { display:grid; place-items:center; gap:5px; }
+.dml-voice-directions b { display:grid; place-items:center; width:56px; height:56px; border-radius:50%; background:#444a47; color:#fff; font-size:21px; }
+#dml-voice-hud[data-action="cancel"] :is(.dml-voice-bubble, [data-target="cancel"] b) { background:#f77773; color:#491711; }
+#dml-voice-hud[data-action="preview"] [data-target="preview"] b { background:#90ed91; color:#164424; }
+.dml-voice-dock { position:absolute; bottom:0; left:-10%; width:120%; height:max(14%,64px); display:grid; place-items:center; box-sizing:border-box; padding-bottom:env(safe-area-inset-bottom); background:#424744; border-radius:50% 50% 0 0; }
+#dml-voice-hud[data-finishing] { inset:auto 0 calc(88px + env(safe-area-inset-bottom)); background:none; }
+#dml-voice-hud[data-finishing] .dml-voice-bubble { display:none; }
+#dml-voice-hud[data-finishing] .dml-voice-dock { position:static; width:auto; height:auto; border-radius:16px; padding:5px 14px; }
 #dml-voice-panel {
   position:fixed; inset:auto 0 calc(10px + env(safe-area-inset-bottom, 0px)) 0;
   margin:0 auto; box-sizing:border-box; width:min(calc(100% - 20px), 390px); max-height:85%;
@@ -794,9 +807,8 @@ html[data-dml-native-kb="true"] #dml-voice-panel {
 .dsh-scroll-bottom:active {
   transform: translate3d(0, calc(-1 * var(--dml-kb, 0px)), 0) scale(0.92);
 }
-html:has(${HOST_TAIL}) .dsh-scroll-bottom,
-${SCROLL_BLOCKED} :is(.dsh-scroll-bottom, .dsh-scroll-top),
-${SCROLL_BLOCKED} ${HOST_TAIL} {
+${HOST_TAIL},
+${SCROLL_BLOCKED} :is(.dsh-scroll-bottom, .dsh-scroll-top) {
   display: none !important;
 }
 
@@ -1247,12 +1259,18 @@ html[data-color-scheme="dark"] .dml-reader-bar {
   box-shadow: 0 -8px 32px rgba(0, 0, 0, 0.22);
   overflow: hidden;
   padding-bottom: max(12px, env(safe-area-inset-bottom, 12px));
+}
+/* Start on showModal, never while its dialog is still display:none. */
+.dml-hub-backdrop[open] > .dml-hub-sheet {
   animation: dml-hub-enter 200ms cubic-bezier(.22,.61,.36,1);
 }
+.dml-hub-backdrop[data-closing] > .dml-hub-sheet { animation: dml-hub-leave 155ms ease-in forwards; }
+.dml-hub-backdrop[data-closing]::backdrop { animation: dml-hub-fade 155ms ease-in reverse forwards; }
+@keyframes dml-hub-leave { to { transform: translateY(100%); } }
 @keyframes dml-hub-fade { from { background-color: transparent; } }
 @keyframes dml-hub-enter { from { transform: translateY(100%); } }
 @media (prefers-reduced-motion: reduce) {
-  .dml-hub-backdrop::backdrop, .dml-hub-sheet { animation: none; }
+  .dml-hub-backdrop::backdrop, .dml-hub-backdrop[open] > .dml-hub-sheet { animation: none; }
 }
 @media (prefers-color-scheme: dark) {
   .dml-hub-sheet {
@@ -1319,14 +1337,20 @@ html[data-color-scheme="dark"] .dml-reader-bar {
 .dml-hub-section { display: flex; flex-direction: column; gap: 10px; }
 .dml-session-row { display: flex; gap: 6px; align-items: stretch; }
 .dml-session-row > .dml-hub-item { flex: 1; min-width: 0; }
-.dml-session-row > .dml-hub-pill-btn { flex: none; min-width: 44px; }
+.dml-session-row[data-swipe] {
+  gap: 0; min-width: 0; overflow-x: auto; overscroll-behavior-x: contain;
+  scroll-snap-type: x mandatory; scrollbar-width: none; border-radius: 12px;
+}
+.dml-session-row[data-swipe]::-webkit-scrollbar { display: none; }
+.dml-session-row[data-swipe] > .dml-hub-item { flex: 0 0 100%; box-sizing: border-box; scroll-snap-align: start; }
+.dml-swipe-action {
+  flex: 0 0 76px; scroll-snap-align: end; border: 0; border-radius: 0 12px 12px 0;
+  font: inherit; font-weight: 600; background: #315ca9; color: white; cursor: pointer;
+}
 .dml-hub-pill-btn:disabled { opacity: 0.48; cursor: default; }
 .dml-session-check { display: grid; place-items: center; flex: 0 0 44px; cursor: pointer; }
 .dml-session-check input { width: 19px; height: 19px; accent-color: var(--dsw-alias-state-business-primary, #4176e6); }
-.dml-task-return { white-space: nowrap; min-height: 32px; }
-.dml-task-return-floating { position: fixed; z-index: 39; right: 12px; top: 6px; }
-.dml-sidebar-manage { min-height: 40px; white-space: nowrap; }
-.dml-hub-task-group { display: grid; gap: 6px; }
+.dml-hub-task-group { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .dml-hub-task-heading {
   margin: 4px 0 0;
   display: flex;
@@ -1602,7 +1626,7 @@ export const MOBILE_SHELL_JS = `(() => {
     }
   }
 
-  const SNAP_STRIP_SEL = 'script, iframe, video, audio, object, embed, canvas, noscript, style, #dml-composer-expand, .dml-readline';
+  const SNAP_STRIP_SEL = '${HOST_TAIL_SLOT}, script, iframe, video, audio, object, embed, canvas, noscript, style, #dml-composer-expand, .dml-readline';
   const SNAP_RENAME_ATTRS = [
     ['data-conversation-content', 'data-dml-snap-content'],
     ['data-conversation-session', 'data-dml-snap-session'],
@@ -1910,6 +1934,11 @@ export const MOBILE_SHELL_JS = `(() => {
     if (!el) return false;
     cancelScrollRestore();
     haptic('light');
+    // Use the host action when mounted so the current turn resumes following streamed output.
+    // Never dispatch to another conversation, nor to our own floating button.
+    const view = el.closest?.('[data-conversation-content]') || el.closest?.('[data-conversation-session]');
+    const hostButton = view?.querySelector(':is(${HOST_TAIL_SLOT}) > button');
+    if (hostButton && !hostButton.disabled) { hostButton.click(); return true; }
     if (typeof el.scrollTo === 'function') {
       el.scrollTo({ top: el.scrollHeight, behavior: scrollBehavior() });
     } else {

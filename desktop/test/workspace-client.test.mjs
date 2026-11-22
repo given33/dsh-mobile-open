@@ -137,9 +137,7 @@ test('workspace tree shares real blank IDs without rewriting the host or changin
   for(const key of ['local','child','done']) assert.equal(projected.byId[key],list.byId[key]);
   assert.equal(list.byId.phone.blank,true); assert.equal(view.props.useSessions(select),projected);
   snapshot={...list,byId:{...list.byId,phone:done}}; assert.equal(view.props.useSessions(select),snapshot);
-  const manage=ui.slots.get('sidebar.footer.action');
-  assert.equal(manage({wide:false}),false);
-  assert.equal(typeof manage({wide:true}).props.onClick,'function');
+  assert.equal(ui.slots.has('sidebar.footer.action'),false);
   ui.changed();ui.dispose();assert.equal(ui.entry.component,ui.Official);
 });
 

@@ -654,14 +654,6 @@ window.__ModuleLoader__.load({
         const vis=()=>{if(document.hidden){if(!launch.intent)remember(readCurrentSession(ctx)?.sessionId);stopLaunchWatch();launch.wasHidden=true}else{if(launch.wasHidden){reselectIfNeeded();startLaunchWatch()};launch.wasHidden=false;schedule()}}
         const transport=()=>{if(ctx.connection.state.getSnapshot()!=='connected')launch.wasDown=true;else if(launch.wasDown){launch.wasDown=false;reselectIfNeeded();startLaunchWatch()} schedule()}
         const onUserNav = (e) => {
-          const row = e?.target?.closest?.('[data-sidebar-drawer]:not([data-sidebar-collapsed]) [data-row-key^="session:"]')
-          if (row) {
-            const action = e.target.closest('button, a, [role="button"], [role="menuitem"]')
-            if (!action || action === row || !row.contains(action)) {
-              const id = row.getAttribute('data-row-key').slice('session:'.length)
-              if (id) setHubState({ returnSession: id, returnTarget: 'sidebar' })
-            }
-          }
           if (e?.target?.closest?.('[data-sidebar-drawer] button, [data-sidebar-drawer] a, [data-sidebar-drawer] [role="button"]')) {
             if (launch.intent) {
               launch.intent = false; launch.awaiting = undefined; launch.settleWaitStart = 0
@@ -1755,17 +1747,6 @@ window.__ModuleLoader__.load({
         const pendingCount = list.filter(s => s.pendingInteraction).length
         const runningCount = list.filter(s => s.running).length
         const badge = pendingCount > 0 ? 'approval' : runningCount > 0 ? 'running' : undefined
-        const cordis = globalThis.__DSH_MOBILE_CORDIS__
-        if (!snap.open && snap.returnSession && snap.returnSession === cordis?.getCurrentSessionId?.()) {
-          return h('button', {
-            type: 'button', className: 'dml-hub-pill-btn dml-task-return' + (variant === 'floating' ? ' dml-task-return-floating' : ''),
-            'aria-label': '返回会话列表',
-            onClick: () => {
-              if (snap.returnTarget === 'sidebar' && cordis?.toggleSidebar?.()) setHubState({ returnSession: null })
-              else setHubState({ open: true, tab: 'tasks', returnSession: null })
-            },
-          }, '‹ 列表')
-        }
         return h('button', {
           type: 'button',
           'data-dml-hub-trigger': variant,
@@ -1802,8 +1783,7 @@ window.__ModuleLoader__.load({
         const [taskAlerts, setTaskAlerts] = React.useState(() => readPref('dml.pref.taskAlerts', 'true') !== 'false')
         const [dismissedDraftFor, setDismissedDraftFor] = React.useState('')
         const [showFloating, setShowFloating] = React.useState(true)
-        const [turns, setTurns] = React.useState([])
-        const [showTurns, setShowTurns] = React.useState(false)
+        const openSwipeRow = React.useRef(null)
         const dragStartY = React.useRef(null)
         const rightFrameRef = React.useRef(null)
         const hubDialogRef = React.useRef(null)
@@ -1844,7 +1824,7 @@ window.__ModuleLoader__.load({
           if (!bridge?.openSession?.(id)) return
           taskScroll.current = hubBodyRef.current?.scrollTop ?? 0
           if (document.querySelector('[data-sidebar-drawer]:not([data-sidebar-collapsed])')) bridge.toggleSidebar?.()
-          setHubState({ open: false, returnSession: id, returnTarget: 'tasks' })
+          setHubState({ open: false })
         }
         const editorEmpty = (() => {
           try {
@@ -1912,6 +1892,18 @@ window.__ModuleLoader__.load({
           }
         }, [])
 
+        // Keep the sheet in the dialog top layer until its exit slide completes.
+        const dismissSheet = React.useCallback(() => {
+          const dialog = hubDialogRef.current
+          if (!dialog || dialog.dataset.closing) return
+          if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) { setHubState({ open: false }); return }
+          dialog.dataset.closing = 'true'
+          const sheet = dialog.querySelector('.dml-hub-sheet')
+          const exit = sheet?.getAnimations?.().find(a => a.animationName === 'dml-hub-leave')
+          const done = () => { if (hubDialogRef.current === dialog && dialog.open) setHubState({ open: false }) }
+          if (exit) exit.finished.then(done, done)
+          else done()
+        }, [])
         React.useLayoutEffect(() => {
           if (!snap.open) return undefined
           const dialog = hubDialogRef.current
@@ -1921,14 +1913,14 @@ window.__ModuleLoader__.load({
             if (!dialog.open || e.key !== 'Escape' || e.isComposing) return
             e.preventDefault()
             e.stopImmediatePropagation()
-            setHubState({ open: false })
+            dismissSheet()
           }
           window.addEventListener('keydown', closeOnEscape, true)
           return () => {
             window.removeEventListener('keydown', closeOnEscape, true)
             if (dialog.open) dialog.close()
           }
-        }, [snap.open])
+        }, [snap.open, dismissSheet])
 
         React.useLayoutEffect(() => {
           if (!snap.open || !hubBodyRef.current) return
@@ -1937,9 +1929,6 @@ window.__ModuleLoader__.load({
 
         React.useEffect(() => {
           if (!snap.open) return
-          if (snap.tab === 'tasks') {
-            setTurns(globalThis.__DSH_MOBILE_BRIDGE__?.listConversationTurns?.() ?? [])
-          }
           if (snap.tab === 'git') loadGit()
           if (snap.tab === 'tools') loadHostStatus()
         }, [snap.open, snap.tab, curSessionId, loadGit, loadHostStatus])
@@ -2047,13 +2036,32 @@ window.__ModuleLoader__.load({
                   const enabled = canWrite && (archivedView || !(s.running || s.pendingInteraction))
                   const date = Number.isFinite(s.updatedAt) && s.updatedAt > 0 ? new Date(s.updatedAt) : null
                   const hasDate = date && Number.isFinite(date.getTime())
-                  return h('div', { key: s.id, className: 'dml-session-row' },
+                  const swipe = enabled && selection === null
+                  return h('div', {
+                    key: s.id, className: 'dml-session-row', 'data-swipe': swipe || undefined,
+                    onScroll: swipe ? e => {
+                      const row = e.currentTarget
+                      if (row.scrollLeft < 1 || openSwipeRow.current === row) return
+                      const previous = openSwipeRow.current
+                      openSwipeRow.current = row
+                      if (previous?.isConnected) previous.scrollLeft = 0
+                    } : undefined,
+                    onKeyDown: swipe ? e => {
+                      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return
+                      e.preventDefault()
+                      e.currentTarget.scrollLeft = e.key === 'ArrowLeft' ? e.currentTarget.scrollWidth : 0
+                    } : undefined,
+                  },
                     h('button', {
                       type: 'button', className: 'dml-hub-item',
                       'data-current': s.isCurrent ? 'true' : undefined,
                       'aria-current': s.isCurrent ? 'true' : undefined,
                       'aria-label': '进入会话：' + s.title,
-                      onClick: () => openListedSession(s.id),
+                      onClick: e => {
+                        const row = e.currentTarget.parentElement
+                        if (swipe && row.scrollLeft > 1) row.scrollLeft = 0
+                        else openListedSession(s.id)
+                      },
                     },
                     h('div', { className: 'dml-hub-item-main' },
                       h('span', { className: 'dml-hub-item-title' }, s.title),
@@ -2068,8 +2076,8 @@ window.__ModuleLoader__.load({
                         checked: selection.has(s.id), disabled: !enabled || archiveBusy,
                         onChange: () => toggleSelected(s.id),
                       }))
-                      : h('button', {
-                        type: 'button', className: 'dml-hub-pill-btn', disabled: !enabled || archiveBusy,
+                      : swipe && h('button', {
+                        type: 'button', className: 'dml-swipe-action', disabled: archiveBusy,
                         'aria-label': (archivedView ? '恢复会话：' : '归档会话：') + s.title,
                         onClick: () => changeArchived([s.id]),
                       }, archivedView ? '恢复' : '归档')),
@@ -2099,29 +2107,6 @@ window.__ModuleLoader__.load({
                 type: 'button', className: 'dml-hub-pill-btn',
                 onClick: () => { setHubState({ open: false }); globalThis.__DSH_MOBILE_BRIDGE__?.scrollToTop?.() },
               }, '↑ 顶部'),
-              canWrite && h('button', {
-                type: 'button', className: 'dml-hub-pill-btn',
-                onClick: () => { setHubState({ open: false }); globalThis.__DSH_MOBILE_BRIDGE__?.toggleComposerExpand?.() },
-              }, '⤢ 全屏输入'),
-              turns.length > 0 && h('button', {
-                type: 'button', className: 'dml-hub-pill-btn',
-                'data-dml-turn-nav-toggle': 'true',
-                onClick: () => setShowTurns(v => !v),
-              }, showTurns ? '收起问题目录' : `≡ 问题跳转 (${turns.length})`),
-            ),
-            showTurns && turns.length > 0 && h('div', { className: 'dml-hub-card dml-hub-turns', 'data-dml-turn-list': 'true' },
-              h('div', { className: 'dml-hub-card-title' }, '当前对话问题跳转'),
-              ...turns.map(item => h('button', {
-                key: item.index,
-                type: 'button',
-                className: 'dml-hub-item',
-                onClick: () => {
-                  setHubState({ open: false })
-                  globalThis.__DSH_MOBILE_BRIDGE__?.scrollToTurn?.(item.index)
-                },
-              },
-              h('span', { className: 'dml-hub-turn-num' }, '#' + (item.index + 1)),
-              h('span', { className: 'dml-hub-item-title' }, item.text))),
             ),
             h('input', {
               type: 'search',
@@ -2347,8 +2332,8 @@ window.__ModuleLoader__.load({
           ref: hubDialogRef,
           className: 'dml-hub-backdrop',
           'aria-label': '移动端工具箱',
-          onCancel: (e) => { e.preventDefault(); setHubState({ open: false }) },
-          onClick: (e) => { if (e.target === e.currentTarget) setHubState({ open: false }) },
+          onCancel: (e) => { e.preventDefault(); dismissSheet() },
+          onClick: (e) => { if (e.target === e.currentTarget) dismissSheet() },
         },
         h('section', { className: 'dml-hub-sheet' },
           h('div', {
@@ -2358,7 +2343,7 @@ window.__ModuleLoader__.load({
               const startY = dragStartY.current
               dragStartY.current = null
               const endY = e.changedTouches?.[0]?.clientY
-              if (startY != null && endY != null && endY - startY > 55) setHubState({ open: false })
+              if (startY != null && endY != null && endY - startY > 55) dismissSheet()
             },
           },
           h('div', { className: 'dml-hub-handle' }),
@@ -2379,7 +2364,7 @@ window.__ModuleLoader__.load({
               type: 'button',
               className: 'dml-hub-close',
               'aria-label': '关闭工具箱',
-              onClick: () => setHubState({ open: false }),
+              onClick: dismissSheet,
             }, '×'),
           )),
           h('div', { className: 'dml-hub-body', ref: hubBodyRef }, tabBody),
@@ -2390,12 +2375,7 @@ window.__ModuleLoader__.load({
         ctx.slots.register({ name: 'conversation.session.header.utilities', id: 'dsh-mobile-hub-btn', order: -100, label: '移动端工具箱' }, MobileHubTrigger))
       ctx.slots.inject('shell.overlay', () =>
         ctx.slots.register({ name: 'shell.overlay', id: 'dsh-mobile-hub-overlay', order: 120, label: '移动端工具箱' }, MobileHubOverlay))
-      ctx.slots.inject('sidebar.footer.action', () =>
-        ctx.slots.register({ name: 'sidebar.footer.action', id: 'dsh-mobile-session-manager', label: '管理会话' },
-          ({ wide }) => wide && h('button', {
-            type: 'button', className: 'dml-hub-pill-btn dml-sidebar-manage',
-            onClick: () => setHubState({ open: true, tab: 'tasks', returnSession: null }),
-          }, '管理会话')))
+
     }
 
     function apply(ctx) {

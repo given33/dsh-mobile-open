@@ -74,6 +74,20 @@ with sync_playwright() as pw:
         return x, y
 
     editor = card.locator('[contenteditable=true]').first
+    mic.tap()
+    pad = page.get_by_role('button', name='按住 说话')
+    pad.wait_for()
+    assert not page.evaluate("messages.some(m=>m.type==='voice-start')")
+    box = pad.bounding_box()
+    page.mouse.move(box['x'] + box['width']/2, box['y'] + box['height']/2)
+    page.mouse.down()
+    assert page.evaluate("messages.some(m=>m.type==='voice-start')")
+    page.screenshot(path=fixture / f'voice-active-{name}.png')
+    page.mouse.move(box['x'] + 5, box['y'])
+    page.mouse.up()
+    assert page.evaluate("messages.at(-1).type==='voice-cancel'")
+    mic.tap()
+    assert not pad.is_visible()
     x, y = down()
     page.evaluate("()=>__DSH_MOBILE_BRIDGE__.voiceEvent({id:messages.filter(m=>m.type==='voice-start').at(-1).id,status:'final',text:'should not insert early'})")
     assert 'should not insert early' not in editor.inner_text()
