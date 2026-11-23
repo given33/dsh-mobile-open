@@ -109,5 +109,20 @@ with sync_playwright() as pw:
             page.set_viewport_size({'width':width,'height':745})
             x = crumb.evaluate("e=>{const r=document.createRange();r.selectNodeContents(e);return r.getBoundingClientRect().left}")
             assert abs(x - 60) <= 1, (engine, width, x)
+            # The desktop menu has a fixed width. On a phone, compare actual
+            # text ink (not its flex container) to the inset before the icon.
+            page.locator('[class$="_viewsMoreAnchor"] button[aria-haspopup="menu"]').click()
+            browse = page.get_by_role('menuitem', name='浏览更多插件', exact=True)
+            browse.wait_for()
+            left, right = browse.evaluate("""row => {
+                const menu = row.closest('[role="menu"]').getBoundingClientRect();
+                const range = document.createRange();
+                range.selectNodeContents(row.querySelector('[class$="_itemLabel"]'));
+                return [row.querySelector('svg').getBoundingClientRect().left - menu.left,
+                        menu.right - range.getBoundingClientRect().right];
+            }""")
+            assert 0 < left and abs(left - right) <= 1, (engine, width, left, right)
+            page.keyboard.press('Escape')
+            browse.wait_for(state='hidden')
         page.screenshot(path=fixture / ('conversation-title-'+engine+'.png'))
     print(engine, 'PASS: centered card, animated whale, weather, panel navigation and return to conversation')

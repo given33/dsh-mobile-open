@@ -552,6 +552,13 @@ body > [data-dsh-submenu-parent],
   -webkit-backdrop-filter: none !important;
 }
 
+/* The conversation tabs' More menu is 288px on desktop. Size its mobile
+   portal to the longest row; keep the host's row padding and viewport clamp. */
+[role="menu"]:has([data-slot="conversation.session.header.views.actions"]) {
+  width: max-content !important;
+  min-width: 0 !important;
+}
+
 /* 5. 120Hz GPU-accelerated sidebar drawer & mask transitions without backdrop-filter frame drops. */
 [data-sidebar-mask] {
   backdrop-filter: none !important;
