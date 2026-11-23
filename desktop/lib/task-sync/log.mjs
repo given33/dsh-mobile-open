@@ -54,6 +54,14 @@ export async function unpack(packet, peer, name) {
   const raw = await expand(Buffer.from(packet.data, 'base64'), {maxOutputLength:maxLog});
   const events = JSON.parse(raw);
   if (!Array.isArray(events) || inherited > events.length || events.some((e,i) => !e || e.seq !== i || typeof e.type !== 'string')) throw Error('Invalid task log');
+  if (packet.commandEnd !== undefined) {
+    const end = packet.commandEnd;
+    if (peer !== 'desktop' || !packet.cloudIntent || end?.seq !== events.length || end.type !== 'command/done' ||
+        !Number.isSafeInteger(end.time) || end.data?.kind !== 'success' ||
+        events.at(-1)?.type !== 'command/run' || events.at(-1).data.commandId !== end.data.commandId ||
+        packet.cloudIntent.command !== end.data.commandId) throw Error('Invalid protected task boundary');
+    events.push(end);
+  }
   return events;
 }
 

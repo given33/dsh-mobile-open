@@ -16,6 +16,41 @@ spec.loader.exec_module(transfer)
 
 
 class WatchTest(unittest.TestCase):
+    def test_receiver_recovers_after_disconnect_without_publishing_or_loading_credentials(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            desktop, cloud = [Path(tmp) / name for name in ('desktop', 'cloud')]
+            for node in (desktop, cloud):
+                for folder in ('inbox', 'outbox'):
+                    (node / folder).mkdir(parents=True)
+            source = 'fixture-cloud-turn'
+            name = hashlib.sha256(('cloud:' + source).encode()).hexdigest() + '.json'
+            data = json.dumps(dict(v=2, source=source, origin='cloud')).encode()
+            (cloud/'outbox'/name).write_bytes(data)
+            (desktop/'outbox'/transfer.MODELS).write_bytes(b'not-for-an-offline-receive')
+            spawn = subprocess.Popen
+
+            def loopback(args, **kwargs):
+                self.assertIn('StrictHostKeyChecking=yes', args)
+                self.assertEqual(args[-2], 'fixture')
+                return spawn([sys.executable, str(SCRIPT), '--peer', str(cloud), 'catalog-v1', 'models-v1', 'turns-v1'], **kwargs)
+
+            with patch.object(sys, 'argv', [str(SCRIPT), '--receive', str(desktop), 'fixture']), \
+                 patch.object(transfer, 'verifier_manifest', side_effect=AssertionError('reads pairing state')):
+                with patch.object(subprocess, 'Popen', side_effect=ConnectionError):
+                    with self.assertRaises(ConnectionError):
+                        transfer.main()
+                with patch.object(subprocess, 'Popen', side_effect=loopback) as connect:
+                    with transfer.transport_slot(desktop) as owned:
+                        self.assertTrue(owned)
+                        transfer.main()
+                        connect.assert_not_called()
+                    transfer.main()
+                    stamp = (desktop/'inbox'/name).stat().st_mtime_ns
+                    transfer.main()
+                    self.assertEqual((desktop/'inbox'/name).read_bytes(), data)
+                    self.assertEqual((desktop/'inbox'/name).stat().st_mtime_ns, stamp)
+            self.assertEqual(list((cloud/'inbox').iterdir()), [])
+
     def test_both_directions_use_the_same_ssh_connection_and_notice_new_versions(self):
         with tempfile.TemporaryDirectory() as tmp:
             desktop, cloud = [Path(tmp) / name for name in ('desktop', 'cloud')]
@@ -38,9 +73,9 @@ class WatchTest(unittest.TestCase):
             connections = []
             def loopback(args, **options):
                 self.assertIn('StrictHostKeyChecking=yes', args)
-                self.assertTrue(args[-1].endswith(' watch-v1 catalog-v1 models-v1'))
+                self.assertTrue(args[-1].endswith(' watch-v1 catalog-v1 models-v1 turns-v1'))
                 connections.append(True)
-                return spawn([sys.executable, str(SCRIPT), '--peer', str(cloud), 'watch-v1', 'catalog-v1', 'models-v1'], **options)
+                return spawn([sys.executable, str(SCRIPT), '--peer', str(cloud), 'watch-v1', 'catalog-v1', 'models-v1', 'turns-v1'], **options)
 
             polls = []
             def wait(_seconds):

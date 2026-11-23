@@ -1,5 +1,5 @@
-import { mkdir, readFile, writeFile, readdir, rename, stat } from 'node:fs/promises';
-import { basename, dirname, join, resolve } from 'node:path';
+import { mkdir, readFile, writeFile, readdir, rename, stat, unlink } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -11,6 +11,8 @@ import { checkMembership, isNewer, readMembership, setMembership } from './membe
 import { installLegacy, readLegacy } from './legacy.mjs';
 
 import { modelFile, modelSnapshot, applyModelSnapshot } from './models.mjs';
+
+import { claimID, admitCloudTurn, workspaceRoute } from './cloud-turn.mjs';
 
 const run = promisify(execFile);
 const transfer = fileURLToPath(new URL('./transfer.py', import.meta.url));
@@ -89,12 +91,7 @@ export function taskSync(ctx, config, root) {
   // A hash-named directory is allocated only for a foreign workspace. A new task
   // started there keeps the original workspace identity when it travels back.
   async function describe(project) {
-    if (dirname(resolve(project.path)) === resolve(spaces)) {
-      const key = basename(project.path);
-      const saved = JSON.parse(await readFile(join(root,'routes',key+'.json'),'utf8'));
-      return {...saved,title:project.title.slice(0,256)};
-    }
-    return {owner:role,key:project.id,title:project.title.slice(0,256)};
+    return workspaceRoute(root, role, project);
   }
   async function destination(route) {
     if (route.owner === role) {
@@ -195,7 +192,8 @@ export function taskSync(ctx, config, root) {
     let packet, reader;
     try {
       reader = await store.open(id,'read',options(signal));
-      packet = await pack(role, workspace, reader.header, reader.inheritedEventCount, archived, (await reader.read()).events);
+      const events = (await reader.read()).events;
+      packet = await pack(role, workspace, reader.header, reader.inheritedEventCount, archived, events);
     } catch (error) {
       if (error.name !== 'SessionFormatUnsupportedError' || record.formatStatus !== 'migration-required') throw error;
       const {cwd, ...meta} = record.header;
@@ -205,13 +203,15 @@ export function taskSync(ctx, config, root) {
     await atomic(join(outbox,packetName(role,id)),JSON.stringify(packet));
     sent.set(id,rev);
   }
-  async function receive(name) {
-    const path = join(inbox,name), info = await stat(path, {bigint:true});
+  async function receive(name, path = join(inbox,name), job = null) {
+    const info = await stat(path, {bigint:true});
     if (info.size > maxPacket) throw Error('Oversized task envelope');
     const mark = `${info.ino}:${info.size}:${info.mtimeNs}`;
-    if (seen.get(name) === mark) return;
+    if (!job && seen.get(name) === mark) return;
     const packet = JSON.parse(await readFile(path,'utf8'));
+    if (job) name = packetName(peer, packet.source);
     const events = await unpack(packet,peer,name), id = packet.source;
+    if (job && (!packet.cloudIntent || job !== claimID(id,packet.cloudIntent.command) + '.json')) throw Error('Invalid cloud job ID');
     if (packet.membership !== undefined) {
       checkMembership(packet.membership);
       if ((packet.membership.state === 'archived') !== packet.archived) throw Error('Inconsistent task membership');
@@ -242,20 +242,38 @@ export function taskSync(ctx, config, root) {
       const writer = existing ? await store.open(id,'write',options(signal)) : await store.create(header,{signal,inheritedEventCount:packet.inherited});
       try {
         const old = (await writer.read()).events;
-        if (comparePrefix(old,history) > 0) await writer.append(history.slice(old.length),options(signal));
+        missing = comparePrefix(old,history);
+        if (missing > 0) await writer.append(history.slice(old.length),options(signal));
         await writer.flush(options(signal));
       } finally { await writer.close(); }
       ctx.get?.('sessionProjectionCache')?.coldSnapshot(header,packet.inherited,history);
     }
     if (!project.sessionIds.includes(id)) await project.attachSession(id);
     await importMembership(packet, existing);
-    seen.set(name,mark);
+    if (job && missing >= 0 && length === events.length && readMembership(registry,id) !== 'archived') {
+      await admitCloudTurn(ctx, root, packet, history, signal);
+    }
+    if (job) await unlink(path);
+    else seen.set(name,mark);
   }
   async function receiveInbox() {
     for (const name of await readdir(inbox)) {
       signal.throwIfAborted();
       if (!/^[0-9a-f]{64}\.json$/.test(name)) continue;
       try { await receive(name); } catch (error) { report(error); }
+    }
+    if (role === 'cloud' && config.cloudTurns === true) {
+      const dir = join(root,'cloud-incoming');
+      let jobs;
+      try { jobs = await readdir(dir); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
+      for (const job of jobs) {
+        if (!/^[0-9a-f]{64}\.json$/.test(job)) continue;
+        const path = join(dir,job);
+        try {
+          // Job identity is a separate transport namespace from passive history.
+          await receive(null,path,job);
+        } catch (error) { report(error); }
+      }
     }
   }
   async function tick(full = true) {
@@ -307,7 +325,7 @@ export function taskSync(ctx, config, root) {
     if (role === 'desktop') void watchPeer();
     return () => { clearTimeout(first); clearInterval(interval); clearInterval(polling); clearTimeout(timer); ctrl.abort(); };
   });
-  const boundaries = new Set(['agent/inbox/spliced','turn/start','user/message','step/end','tool/call','tool/result','turn/end']);
+  const boundaries = new Set(['agent/inbox/spliced','turn/start','user/message','step/end','tool/call','tool/result','turn/end','command/done']);
   ctx.on('session/event', (session,event) => {
     if (!boundaries.has(event.type)) return;
     dirty.add(session.id);

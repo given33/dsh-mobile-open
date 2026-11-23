@@ -1,4 +1,5 @@
 """Native DSH task exchange over a host-key-checked SSH connection. No remote shell input from a task."""
+from contextlib import contextmanager
 import base64
 import hashlib
 import hmac
@@ -84,6 +85,10 @@ def store(folder, name, data, origin):
     else:
         if obj.get('v')!=2 or obj.get('origin')!=origin or not isinstance(obj.get('source'),str) or not re.fullmatch(r'[\w.-]{1,160}',obj['source'],re.ASCII): raise ValueError('Unexpected origin or source')
         if hashlib.sha256((origin+':'+obj['source']).encode()).hexdigest()+'.json'!=name: raise ValueError('Wrong packet identity')
+    durable_replace(folder, name, raw)
+
+
+def durable_replace(folder, name, raw):
     tmp=None
     try:
         with tempfile.NamedTemporaryFile(dir=folder,delete=False) as f:
@@ -98,6 +103,25 @@ def store(folder, name, data, origin):
                 os.close(directory)
     finally:
         if tmp and os.path.exists(tmp):os.unlink(tmp)
+
+def queue_turn(root, name, blob):
+    if not isinstance(name, str) or not NAME.fullmatch(name):
+        raise ValueError('Invalid cloud turn name')
+    raw = base64.b64decode(blob, validate=True)
+    if len(raw) > MAX:
+        raise ValueError('Oversized cloud turn')
+    packet = json.loads(raw)
+    intent = packet['cloudIntent']
+    sid, command = intent['session'], intent['command']
+    if (packet.get('v') != 2 or packet.get('origin') != 'desktop' or sid != packet.get('source') or
+            not all(isinstance(k, str) and re.fullmatch(r'[\w.-]{1,160}', k, re.ASCII) for k in (sid, command)) or
+            name != hashlib.sha256(('dsh-cloud-run/v1:'+sid+':'+command).encode()).hexdigest()+'.json'):
+        raise ValueError('Invalid cloud turn')
+    folder = root/'cloud-incoming'
+    folder.mkdir(mode=0o700, exist_ok=True)
+    if not (root/'cloud-claims'/name[:-5]).exists():
+        durable_replace(folder, name, raw)
+
 
 def verifier_manifest(link):
     route_file = link / 'family-route.json'
@@ -133,6 +157,30 @@ def accept_verifiers(link, grant):
         tmp.write(data)
     os.replace(tmp.name, dest)
 
+@contextmanager
+def transport_slot(root):
+    """The UI and background receiver share one OS lock, released even on termination."""
+    with (root / 'transport.lock').open('a+b') as lock:
+        if os.name == 'nt':
+            import msvcrt
+            lock.seek(0)
+            try:
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as error:
+                if error.errno not in (11, 13):
+                    raise
+                yield False
+                return
+        else:
+            import fcntl
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                yield False
+                return
+        yield True
+
+
 def main():
     mode, root = sys.argv[1:3]; root = Path(root)
     outbox,inbox = root/'outbox',root/'inbox'
@@ -142,10 +190,11 @@ def main():
         watching = 'watch-v1' in sys.argv[3:]
         catalogs = 'catalog-v1' in sys.argv[3:]
         models = 'models-v1' in sys.argv[3:]
+        turns = 'turns-v1' in sys.argv[3:]
         def inventory():
             return [manifest(outbox, out_cache, catalogs), manifest(inbox, in_cache, catalogs, models)]
         previous = inventory()
-        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []) + (['catalog-v1'] if catalogs else []) + (['models-v1'] if models else []))
+        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []) + (['catalog-v1'] if catalogs else []) + (['models-v1'] if models else []) + (['turns-v1'] if turns else []))
         while True:
             cmd=receive(sys.stdin.buffer)
             if cmd==['end']:break
@@ -153,18 +202,30 @@ def main():
                 current = inventory()
                 send(sys.stdout.buffer, None if current == previous else current)
                 previous = current
+            elif cmd[0]=='turn' and turns:
+                queue_turn(root, cmd[1], cmd[2]); send(sys.stdout.buffer, True)
             elif cmd[0]=='family':
                 accept_verifiers(root.parent/'mobile-link', cmd[1]); send(sys.stdout.buffer,True)
             elif cmd[0]=='get' and cmd[1] != MODELS:send(sys.stdout.buffer,read_packet(outbox,cmd[1]))
             elif cmd[0]=='put' and (cmd[1] != MODELS or models):store(inbox,cmd[1],cmd[2],'desktop');send(sys.stdout.buffer,True)
             else:raise ValueError('Unknown request')
         return
-    if mode not in ('--sync', '--watch') or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',sys.argv[3]):raise ValueError('Invalid SSH alias')
+    if mode not in ('--sync', '--watch', '--receive', '--mailbox') or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', sys.argv[3]):
+        raise ValueError('Invalid SSH alias or transfer mode')
+    with transport_slot(root) as acquired:
+        if acquired:
+            exchange(mode, root, sys.argv[3])
+
+
+def exchange(mode, root, host):
+    outbox, inbox = root/'outbox', root/'inbox'
+    out_cache, in_cache = {}, {}
     command = 'sudo -n -u dsh-cloud /usr/bin/python3 /opt/dsh-cloud/task-transfer.py --peer /var/lib/dsh-cloud/.dsh/mobile-task-sync'
     if mode == '--watch':
         command += ' watch-v1'
-    command += ' catalog-v1 models-v1'
-    with subprocess.Popen(['ssh','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=10','-o','ServerAliveCountMax=2',sys.argv[3], command],stdin=subprocess.PIPE,stdout=subprocess.PIPE) as p:
+    command += ' catalog-v1 models-v1 turns-v1'
+    with subprocess.Popen(['ssh','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=10','-o','ServerAliveCountMax=2',host, command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0) as p:
         try:
             initial = receive(p.stdout)
             watching = mode == '--watch' and 'watch-v1' in initial[2:]
@@ -177,7 +238,7 @@ def main():
             deadline = time.monotonic() + 60
             while True:
                 here = manifest(inbox, in_cache, catalogs)
-                grant = verifier_manifest(root.parent/'mobile-link')
+                grant = None if mode in ('--receive', '--mailbox') else verifier_manifest(root.parent/'mobile-link')
                 if grant is not None and grant != last_grant:
                     send(p.stdin, ['family', grant])
                     if receive(p.stdout) is not True:
@@ -189,6 +250,14 @@ def main():
                     if here.get(name) != digest:
                         send(p.stdin, ['get', name])
                         store(inbox, name, receive(p.stdout), 'cloud')
+                if mode != '--receive' and 'turns-v1' in initial[2:]:
+                    for job in sorted((root/'cloud-outgoing').glob('*.json')):
+                        send(p.stdin, ['turn', job.name, read_packet(job.parent, job.name)])
+                        if receive(p.stdout) is not True:
+                            raise ValueError('Cloud did not acknowledge turn')
+                        job.unlink()  # Immutable, command-specific name; the peer has fsynced it.
+                if mode in ('--receive', '--mailbox'):
+                    break  # No pairing credentials, outbound work, model settings, or native DSH writer.
                 for name, digest in manifest(outbox, out_cache, catalogs, models).items():
                     if received.get(name) != digest:
                         send(p.stdin, ['put', name, read_packet(outbox, name)])

@@ -195,7 +195,10 @@ window.__ModuleLoader__.load({
       return now
     }
 
-    function Panel() {
+    function Panel({ctx}) {
+      const [cloudInput, setCloudInput] = React.useState('')
+      const [cloudReply, setCloudReply] = React.useState('')
+      const current = readCurrentSession(ctx)
       const [status, setStatus] = React.useState(null)
       const [problem, setProblem] = React.useState('')
       const [busy, setBusy] = React.useState(false)
@@ -290,6 +293,20 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', role: 'switch', className: 'dml-switch', 'aria-checked': !!s.terminal,
               'aria-label': t('允许手机使用终端'), disabled: busy, onClick: () => act('/terminal', { enabled: !s.terminal }) })) : null,
           body,
+          s?.cloudTurns && current?.sessionId ? h('form', {className:'dml-section', onSubmit: async e => {
+            e.preventDefault()
+            if (busy || !cloudInput.trim()) return
+            setBusy(true); setCloudReply('')
+            try {
+              const {result} = await call('/cloud-run', {sessionId:current.sessionId, text:cloudInput.trim()})
+              setCloudReply(result?.text || t('操作失败，请重试。'))
+              if (result?.kind === 'success') setCloudInput('')
+            } catch { setCloudReply(t('未确认是否提交，请先查看该会话。')) }
+            finally { setBusy(false) }
+          }}, h('label', {htmlFor:'dml-cloud-task', className:'dml-section-title'}, t('本会话云端执行')),
+            h('textarea', {id:'dml-cloud-task', rows:2, value:cloudInput, disabled:busy, style:{width:'100%',boxSizing:'border-box',color:'inherit',background:'transparent',font:'inherit'}, onChange:e=>setCloudInput(e.target.value)}),
+            h('button',{type:'submit',className:'dml-remove',disabled:busy || !cloudInput.trim()},t('提交云端任务')),
+            cloudReply ? h('div',{role:'status',className:'dml-sub'},cloudReply) : null) : null,
           problem ? h('div', { className: 'dml-error', style: { marginTop: 10 } }, problem) : null,
           h('div', { className: 'dml-section' },
             h('h3', { className: 'dml-section-title' }, t('已配对的手机')),
@@ -321,9 +338,9 @@ window.__ModuleLoader__.load({
       isOnline ? h('span', { className: 'dml-footer-dot', 'aria-hidden': true, style: wide ? { left: 20, top: 8 } : { right: 7, top: 7 } }) : null)
     }
 
-    function OverlayEntry() {
+    function OverlayEntry({ctx}) {
       const isOpen = React.useSyncExternalStore(subscribe, getOpen)
-      return isOpen ? h(Panel) : null
+      return isOpen ? h(Panel,{ctx}) : null
     }
 
     // The desktop launcher deliberately focuses Lexical on mousedown AND click.
@@ -2470,7 +2487,7 @@ window.__ModuleLoader__.load({
         (props) => h(FooterButton, props)))
       ctx.slots.inject('shell.overlay', () => ctx.slots.register(
         { name: 'shell.overlay', id: 'dsh-mobile-link-panel', order: 110, label: t('手机连接') },
-        () => h(OverlayEntry)))
+        () => h(OverlayEntry,{ctx})))
     }
 
     module.exports.apply = apply

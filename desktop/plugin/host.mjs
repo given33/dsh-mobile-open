@@ -9,6 +9,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { installModelRouting } from './model-routing.mjs';
+import { registerCloudRun } from '../lib/task-sync/cloud-turn.mjs';
 import { taskSync, syncModels } from '../lib/task-sync/host.mjs';
 import { createLinkService } from '../lib/link-service.mjs';
 import { inProcessUpstream } from '../lib/upstream-inprocess.mjs';
@@ -71,8 +72,15 @@ export function apply(ctx, rawConfig = {}) {
   if (rawConfig.modelRouting !== false) {
     ctx.inject?.(['llm'], child => installModelRouting(child, config.stateDir));
   }
+  let submitCloudTurn;
   if (rawConfig.taskSync?.role) {
     const root = join(config.stateDir,'..','mobile-task-sync');
+    if (rawConfig.taskSync.role === 'desktop' && rawConfig.taskSync.cloudTurns === true) {
+      ctx.inject(['commands','sessions','workspaceRegistry','sessionPersistence','sessionController'], child => {
+        submitCloudTurn = registerCloudRun(child, root);
+        child.effect(() => () => { submitCloudTurn = undefined; });
+      });
+    }
     ctx.inject(['settings'], child => syncModels(child,rawConfig.taskSync.role,root));
     ctx.inject(['workspaceRegistry','sessionPersistence'], child => {
       taskSync(child, rawConfig.taskSync, root);
@@ -154,10 +162,16 @@ export function apply(ctx, rawConfig = {}) {
         const beat=setInterval(()=>res.write(': ping\n\n'),20000); beat.unref?.();
         res.once('close',()=>{clearInterval(beat);off();}); return;
       }
-      if (req.method === 'GET' && path === '/status') return send(res, 200, await link.status());
+      if (req.method === 'GET' && path === '/status') return send(res, 200, {...await link.status(), cloudTurns:!!submitCloudTurn});
       if (req.method !== 'POST') return send(res, 404, { error: 'not-found' });
       // A JSON body is required for every change: a cross-site form cannot send one.
       if (!String(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 415, { error: 'json-required' });
+      if (path === '/cloud-run') {
+        if (!submitCloudTurn || peer?.principal?.kind !== 'owner' || peer.signal?.aborted) return send(res,403,{error:'owner-required'});
+        const {sessionId, text} = await readJsonBody(req, 96 * 1024);
+        const result = await submitCloudTurn(sessionId, text, AbortSignal.any([peer.signal]));
+        return send(res,200,{result});
+      }
       const body = await readJsonBody(req);
       if (path === '/desktop-focus') {
         return send(res, 200, focus.update(body));
