@@ -8,6 +8,7 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { installModelRouting } from './model-routing.mjs';
 import { taskSync } from '../lib/task-sync/host.mjs';
 import { createLinkService } from '../lib/link-service.mjs';
 import { inProcessUpstream } from '../lib/upstream-inprocess.mjs';
@@ -67,6 +68,9 @@ async function readJsonBody(req, limit = 4096) {
 
 export function apply(ctx, rawConfig = {}) {
   const config = readConfig(rawConfig);
+  if (rawConfig.modelRouting !== false) {
+    ctx.inject?.(['llm'], child => installModelRouting(child, config.stateDir));
+  }
   if (rawConfig.taskSync?.role) {
     ctx.inject(['workspaceRegistry','sessionPersistence'], child => {
       taskSync(child, rawConfig.taskSync, join(config.stateDir,'..','mobile-task-sync'));
