@@ -1,16 +1,20 @@
 // This is an explicit, single-destination command, NOT a trigger inferred from imported history.
 // A normal sync packet (even one containing /cloud-run in its log) cannot enqueue work.
-import { mkdir, open, readFile, writeFile } from 'node:fs/promises';
+import { link, mkdir, open, readFile, unlink, writeFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import { appendFileSync, renameSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { committedLength, hash, pack, validID } from './log.mjs';
+import { committedLength, pack, validID } from './log.mjs';
 
 import { verifiedRelay, continuation } from './relay-boundary.mjs';
+
+import { claimID, nativeAcceptance } from './relay-evidence.mjs';
+export { claimID };
 
 const name = 'cloud-run';
 const maxAge = 15 * 60_000;
 const textLimit = 16 * 1024;
-export const claimID = (sid, command) => hash('dsh-cloud-run/v1:' + sid + ':' + command);
+
 
 export async function workspaceRoute(root, role, project) {
   if (dirname(resolve(project.path)) === resolve(root, 'workspaces')) {
@@ -106,6 +110,31 @@ export function submittedText(intent, sid, events, now = Date.now()) {
   if (text && Buffer.byteLength(text) <= textLimit) return text;
 }
 
+// The incoming packet, durable before this point, is the retryable reservation. A
+// published claim is a permanent dispatch fence, including claims from older versions.
+export async function dispatchState(root, key) {
+  try {
+    const marker = await readFile(join(root,'cloud-claims',key),'utf8');
+    return marker.split('\n').includes('accepted') ? 'accepted' : 'uncertain';
+  } catch (error) { if (error.code === 'ENOENT') return 'ready'; throw error; }
+}
+
+async function recordAcceptance(path) {
+  const claim = await open(path,'r+');
+  try {
+    // Fixed complete content: reconciliation is idempotent even if interrupted.
+    await claim.writeFile('claimed\naccepted\n','utf8');
+    await claim.sync();
+  } finally { await claim.close(); }
+}
+
+export async function reconcileDispatch(root, key, events, inherited, sourceLength) {
+  const state = await dispatchState(root,key);
+  if (state !== 'uncertain' || !nativeAcceptance(events,inherited,key,sourceLength)) return state;
+  await recordAcceptance(join(root,'cloud-claims',key));
+  return 'accepted';
+}
+
 export async function admitCloudTurn(ctx, root, packet, history, signal, relay = false) {
   const sid = packet.source;
   const text = relay ? (verifiedRelay(packet,history) && continuation) : submittedText(packet.cloudIntent, sid, history);
@@ -115,22 +144,30 @@ export async function admitCloudTurn(ctx, root, packet, history, signal, relay =
   const key = claimID(sid,packet.cloudIntent.command);
   const dir = join(root, 'cloud-claims');
   await mkdir(dir, {recursive:true, mode:0o700});
-  let claim;
-  try { claim = await open(join(dir,key), 'wx', 0o600); }
-  catch (error) { if (error.code === 'EEXIST') return; throw error; }
+  const fence = join(dir,key);
+  const existing = await dispatchState(root,key);
+  if (existing !== 'ready') return existing;
+  const tmp = join(dir,key + '.' + randomUUID() + '.tmp');
+  await writeFile(tmp,'claimed\n',{flag:'wx',mode:0o600,flush:true});
   try {
-    // Persist ownership BEFORE submitting. On ambiguous failure (including lost power on the
-    // cloud), retain the claim; never replay a potentially side-effecting native turn.
-    await claim.writeFile('claimed\n');
-    await claim.sync();
+    signal.throwIfAborted(); // No published fence yet: the durable inbox can retry after restart.
+    try { await link(tmp,fence); }
+    catch (error) { if (error.code === 'EEXIST') return dispatchState(root,key); throw error; }
     if (process.platform !== 'win32') {
-      const handle = await open(dir, 'r');
+      const handle = await open(dir,'r');
       try { await handle.sync(); } finally { await handle.close(); }
     }
-    signal.throwIfAborted();
+    if (signal.aborted) {
+      // Only this link's creator can prove it has never entered prompt(). Other
+      // receivers never unlink fences. A process crash here remains uncertain.
+      await unlink(fence);
+      signal.throwIfAborted();
+    }
+    // From here a crash is ambiguous. Only the native receipt may resolve that
+    // ambiguity; an absent receipt never grants permission to submit again.
     const result = await controller.prompt({sessionId:sid, requestId:key, mode:'queue', content:[{type:'text', text}]}, signal);
     if (!result.accepted) throw Error('Cloud DSH did not accept the task');
-    await claim.writeFile('accepted\n');
-    await claim.sync();
-  } finally { await claim.close(); }
+    await recordAcceptance(fence);
+    return 'accepted';
+  } finally { await unlink(tmp); }
 }

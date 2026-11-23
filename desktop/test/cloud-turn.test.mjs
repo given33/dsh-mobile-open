@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { submittedText, admitCloudTurn } from '../lib/task-sync/cloud-turn.mjs';
+import { claimID, submittedText, admitCloudTurn, dispatchState, reconcileDispatch } from '../lib/task-sync/cloud-turn.mjs';
 
 const sid = 'active-session';
 const intent = {v:1, session:sid, command:'cmd-1', created:Date.now()};
@@ -40,4 +40,34 @@ test('simultaneous deliveries and a lost acceptance reply cannot execute the sam
   assert.equal(attempts.filter(r => r.status==='rejected').length,1);
   await deliver();
   assert.equal(calls,1);
+});
+
+
+test('a cancelled reservation can be taken after restart; a lost reply requires a matching native receipt', async t => {
+  const root = await mkdtemp(join(tmpdir(),'dsh-restart-'));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  const packet = {source:sid,cloudIntent:intent};
+  const key = claimID(sid,intent.command);
+  let launches = 0;
+  const ctx = {workspaceRegistry:{archivedSessionIds:[]}, get:() => ({prompt:async () => {
+    launches++;
+    throw Error('lost reply');
+  }})};
+  await assert.rejects(admitCloudTurn(ctx,root,packet,history,AbortSignal.abort()));
+  assert.equal(await dispatchState(root,key),'ready');
+  assert.equal(launches,0);
+  const signal = new AbortController().signal;
+  await assert.rejects(admitCloudTurn(ctx,root,packet,history,signal),/lost reply/);
+  const message = {id:'queued-by-dsh',source:{kind:'user',rpcId:key}};
+  const consumed = {seq:4,type:'user/message',data:message};
+  const queued = {seq:3,type:'agent/inbox/spliced',data:{inserted:[message]}};
+  for (const records of [[],[{...consumed,data:{...message,source:{kind:'user',rpcId:'foreign'}}}],
+    [{...consumed,data:{...message,source:{kind:'runtime-context',rpcId:key}}}],
+    [{...queued,seq:0},consumed], [{...consumed,seq:2}]]) {
+    assert.equal(await reconcileDispatch(root,key,records,1,3),'uncertain');
+  }
+  assert.equal(await admitCloudTurn(ctx,root,packet,history,signal),'uncertain');
+  assert.equal(await reconcileDispatch(root,key,[queued,consumed],1,3),'accepted');
+  assert.equal(await admitCloudTurn(ctx,root,packet,history,signal),'accepted');
+  assert.equal(launches,1);
 });

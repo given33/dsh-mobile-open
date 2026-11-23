@@ -14,7 +14,7 @@ import { modelFile, modelSnapshot, applyModelSnapshot } from './models.mjs';
 
 import { prepareInputs } from './relay-inputs.mjs';
 import { verifiedRelay, compatiblePolicy } from './relay-boundary.mjs';
-import { claimID, admitCloudTurn, workspaceRoute } from './cloud-turn.mjs';
+import { claimID, admitCloudTurn, reconcileDispatch, workspaceRoute } from './cloud-turn.mjs';
 
 const run = promisify(execFile);
 const transfer = fileURLToPath(new URL('./transfer.py', import.meta.url));
@@ -235,10 +235,14 @@ export function taskSync(ctx, config, root) {
     }
     const history = events.slice(0,length);
     if (packet.inherited > history.length) return;
+    let localEvents = [];
     let missing = history.length;
     if (existing) {
       const reader = await store.open(id,'read',options(signal));
-      try { missing = comparePrefix((await reader.read()).events,history); } finally { await reader.close(); }
+      try {
+        localEvents = (await reader.read()).events;
+        missing = comparePrefix(localEvents,history);
+      } finally { await reader.close(); }
     }
     if (!existing || missing > 0) {
       if (ctx.get?.('sessions')?.get(id)) return; // An open native runtime owns this writer.
@@ -253,13 +257,17 @@ export function taskSync(ctx, config, root) {
     }
     if (!project.sessionIds.includes(id)) await project.attachSession(id);
     await importMembership(packet, existing);
-    if (job && missing >= 0 && length === events.length && readMembership(registry,id) !== 'archived') {
+    if (job && length === events.length && readMembership(registry,id) !== 'archived') {
+      const state = await reconcileDispatch(root,job.slice(0,-5),localEvents,packet.inherited,length);
+      if (state === 'accepted') { await unlink(path); return; }
+      if (state === 'uncertain' || missing < 0) return; // Keep the packet; never replay to find out.
+
       if (relay) {
         const live = ctx.get?.('agents')?.get(id);
         if (live && (live.status !== 'idle' || live.session.seq !== history.length || live.inbox.nextStep.length || live.inbox.nextTurn.length)) return;
         await prepareInputs(root,role,packet.workspace,project.path,packet.relayInputs,packet.cloudIntent.security.sandbox !== 'read-only' && ctx.get('sandboxPolicy').defaultMode !== 'read-only' && history.findLast(e=>e.type === 'sandbox/mode')?.data?.mode !== 'read-only');
       }
-      await admitCloudTurn(ctx, root, packet, history, signal, relay);
+      if (await admitCloudTurn(ctx, root, packet, history, signal, relay) === 'uncertain') return;
     }
     if (job) await unlink(path);
     else seen.set(name,mark);

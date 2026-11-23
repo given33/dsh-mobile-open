@@ -9,7 +9,7 @@ from offline_cloud_turn import Host, wait, exchange, transfer
 
 def test(root, cli, package, origin, export=None, incoming=None):
     target = 'cloud' if origin == 'desktop' else 'desktop'
-    reports, native_calls, source_advanced = [], [], []
+    reports, native_calls, source_advanced, evidence = [], [], [], []
     class Model(http.server.BaseHTTPRequestHandler):
         def log_message(self, *_): pass
         def do_POST(self):
@@ -23,10 +23,22 @@ def test(root, cli, package, origin, export=None, incoming=None):
                 if role == origin:
                     if 'DSH-RELAY/1' in history:
                         source_advanced.append(True); text = 'UNEXPECTED-SOURCE-CONTINUATION'
+                    elif 'RELAY-CHECKPOINT-' + marker not in history:
+                        tool = 'pwsh' if os.name == 'nt' else 'bash'
+                        args = dict(command='npm run checkpoint',description='Record the fixture checkpoint')
                     else: tool = 'relay_remaining_task'
                 elif '"foundOnPath"' not in history.replace('\\"','"'):
                     tool = 'relay_environment'
                 elif 'RELAY-BUILD-OK-' + marker not in history:
+                    for message in req['messages']:
+                        for block in message.get('content', []):
+                            if not isinstance(block, dict) or block.get('type') != 'tool_result': continue
+                            content = block.get('content', [])
+                            for part in content if isinstance(content,list) else [content]:
+                                raw = part.get('text','') if isinstance(part,dict) else part
+                                try: result = json.loads(raw)
+                                except (ValueError, TypeError): continue
+                                if isinstance(result, dict) and result.get('handoff'): evidence.append(result)
                     tool = 'pwsh' if os.name == 'nt' else 'bash'
                     args = dict(command='npm run build',description='Run the fixture build')
                 else:
@@ -61,16 +73,18 @@ def test(root, cli, package, origin, export=None, incoming=None):
             workspace = source.root/'Source workspace'; workspace.mkdir()
             wid = source.rpc('workspace/create',{'path':str(workspace)})['workspace']['workspaceId']
             sid = source.rpc('session/create',{'workspaceId':wid})['sessionId']
-            (workspace/'package.json').write_text(json.dumps({'scripts':{'build':'node build.cjs'}}))
+            (workspace/'package.json').write_text(json.dumps({'scripts':{'build':'node build.cjs','checkpoint':'node checkpoint.cjs'}}))
+            (workspace/'checkpoint.cjs').write_text("require('node:fs').appendFileSync('source-count','1'); console.log('RELAY-CHECKPOINT-' + " + repr(marker) + ');')
             (workspace/'build.cjs').write_text("require('node:fs').appendFileSync('build-count','1'); console.log('RELAY-BUILD-OK-'+"+repr(marker)+");")
             (workspace/'not-shared.txt').write_text('private fixture')
             source.sync.mkdir(exist_ok=True)
             (source.sync/'relay-inputs.json').write_text(json.dumps({origin+':'+wid:['package.json','build.cjs']}))
             source.prompt(sid,'Continue the fixture build on the paired host.')
             job = wait(lambda:next((source.sync/'relay-outgoing').glob('*.json'),None),50)
+            job_contents = job.read_bytes()
             source.stop()
             assert not source_advanced and native_calls and all(r==origin for r in native_calls)
-            assert not (workspace/'build-count').exists()
+            assert not (workspace/'build-count').exists() and (workspace/'source-count').read_text() == '1'
             if export:
                 export.write_text(json.dumps(dict(marker=marker,wid=wid,sid=sid,job=job.name,
                         packet=base64.b64encode(job.read_bytes()).decode('ascii'))),encoding='utf8')
@@ -85,6 +99,23 @@ def test(root, cli, package, origin, export=None, incoming=None):
         else: exchange(hosts['desktop'],hosts['cloud'],'--mailbox',relay=True)
         wait(lambda: reports and 'MODEL-FINAL-'+marker in dest.page(sid),70)
         assert not (peer_work/'not-shared.txt').exists()
+        assert (peer_work/'build-count').read_text() == '1'
+        assert not (peer_work/'source-count').exists() and not (peer_work/'checkpoint.cjs').exists()
+        assert evidence and evidence[0]['platform'] == ('win32' if os.name == 'nt' else 'linux'), 'missing host evidence'
+        h = evidence[0]['handoff']
+        assert h['from'] == origin and h['to'] == target and h['externalEffects'] == 'not-verified'
+        assert any(s['name'] in ('pwsh','bash') and s['result'] == 'reported-success' for s in h['priorCalls'])
+        jobname = fixture['job'] if fixture else job.name
+        assert h['requestId'] + '.json' == jobname
+        # Simulate power loss after native acceptance but before writing the local ack.
+        # Restore only a disposable inbox file and fence. Do not send a second prompt.
+        fence = dest.sync/'cloud-claims'/h['requestId']
+        assert wait(lambda: b'accepted' in fence.read_bytes())
+        wait(lambda: not (dest.sync/'relay-incoming'/jobname).exists())
+        raw = base64.b64decode(fixture['packet']) if fixture else job_contents
+        fence.write_bytes(b'claimed\n')
+        transfer.durable_replace(dest.sync/'relay-incoming', jobname, raw)
+        wait(lambda: b'accepted' in fence.read_bytes() and not (dest.sync/'relay-incoming'/jobname).exists(),30)
         assert (peer_work/'build-count').read_text() == '1'
         assert native_calls.count(target)==3 and not source_advanced, native_calls
         print('%s -> %s (%s): original host stopped; peer made 3 native model requests, probed OS, ran npm build once and finished in original session.' % (origin,target,os.name),flush=True)

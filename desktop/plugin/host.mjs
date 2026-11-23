@@ -80,7 +80,7 @@ export function apply(ctx, rawConfig = {}) {
     const root = join(config.stateDir,'..','mobile-task-sync');
     const role = rawConfig.taskSync.role;
     if (['desktop','cloud'].includes(role) && rawConfig.taskSync.turnRelay === true) {
-      ctx.inject(['tools','workingDirectory'], child => registerEnvironment(child,role));
+      ctx.inject(['tools','workingDirectory','sessions','sessionPersistence'], child => registerEnvironment(child,role,root));
       ctx.inject(['tools','sessions','sessionPersistence','workspaceRegistry'], child => registerTurnRelay(child,role,root));
       ctx.inject(['systemPrompt'], child => child.systemPrompt.section({name:'mobile-link:relay', order:850,
         text:'This DSH has a paired execution host. Use relay_environment to check the actual OS, native shells and workspace manifests. When the owner wants work to survive this host going offline, proactively call relay_remaining_task alone at a completed step boundary BEFORE starting the next long operation, if the task can run there. On the peer, verify source files, dependencies, credentials and previous side effects; never translate a destructive command blindly or bypass required approvals. A live process is not portable. Do not transfer again merely because of an automatic handoff.',
