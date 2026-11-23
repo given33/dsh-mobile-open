@@ -109,6 +109,50 @@ struct RootView: View {
                 .ignoresSafeArea(.all, edges: .bottom)
             }
         }
+        .overlay {
+            if model.offerCloud {
+                ZStack {
+                    Color.black.opacity(0.36).ignoresSafeArea()
+                    VStack(alignment: .leading, spacing: 14) {
+                        Text("电脑暂时连不上").font(.headline)
+                        Text("继续重连，或打开云端工作区。不会重新执行电脑上的指令。")
+                            .font(.subheadline).foregroundStyle(Theme.labelSecondary)
+                        Button("切换到云端") { if let cloud = model.cloudHost { model.chooseDevice(cloud, openWorkspace: true) } }
+                            .buttonStyle(PrimaryButtonStyle())
+                        Button("继续重连") { model.dismissCloudOffer() }.buttonStyle(SecondaryButtonStyle())
+                    }.padding(20).frame(maxWidth: 340).background(Theme.sheet, in: RoundedRectangle(cornerRadius: 18))
+                        .padding(.horizontal, 16).accessibilityAddTraits(.isModal)
+                }
+            }
+        }
+        .sheet(isPresented: $model.showDeviceDrawer) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("切换设备").font(.headline)
+                    Spacer()
+                    Button("完成") { model.showDeviceDrawer = false }.foregroundStyle(Theme.business)
+                }
+                ForEach([model.localHost, model.cloudHost].compactMap { $0 }) { host in
+                    Button { model.chooseDevice(host) } label: {
+                        HStack(spacing: 12) {
+                            Image(systemName: host.id == model.cloudHost?.id ? "cloud" : "desktopcomputer").frame(width: 25)
+                            Text(host.name).lineLimit(1)
+                            Spacer()
+                            if host.id == model.selectedDevice?.id { Image(systemName: "checkmark").foregroundStyle(Theme.business) }
+                        }.padding(.horizontal, 14).frame(minHeight: 48).background(Theme.hover, in: RoundedRectangle(cornerRadius: 12))
+                    }.buttonStyle(.plain).disabled(model.switchingDevice)
+                }
+                if model.switchingDevice { ProgressView("正在连接") }
+                if let issue = model.deviceIssue { Text(issue).font(.footnote).foregroundStyle(Theme.warnText) }
+                if let selected = model.selectedDevice, let owner = model.desktop, selected.id != owner.id {
+                    Text("当前会话仍由「" + owner.name + "」执行").font(.footnote).foregroundStyle(Theme.labelSecondary)
+                    Button("进入「" + selected.name + "」工作区") { model.chooseDevice(selected, openWorkspace: true) }
+                        .buttonStyle(SecondaryButtonStyle()).disabled(model.switchingDevice)
+                }
+            }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
+                .presentationBackground(Theme.sheet).presentationDragIndicator(.visible)
+                .presentationDetents([.height(315), .medium])
+        }
         .onOpenURL { url in
             guard url.scheme?.lowercased() == "dshmobile" else { return }
             if url.host?.lowercased() == "task" { model.openTaskURL(url) }
@@ -156,19 +200,19 @@ struct RootView: View {
                 .accessibilityValue(model.drawerOpen ? "展开" : "收起")
             }
 
-            Button { showConnectionInfo = true } label: {
+            Button { model.showDeviceDrawer = true } label: {
                 HStack(spacing: 5) {
                     Circle()
                         .fill(statusColor)
                         .frame(width: 7, height: 7)
                         .fixedSize()
-                    Text(model.desktop?.name ?? "DSH")
+                    Text(model.selectedDevice?.name ?? model.desktop?.name ?? "DSH")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(Theme.labelPrimary)
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .layoutPriority(-1)
-                    if let route = model.browser?.endpoint.kind.label {
+                    if let route = (model.selectedDevice?.id == model.desktop?.id ? model.browser?.endpoint : model.selectedDevice?.preferred)?.kind.label {
                         Text(route)
                             .font(.caption2)
                             .foregroundStyle(Theme.meta)

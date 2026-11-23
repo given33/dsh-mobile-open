@@ -95,15 +95,15 @@ final class DSHMobileUITests: XCTestCase {
         sidebarToggle.tap()
         expectation(for: NSPredicate(format: "value == %@", toggled), evaluatedWith: sidebarToggle); waitForExpectations(timeout: 10)
 
-        // Tap again to close drawer and verify connection detail menu opens cleanly.
+        // Tap again to close drawer and verify device selection does not disturb the live WebView.
         sidebarToggle.tap()
 
         let statusPill = app.buttons["connection-status-pill"]
         XCTAssertTrue(statusPill.waitForExistence(timeout: 8))
         statusPill.tap()
-        XCTAssertTrue(app.navigationBars["连接详情"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["切换设备"].waitForExistence(timeout: 8))
         app.buttons["完成"].tap()
-        XCTAssertTrue(app.navigationBars["连接详情"].waitForNonExistence(timeout: 8))
+        XCTAssertTrue(app.staticTexts["切换设备"].waitForNonExistence(timeout: 8))
 
         let menuButton = app.buttons["connection-help"]
         XCTAssertTrue(menuButton.waitForExistence(timeout: 8))

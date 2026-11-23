@@ -1,0 +1,34 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { cloudRoute, familyDevices } from '../lib/family.mjs';
+import { DeviceRegistry } from '../lib/devices.mjs';
+
+const digest = s => createHash('sha256').update(s).digest('base64url');
+test('one pairing produces a cloud-only credential; rotation/revocation drops existing cloud sessions', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'dsh-family-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const pc = new DeviceRegistry(dir), cloud = new DeviceRegistry(dir);
+  const phone = await pc.add({id:'test-phone-01'});
+  const config = {familyID:'desktop-test',cloudID:'cloud-test',endpoint:'cloud.example:443',fingerprint:digest('cloud key')};
+  const write = (file, obj) => writeFile(join(dir, file), JSON.stringify(obj));
+  await write('family-route.json', config);
+  await write('family-policy.json', config);
+  const route = await cloudRoute(dir, config.familyID, pc.verify(phone.token));
+  assert.equal(route.desktop.name, '云端'); assert.notEqual(phone.token, route.token);
+  assert.equal(pc.verify(route.token), undefined);
+  await write('family-grants.json', {...config,hashes:[digest(route.token)]});
+  const identity = {id:config.cloudID, fingerprint:config.fingerprint};
+  cloud.replaceFamily(await familyDevices(dir, identity));
+  assert.equal(cloud.verify(phone.token), undefined);
+  const delegated = cloud.verify(route.token); assert.ok(delegated.delegated);
+  assert.equal(await cloudRoute(dir, config.familyID, delegated), null);
+  const events=[]; cloud.onChange(e => events.push(e));
+  cloud.replaceFamily(await familyDevices(dir, {...identity,fingerprint:digest('wrong key')}));
+  assert.equal(cloud.verify(route.token), undefined); assert.deepEqual(events, [{type:'removed',id:delegated.id}]);
+  const replacement = await pc.add({id:'test-phone-01'});
+  assert.notEqual((await cloudRoute(dir,config.familyID,replacement.device)).token, route.token);
+});

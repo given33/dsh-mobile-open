@@ -1,0 +1,23 @@
+[Unit]
+Description=DSH cloud workspace (authenticated web; loopback only)
+After=network-online.target
+Wants=network-online.target
+[Service]
+User=dsh-cloud
+Group=dsh-cloud
+WorkingDirectory=/var/lib/dsh-cloud/workspace
+Environment=HOME=/var/lib/dsh-cloud DSH_HOME=/var/lib/dsh-cloud/.dsh PATH=/opt/dsh-cloud:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/dsh-cloud/node /var/lib/dsh-cloud/install/node_modules/@deepseek-ai/dsh/lib/bin.js --profile web --host 127.0.0.1 --port 18361 --no-open
+Restart=on-failure
+RestartSec=8
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/dsh-cloud
+CapabilityBoundingSet=
+MemoryMax=850M
+CPUQuota=110%
+[Install]
+WantedBy=multi-user.target

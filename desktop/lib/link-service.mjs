@@ -2,6 +2,7 @@
 // the TLS link server, and the state the desktop panel shows. Shared by the
 // DSH plugin (plugin/host.mjs) and the standalone CLI (bin/dsh-mobile-link.mjs).
 import { taskPush } from './task-push.mjs';
+import { familyDevices } from './family.mjs';
 import { wakeRoutes } from './wake.mjs';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -35,6 +36,19 @@ export async function createLinkService({
 }) {
   const identity = await loadIdentity(stateDir, { name });
   const devices = await new DeviceRegistry(stateDir).load();
+  let familyTimer;
+  if (await readJson(join(stateDir, 'family-policy.json'))) {
+    let refreshing = false;
+    const refresh = async () => {
+      if (refreshing) return;
+      refreshing = true;
+      try { devices.replaceFamily(await familyDevices(stateDir, identity)); }
+      catch { devices.replaceFamily([]); } finally { refreshing = false; }
+    };
+    await refresh();
+    familyTimer = setInterval(refresh, 2000);
+    familyTimer.unref();
+  }
   const codes = new PairingCodes(codeTtlMs ? { ttlMs: codeTtlMs } : {});
   const settingsPath = join(stateDir, 'settings.json');
   const saved = (await readJson(settingsPath)) ?? {};
@@ -158,6 +172,6 @@ export async function createLinkService({
     rotateCode: () => { codes.rotate(); },
     removeDevice: id => devices.remove(id),
     onChange(fn) { listeners.add(fn); return () => listeners.delete(fn); },
-    async close() { closed = true; await notifications.close(); await settingWrites; await stop(); await upstream.dispose?.(); await devices.flush?.(); },
+    async close() { closed = true; clearInterval(familyTimer); await notifications.close(); await settingWrites; await stop(); await upstream.dispose?.(); await devices.flush?.(); },
   };
 }

@@ -13,6 +13,7 @@
 //
 // DSH frames are forwarded unchanged in both directions, so the phone parses
 // exactly what the desktop web UI receives.
+import { cloudRoute } from './family.mjs';
 import https from 'node:https';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -339,6 +340,12 @@ export function createLinkServer({
       }
       const device = authorize(req);
       if (!device) return json(res, 401, { error: 'pairing-required' }, { 'WWW-Authenticate': 'Bearer' });
+      if (path === '/mobile/v1/cloud-route' && req.method === 'GET') {
+        const native = devices.verify(bearer(req));
+        if (!native || native.delegated) return json(res, 403, {error: 'desktop-bearer-required'});
+        const route = await cloudRoute(stateDir, identity.id, native);
+        return route ? json(res, 200, route) : json(res, 404, {error: 'cloud-not-configured'});
+      }
       if (path === '/mobile/v1/weather' && req.method === 'POST') {
         if (!weatherLimit.allow(device.id)) return json(res, 429, { error:'rate-limited' });
         let body;

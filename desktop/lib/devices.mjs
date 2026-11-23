@@ -10,12 +10,14 @@ const DEVICE_ID = /^[A-Za-z0-9_-]{8,64}$/;
 export const MAX_DEVICES = 32;
 
 export class DeviceRegistry {
+  #family = new Map(); #blocked = new Set();
   #path; #devices = new Map(); #listeners = new Set();
   constructor(dir) { this.#path = join(dir, 'devices.json'); }
 
   async load() {
     try {
       const list = JSON.parse(await readFile(this.#path, 'utf8'));
+      this.#blocked = new Set(Array.isArray(list?.blocked) ? list.blocked : []);
       for (const d of Array.isArray(list?.devices) ? list.devices : []) {
         if (DEVICE_ID.test(d?.id) && typeof d.tokenHash === 'string') this.#devices.set(d.id, d);
       }
@@ -23,9 +25,16 @@ export class DeviceRegistry {
     return this;
   }
 
+  replaceFamily(records) {
+    const next = new Map(records.filter(d => !this.#blocked.has(d.id)).map(d => [d.id, d]));
+    const prior = this.#family;
+    this.#family = next;
+    for (const id of prior.keys()) if (!next.has(id)) this.#emit({type: 'removed', id});
+  }
+
   /** Public view, newest first, without token hashes. */
   list() {
-    return [...this.#devices.values()]
+    return [...this.#devices.values(), ...this.#family.values()]
       .map(({ tokenHash, ...rest }) => rest)
       .sort((a, b) => (b.lastSeenAt ?? b.pairedAt) - (a.lastSeenAt ?? a.pairedAt));
   }
@@ -34,7 +43,7 @@ export class DeviceRegistry {
   verify(token) {
     if (typeof token !== 'string' || token.length < 32 || token.length > 128) return undefined;
     const want = Buffer.from(hash(token));
-    for (const device of this.#devices.values()) {
+    for (const device of [...this.#devices.values(), ...this.#family.values()]) {
       const have = Buffer.from(device.tokenHash);
       if (have.length === want.length && timingSafeEqual(have, want)) return device;
     }
@@ -63,7 +72,8 @@ export class DeviceRegistry {
   }
 
   async remove(id) {
-    if (!this.#devices.delete(id)) return false;
+    if (this.#family.delete(id)) this.#blocked.add(id);
+    else if (!this.#devices.delete(id)) return false;
     await this.#save();
     this.#emit({ type: 'removed', id });
     return true;
@@ -85,7 +95,7 @@ export class DeviceRegistry {
   #writing = Promise.resolve();
   /** Writes are serialized so an older snapshot never lands after a newer one. */
   #save() {
-    const run = () => writePrivate(this.#path, JSON.stringify({ version: 1, devices: [...this.#devices.values()] }, null, 2) + '\n');
+    const run = () => writePrivate(this.#path, JSON.stringify({ version: 1, blocked: [...this.#blocked], devices: [...this.#devices.values()] }, null, 2) + '\n');
     this.#writing = this.#writing.then(run, run);
     return this.#writing;
   }

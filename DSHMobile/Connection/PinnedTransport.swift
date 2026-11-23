@@ -124,6 +124,23 @@ struct LinkClient: Sendable {
         return try JSONDecoder().decode(PairResponse.self, from: data)
     }
 
+    func familyCloud(for owner: String) async throws -> PairedDesktop? {
+        struct Grant: Decodable { let familyID, endpoint, fingerprint: String }
+        let (data, response) = try await transport.session.data(for: request("mobile/v1/cloud-route", timeout: 5))
+        if (response as? HTTPURLResponse)?.statusCode == 404 { return nil }
+        try check(response)
+        let grant = try JSONDecoder().decode(Grant.self, from: data)
+        let pair = try JSONDecoder().decode(PairResponse.self, from: data)
+        guard grant.familyID == owner, pair.desktop.id != owner,
+              pair.desktop.id.range(of: "^[a-zA-Z0-9_-]{8,64}$", options: .regularExpression) != nil,
+              [pair.token, grant.fingerprint].allSatisfy({ $0.range(of: "^[a-zA-Z0-9_-]{43}$", options: .regularExpression) != nil }),
+              let endpoint = Endpoint(grant.endpoint), endpoint.kind == .other else { throw LinkError.badResponse }
+        let offer = PairingOffer(desktopID: pair.desktop.id, desktopName: "云端", endpoints: [endpoint], fingerprint: grant.fingerprint, code: "", expiresAt: nil)
+        var cloud = PairedDesktop(offer: offer, response: pair, preferred: endpoint)
+        cloud.name = "云端"
+        return cloud
+    }
+
     func checkSession() async throws -> (actions: Bool, terminal: Bool) {
         let (data, response) = try await transport.session.data(for: request("mobile/v1/session", timeout: 6))
         try check(response)

@@ -1,0 +1,3 @@
+- insert:
+    - id: shared-sessions
+      name: dsh-shared-sessions

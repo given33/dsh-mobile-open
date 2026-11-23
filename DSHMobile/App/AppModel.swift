@@ -393,7 +393,13 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             startNetworkMonitor()
         }
         if let first = savedDesktops.first {
-            use(first)
+            loadFamily(first)
+            let defaults = UserDefaults.standard
+            let lastView = defaults.string(forKey: "dsh.family.view." + first.id)
+            let lastDevice = defaults.string(forKey: "dsh.family.device." + first.id)
+            let view = cloudHost.flatMap { $0.id == lastView ? $0 : nil } ?? first
+            selectedDevice = cloudHost.flatMap { $0.id == lastDevice ? $0 : nil } ?? first
+            activate(view, transport: PinnedTransport(fingerprint: view.fingerprint))
         } else if !fixture.isEmpty {
             Task { [weak self] in
                 do { try await self?.pair(link: fixture) }
@@ -419,16 +425,134 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             all.insert(paired, at: 0)
             if !ephemeral { try SecureStore.saveDesktops(all) }
             savedDesktops = all
+            if !ephemeral { try SecureStore.write("cloud." + paired.id, nil) }
             // Reuse the pinned connection from hello/pair for the WebView bootstrap.
             use(paired, transport: channel)
         } catch { channel.invalidate(); throw error }
     }
 
+    @Published private(set) var cloudHost: PairedDesktop?
+    @Published private(set) var selectedDevice: PairedDesktop?
+    @Published var showDeviceDrawer = false
+    @Published private(set) var deviceIssue: String?
+    @Published private(set) var switchingDevice = false
+    @Published private(set) var offerCloud = false
+    private var createAfterRestore = false
+    private var offeredThisOutage = false
+    private var offlineAttempts = 0
+    private var familyID: String?
+    private var switchTask: Task<Void, Never>?
+    private var controlWatch: Task<Void, Never>?
+    private var grantTask: Task<Void, Never>?
+    private var switchID = UUID()
+    var localHost: PairedDesktop? { savedDesktops.first { $0.id == familyID } }
+
+    private func loadFamily(_ primary: PairedDesktop) {
+        familyID = primary.id
+        cloudHost = SecureStore.read("cloud." + primary.id).flatMap { try? JSONDecoder().decode(PairedDesktop.self, from: $0) }
+    }
+
+    private func refreshGrant(_ primary: PairedDesktop, endpoint: Endpoint, using transport: PinnedTransport) {
+        guard primary.id == familyID, !ephemeral, grantTask == nil else { return }
+        grantTask = Task { [weak self] in
+            guard let self else { return }
+            defer { if !Task.isCancelled { self.grantTask = nil } }
+            do {
+                let cloud = try await LinkClient(transport: transport, base: endpoint.baseURL, token: primary.token).familyCloud(for: primary.id)
+                guard !Task.isCancelled, self.familyID == primary.id else { return }
+                try SecureStore.write("cloud." + primary.id, try cloud.map { try JSONEncoder().encode($0) })
+                self.cloudHost = cloud
+            } catch { /* Keep the last pinned grant on transient network errors. */ }
+        }
+    }
+
+    func dismissCloudOffer() { offerCloud = false }
+
+    // Route selection is independent from the conversation's executor. In particular
+    // a cloud-backed turn must not lose its WKWebView, socket, approvals or scroll position.
+    func chooseDevice(_ target: PairedDesktop, openWorkspace: Bool = false, newSharedTask: Bool = false) {
+        guard let owner = familyID, [localHost?.id, cloudHost?.id].contains(target.id) else { return }
+        switchTask?.cancel()
+        let ticket = UUID(); switchID = ticket
+        offerCloud = false; deviceIssue = nil
+        if desktop?.id == target.id, !linkInterrupted, wsHealth == .connected {
+            selectedDevice = target; persistSelection(); watchSelectedDevice()
+            switchingDevice = false; showDeviceDrawer = false
+            if newSharedTask { pendingCommand = .newSession(UUID()) }
+            return
+        }
+        switchingDevice = true
+        switchTask = Task { [weak self] in
+            let channel = PinnedTransport(fingerprint: target.fingerprint)
+            var adopted = false
+            defer { if !adopted { channel.invalidate() } }
+            do {
+                let ready = try await BrowserConnector.connect(target, keeping: nil, transport: channel)
+                guard let self, !Task.isCancelled, self.switchID == ticket, self.familyID == owner else { return }
+                self.switchingDevice = false; self.showDeviceDrawer = false
+                var chosen = target; chosen.preferred = ready.endpoint
+                self.selectedDevice = chosen
+                if self.taskRunning && self.wsHealth == .connected && !openWorkspace && !newSharedTask {
+                    self.persistSelection(); self.watchSelectedDevice()
+                    return
+                }
+                adopted = true
+                self.activate(chosen, transport: channel, ready: ready, newConversation: newSharedTask)
+            } catch {
+                guard let self, !Task.isCancelled, self.switchID == ticket else { return }
+                self.switchingDevice = false
+                self.deviceIssue = "未切换到" + target.name + "：" + error.localizedDescription
+                self.showDeviceDrawer = true
+            }
+        }
+    }
+
+    private func persistSelection() {
+        guard !ephemeral, let familyID else { return }
+        UserDefaults.standard.set(desktop?.id, forKey: "dsh.family.view." + familyID)
+        UserDefaults.standard.set(selectedDevice?.id, forKey: "dsh.family.device." + familyID)
+    }
+
+    private func watchSelectedDevice() {
+        controlWatch?.cancel(); controlWatch = nil
+        guard let selected = selectedDevice, let endpoint = selected.preferred,
+              selected.id != desktop?.id else { return }
+        controlWatch = Task { [weak self] in
+            let channel = PinnedTransport(fingerprint: selected.fingerprint)
+            defer { channel.invalidate() }
+            let link = LinkClient(transport: channel, base: endpoint.baseURL, token: selected.token)
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(4)) } catch { return }
+                guard let self, self.selectedDevice?.id == selected.id else { return }
+                if !self.isForeground { continue }
+                do { _ = try await link.checkSession() }
+                catch {
+                    guard !Task.isCancelled, self.selectedDevice?.id == selected.id else { return }
+                    // Drop the unreachable control connection. Do not submit, cancel, or replay a turn.
+                    self.selectedDevice = self.desktop; self.persistSelection()
+                    return
+                }
+            }
+        }
+    }
+
     func use(_ selected: PairedDesktop) {
-        use(selected, transport: PinnedTransport(fingerprint: selected.fingerprint))
+        loadFamily(selected); selectedDevice = selected
+        activate(selected, transport: PinnedTransport(fingerprint: selected.fingerprint))
     }
 
     private func use(_ selected: PairedDesktop, transport channel: PinnedTransport) {
+        loadFamily(selected); selectedDevice = selected
+        activate(selected, transport: channel)
+    }
+
+    private func activate(_ selected: PairedDesktop, transport channel: PinnedTransport, ready: BrowserSession? = nil, newConversation: Bool = false) {
+        controlWatch?.cancel(); grantTask?.cancel(); grantTask = nil
+        connectionTask?.cancel(); recoveryTask?.cancel(); generation = UUID(); frameGeneration = UUID()
+        switchTask?.cancel(); switchID = UUID(); switchingDevice = false
+        createAfterRestore = newConversation
+        offlineAttempts = 0; offeredThisOutage = false; offerCloud = false; deviceIssue = nil
+        pendingCommand = nil
         transport?.invalidate()
         transport = channel
         cancelDocumentDeadline()
@@ -436,6 +560,11 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         desktop = selected
         if !ephemeral { taskPush.bind(selected,channel) }
         currentSessionID = ephemeral ? nil : UserDefaults.standard.string(forKey: "dsh.lastSession." + selected.id)
+        if newConversation {
+            currentSessionID = nil
+            UserDefaults.standard.removeObject(forKey: "dsh.lastSession." + selected.id)
+        }
+        persistSelection(); watchSelectedDevice()
         pageTheme = loadSavedTheme(for: selected.id)
         if !ephemeral, let data = try? Data(contentsOf: frameURL(selected.id)),
            let saved = try? JSONDecoder().decode(ResumeSnapshot.self, from: data),
@@ -458,6 +587,15 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         desktopFocus = nil
         // Zero-wait optimistic cold boot: instantiate WKWebView immediately at t=0 using the
         // persisted HttpOnly cookie in WKWebsiteDataStore while refreshing/racing in parallel.
+        if let ready {
+            self.browser = ready; self.actionsEnabled = ready.actions; self.terminalEnabled = ready.terminal
+            self.connecting = false; self.reconnecting = false; self.problem = nil
+            self.connectionTask = nil; self.recoveryTask = nil
+            saveCachedRoute(ready)
+            if !ephemeral { taskPush.connected(ready.endpoint) }
+            refreshGrant(selected, endpoint: ready.endpoint, using: channel)
+            return
+        }
         if let cached = loadCachedRoute(for: selected.id),
            cached.expiresAt.timeIntervalSinceNow > 120,
            selected.candidates.contains(cached.endpoint) {
@@ -519,6 +657,10 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     }
 
     func startNewSession() {
+        if let cloudHost, desktop?.id != cloudHost.id {
+            chooseDevice(cloudHost, newSharedTask: true)
+            return
+        }
         guard browser != nil, actionsEnabled else { return }
         performHaptic("light")
         pendingCommand = .newSession(UUID())
@@ -551,9 +693,13 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
 
     func openTaskURL(_ url: URL) {
         let parts=url.path.split(separator:"/").map(String.init)
-        guard parts.count==2, let known=savedDesktops.first(where:{$0.id==parts[0]}),
+        let hosts = savedDesktops + [cloudHost].compactMap { $0 }
+        guard parts.count==2, let known=hosts.first(where:{$0.id==parts[0]}),
               parts[1].range(of:"^[a-zA-Z0-9_-]{1,128}$",options:.regularExpression) != nil else{return}
-        if desktop?.id != known.id {use(known)}
+        if desktop?.id != known.id {
+            if known.id == cloudHost?.id { selectedDevice = known; activate(known, transport: PinnedTransport(fingerprint: known.fingerprint)) }
+            else { use(known) }
+        }
         linkedTask=(known.id,parts[1]);openNotificationSession(parts[1]);if browser != nil && !needsLaunchSelection {linkedTask=nil}
     }
 
@@ -712,6 +858,10 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             cancelDocumentDeadline()
             needsLaunchSelection = false
             remember(body["sessionId"] as? String)
+            if createAfterRestore {
+                createAfterRestore = false
+                if actionsEnabled { pendingCommand = .newSession(UUID()) }
+            }
             if let target=linkedTask, target.desktop==desktop?.id {linkedTask=nil;openNotificationSession(target.session)}
         case "ready":
             if followDesktop {
@@ -820,7 +970,19 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             UserDefaults.standard.removeObject(forKey: "dsh.theme." + current.id + ".bg")
             UserDefaults.standard.removeObject(forKey: "dsh.theme." + current.id + ".sidebar")
         }
-        let all = savedDesktops.filter { $0.id != current.id }
+        let owner = familyID ?? current.id
+        if let cloudHost { discardFrame(cloudHost.id); clearCachedRoute(for: cloudHost.id) }
+        try? SecureStore.write("cloud." + owner, nil)
+        UserDefaults.standard.removeObject(forKey: "dsh.family.view." + owner)
+        UserDefaults.standard.removeObject(forKey: "dsh.family.device." + owner)
+        if owner != current.id, let primary = localHost, let end = primary.preferred ?? primary.candidates.first {
+            let channel = PinnedTransport(fingerprint: primary.fingerprint)
+            Task { await LinkClient(transport: channel, base: end.baseURL, token: primary.token).unpair(); channel.invalidate() }
+        }
+        discardFrame(owner); clearCachedRoute(for: owner)
+        grantTask?.cancel(); switchTask?.cancel(); controlWatch?.cancel()
+        switchID = UUID(); familyID = nil; cloudHost = nil; selectedDevice = nil; offerCloud = false
+        let all = savedDesktops.filter { $0.id != owner }
         do {
             if !ephemeral { try SecureStore.saveDesktops(all) }
             savedDesktops = all
@@ -977,8 +1139,11 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                     updated.preferred = ready.endpoint
                     updated.wakeEndpoints = ready.wakeEndpoints
                     self.desktop = updated
-                    self.savedDesktops = [updated] + self.savedDesktops.filter { $0.id != updated.id }
-                    if !self.ephemeral { try SecureStore.saveDesktops(self.savedDesktops) }
+                    if updated.id == self.familyID {
+                        self.savedDesktops = [updated] + self.savedDesktops.filter { $0.id != updated.id }
+                        if !self.ephemeral { try SecureStore.saveDesktops(self.savedDesktops) }
+                    }
+                    if self.selectedDevice?.id == updated.id { self.selectedDevice = updated }
                     if self.browser == nil { self.wsHealth = .connecting }
                 } else if self.wsHealth == .disconnected {
                     self.pendingCommand = .reconnect(UUID())
@@ -988,6 +1153,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 if let latency = ready.latencyMs { self.lastLatencyMs = latency }
                 if self.ephemeral, let previous = self.browser, previous.id != ready.id { self.testRenewals += 1 }
                 if !self.ephemeral { self.taskPush.connected(ready.endpoint) }
+                self.offlineAttempts = 0; self.offeredThisOutage = false; self.offerCloud = false
+                self.refreshGrant(current, endpoint: ready.endpoint, using: transport)
                 self.browser = ready
                 self.syncIdleTimer()
                 self.connecting = false
@@ -1003,7 +1170,13 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 self.reconnecting = false
                 self.linkInterrupted = true
                 self.wsHealth = .disconnected
+                self.offlineAttempts = (error as? LinkError) == .unreachable ? self.offlineAttempts + 1 : 0
+                if self.offlineAttempts >= 2, current.id == self.familyID, self.cloudHost != nil, !self.offeredThisOutage {
+                    self.offeredThisOutage = true; self.offerCloud = true
+                }
                 if (error as? LinkError) == .unpaired {
+                    if let owner = self.familyID { try? SecureStore.write("cloud." + owner, nil); self.cloudHost = nil }
+                    self.offerCloud = false
                     self.taskPush.bind(nil,nil); self.revoked = true; self.discardFrame(current.id); self.clearCachedRoute(for: current.id); self.browser = nil
                     self.taskRunning = false; self.syncIdleTimer()
                 } else {
