@@ -16,11 +16,12 @@ MAX = 32 * 1024 * 1024
 NAME = re.compile(r'[0-9a-f]{64}\.json')
 
 CATALOG = 'workspace-catalog.json'
+MODELS = 'model-preferences.json'
 MAX_CATALOG = 1024 * 1024
 
 
 def regular(folder, name):
-    if not isinstance(name, str) or (name != CATALOG and not NAME.fullmatch(name)):
+    if not isinstance(name, str) or (name not in (CATALOG, MODELS) and not NAME.fullmatch(name)):
         raise ValueError('Invalid packet name')
     p = folder / name
     if p.is_symlink() or not p.is_file() or p.stat().st_size > MAX:
@@ -31,10 +32,10 @@ def file_stamp(st):
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
-def manifest(folder, cache=None, catalogs=False):
+def manifest(folder, cache=None, catalogs=False, models=False):
     entries = {}
     for p in folder.glob('*.json'):
-        if not NAME.fullmatch(p.name) and not (catalogs and p.name == CATALOG):
+        if not NAME.fullmatch(p.name) and not (catalogs and p.name == CATALOG) and not (models and p.name == MODELS):
             continue
         if len(entries) >= 16384:
             raise ValueError('Too many sessions')
@@ -70,11 +71,14 @@ def read_packet(folder, name):
     return base64.b64encode(regular(folder,name).read_bytes()).decode('ascii')
 
 def store(folder, name, data, origin):
-    if not isinstance(name, str) or (name != CATALOG and not NAME.fullmatch(name)): raise ValueError('Invalid packet name')
+    if not isinstance(name, str) or (name not in (CATALOG, MODELS) and not NAME.fullmatch(name)): raise ValueError('Invalid packet name')
     raw = base64.b64decode(data,validate=True)
     if len(raw)>MAX: raise ValueError('Packet too large')
     obj=json.loads(raw)
-    if name == CATALOG:
+    if name == MODELS:
+        if len(raw) > MAX_CATALOG or origin != 'desktop' or obj.get('owner') != 'desktop' or obj.get('v') != 1 or not isinstance(obj.get('sections'), dict):
+            raise ValueError('Invalid model preferences')
+    elif name == CATALOG:
         if len(raw) > MAX_CATALOG or obj.get('owner') != origin or obj.get('v') != 1 or not isinstance(obj.get('workspaces'), list):
             raise ValueError('Invalid workspace catalogue')
     else:
@@ -137,10 +141,11 @@ def main():
     if mode=='--peer':
         watching = 'watch-v1' in sys.argv[3:]
         catalogs = 'catalog-v1' in sys.argv[3:]
+        models = 'models-v1' in sys.argv[3:]
         def inventory():
-            return [manifest(outbox, out_cache, catalogs), manifest(inbox, in_cache, catalogs)]
+            return [manifest(outbox, out_cache, catalogs), manifest(inbox, in_cache, catalogs, models)]
         previous = inventory()
-        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []) + (['catalog-v1'] if catalogs else []))
+        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []) + (['catalog-v1'] if catalogs else []) + (['models-v1'] if models else []))
         while True:
             cmd=receive(sys.stdin.buffer)
             if cmd==['end']:break
@@ -150,20 +155,21 @@ def main():
                 previous = current
             elif cmd[0]=='family':
                 accept_verifiers(root.parent/'mobile-link', cmd[1]); send(sys.stdout.buffer,True)
-            elif cmd[0]=='get':send(sys.stdout.buffer,read_packet(outbox,cmd[1]))
-            elif cmd[0]=='put':store(inbox,cmd[1],cmd[2],'desktop');send(sys.stdout.buffer,True)
+            elif cmd[0]=='get' and cmd[1] != MODELS:send(sys.stdout.buffer,read_packet(outbox,cmd[1]))
+            elif cmd[0]=='put' and (cmd[1] != MODELS or models):store(inbox,cmd[1],cmd[2],'desktop');send(sys.stdout.buffer,True)
             else:raise ValueError('Unknown request')
         return
     if mode not in ('--sync', '--watch') or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',sys.argv[3]):raise ValueError('Invalid SSH alias')
     command = 'sudo -n -u dsh-cloud /usr/bin/python3 /opt/dsh-cloud/task-transfer.py --peer /var/lib/dsh-cloud/.dsh/mobile-task-sync'
     if mode == '--watch':
         command += ' watch-v1'
-    command += ' catalog-v1'
+    command += ' catalog-v1 models-v1'
     with subprocess.Popen(['ssh','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=10','-o','ServerAliveCountMax=2',sys.argv[3], command],stdin=subprocess.PIPE,stdout=subprocess.PIPE) as p:
         try:
             initial = receive(p.stdout)
             watching = mode == '--watch' and 'watch-v1' in initial[2:]
             catalogs = 'catalog-v1' in initial[2:]
+            models = 'models-v1' in initial[2:]
             offered, received = initial[:2]
             last_grant = None
             # Bound an orphaned helper's lifetime if the host process dies without teardown.
@@ -178,10 +184,12 @@ def main():
                         raise ValueError('Family sync failed')
                     last_grant = grant
                 for name, digest in offered.items():
+                    if name == MODELS:
+                        raise ValueError('Cloud cannot publish model preferences')
                     if here.get(name) != digest:
                         send(p.stdin, ['get', name])
                         store(inbox, name, receive(p.stdout), 'cloud')
-                for name, digest in manifest(outbox, out_cache, catalogs).items():
+                for name, digest in manifest(outbox, out_cache, catalogs, models).items():
                     if received.get(name) != digest:
                         send(p.stdin, ['put', name, read_packet(outbox, name)])
                         if receive(p.stdout) is not True:

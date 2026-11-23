@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { installModelRouting } from './model-routing.mjs';
-import { taskSync } from '../lib/task-sync/host.mjs';
+import { taskSync, syncModels } from '../lib/task-sync/host.mjs';
 import { createLinkService } from '../lib/link-service.mjs';
 import { inProcessUpstream } from '../lib/upstream-inprocess.mjs';
 import { mobileHostActions, nativeScheduleAction } from '../lib/mobile-host-actions.mjs';
@@ -72,8 +72,10 @@ export function apply(ctx, rawConfig = {}) {
     ctx.inject?.(['llm'], child => installModelRouting(child, config.stateDir));
   }
   if (rawConfig.taskSync?.role) {
+    const root = join(config.stateDir,'..','mobile-task-sync');
+    ctx.inject(['settings'], child => syncModels(child,rawConfig.taskSync.role,root));
     ctx.inject(['workspaceRegistry','sessionPersistence'], child => {
-      taskSync(child, rawConfig.taskSync, join(config.stateDir,'..','mobile-task-sync'));
+      taskSync(child, rawConfig.taskSync, root);
     });
   }
   const say = (...parts) => console.log('[dsh-mobile-link]', ...parts);

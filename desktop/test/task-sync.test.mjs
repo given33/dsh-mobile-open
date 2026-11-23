@@ -150,6 +150,9 @@ test('paired hosts share empty native workspaces, preserve session identity in b
   await project.setTitle('新名称'); await deliver(pc,cloud);
   assert.equal(replica.title,project.title); assert.equal(cloud.registry.list().length,2);
   assert.ok(pc.registry.list().includes(legitimate));
+  await replica.setTitle('从云端原地改名'); await deliver(cloud,pc); await deliver(pc,cloud);
+  assert.equal(project.title,'从云端原地改名'); assert.equal(replica.title,project.title);
+  assert.equal(pc.registry.list().length,2); assert.equal(cloud.registry.list().length,2);
   // Even an older session packet left in transit cannot recreate the retired shelf.
   const stale = await pack('desktop',{owner:'desktop',key:old.id,title:old.title},header,0,false,events);
   await writeFile(join(cloud.dir,'inbox',packetName('desktop',header.id)), JSON.stringify(stale)); await cloud.tick();

@@ -38,9 +38,9 @@ class WatchTest(unittest.TestCase):
             connections = []
             def loopback(args, **options):
                 self.assertIn('StrictHostKeyChecking=yes', args)
-                self.assertTrue(args[-1].endswith(' watch-v1 catalog-v1'))
+                self.assertTrue(args[-1].endswith(' watch-v1 catalog-v1 models-v1'))
                 connections.append(True)
-                return spawn([sys.executable, str(SCRIPT), '--peer', str(cloud), 'watch-v1', 'catalog-v1'], **options)
+                return spawn([sys.executable, str(SCRIPT), '--peer', str(cloud), 'watch-v1', 'catalog-v1', 'models-v1'], **options)
 
             polls = []
             def wait(_seconds):
@@ -57,6 +57,9 @@ class WatchTest(unittest.TestCase):
             for source in (desktop, cloud):
                 catalogue = dict(v=1, owner=source.name, workspaces=[dict(key='abc', title='项目')])
                 (source/'outbox'/transfer.CATALOG).write_text(json.dumps(catalogue))
+            model = json.dumps(dict(v=1,owner='desktop',sections={})).encode()
+            (desktop/'outbox'/transfer.MODELS).write_bytes(model)
+            (cloud/'outbox'/transfer.MODELS).write_bytes(b'never-publish-to-desktop')
             offer(desktop, 1)
             offer(cloud, 1)
             with patch.object(sys, 'argv', [str(SCRIPT), '--watch', str(desktop), 'verified-host']), \
@@ -64,6 +67,9 @@ class WatchTest(unittest.TestCase):
                  patch.object(transfer.time, 'sleep', side_effect=wait), \
                  patch.object(transfer.time, 'monotonic', side_effect=lambda: 100 if len(polls) >= 3 else 0):
                 transfer.main()
+            self.assertEqual((cloud/'inbox'/transfer.MODELS).read_bytes(), model)
+            self.assertFalse((desktop/'inbox'/transfer.MODELS).exists())
+            self.assertNotIn(transfer.MODELS, transfer.manifest(desktop/'outbox', catalogs=True))
             self.assertEqual(len(connections), 1)
             self.assertEqual(len(polls), 3)
 

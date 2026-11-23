@@ -6,9 +6,11 @@ import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { committedLength, comparePrefix, hash, maxPacket, pack, packetName, unpack } from './log.mjs';
 
-import { catalogName, catalogRoutes, maxCatalog, mayUnregister, optionalJson, retiredRoutes } from './catalog.mjs';
+import { catalogName, catalogRoutes, titleRevisions, maxCatalog, mayUnregister, optionalJson, retiredRoutes } from './catalog.mjs';
 import { checkMembership, isNewer, readMembership, setMembership } from './membership.mjs';
 import { installLegacy, readLegacy } from './legacy.mjs';
+
+import { modelFile, modelSnapshot, applyModelSnapshot } from './models.mjs';
 
 const run = promisify(execFile);
 const transfer = fileURLToPath(new URL('./transfer.py', import.meta.url));
@@ -17,6 +19,54 @@ async function atomic(path, data) {
   const tmp = path + '.' + process.pid + '.tmp';
   await writeFile(tmp, data, {mode:0o600,flush:true});
   await rename(tmp, path);
+}
+
+// Settings changes are independent of session persistence. A provider write conflict or
+// an older peer must never hold up the workspace catalogue or task checkpoints.
+export function syncModels(ctx, role, root) {
+  if (!['desktop','cloud'].includes(role)) return;
+  const dir = join(root, role === 'desktop' ? 'outbox' : 'inbox');
+  let dirty = true, busy = false, stopped = false, last, checked = 0, warned = false;
+  ctx.on('settings/document-updated', ns => {
+    if (['llm-pi-ai','llm-deepseek','llm-deepseek-account','agent-default-model'].includes(ns)) dirty = true;
+  });
+  async function tick() {
+    if (busy || stopped) return;
+    busy = true;
+    try {
+      const expired = Date.now() - checked >= 60000;
+      if (role === 'desktop') {
+        if (!dirty && !expired) return;
+        dirty = false;
+        const data = JSON.stringify(modelSnapshot(ctx.settings.describe({redactSecrets:true})));
+        if (data !== last) {
+          await mkdir(dir,{recursive:true,mode:0o700});
+          await atomic(join(dir,modelFile),data);
+          last = data;
+        }
+      } else {
+        const path = join(dir,modelFile);
+        const info = await stat(path,{bigint:true});
+        const mark = `${info.ino}:${info.mtimeNs}:${info.size}`;
+        if (!dirty && !expired && last === mark) return;
+        dirty = false;
+        await applyModelSnapshot(ctx.settings,await optionalJson(path));
+        last = mark;
+      }
+      checked = Date.now();
+      warned = false;
+    } catch (error) {
+      // Never include a source URL, profile, model settings, or a native error containing them.
+      if (error.code !== 'ENOENT' && !warned) {
+        console.warn('[dsh-mobile-link/model-sync] Model settings not applied; retrying');
+        warned = true;
+      }
+    } finally { busy = false; }
+  }
+  ctx.effect(() => {
+    const first = setTimeout(tick,500), interval = setInterval(tick,2000);
+    return () => { stopped = true; clearTimeout(first); clearInterval(interval); };
+  });
 }
 
 export function taskSync(ctx, config, root) {
@@ -55,36 +105,54 @@ export function taskSync(ctx, config, root) {
     const key = hash(route.owner+':'+route.key), path = join(spaces,key);
     const found = registry.list().find(w => resolve(w.path) === resolve(path));
     const title = peerTitles.get(route.key) ?? route.title;
-    if (found) {
-      if (found.title !== title) await found.setTitle(title);
-      return found;
-    }
+    if (found) return found;
     await mkdir(path,{recursive:true,mode:0o700});
     await atomic(join(root,'routes',key+'.json'),JSON.stringify(route));
     return registry.create(path,title);
   }
+  const titles = new Map();
   async function updateCatalog() {
-    const local = [];
+    const incoming = await optionalJson(join(inbox,catalogName));
+    const routes = incoming ? catalogRoutes(incoming,peer) : [];
+    const otherTitles = titleRevisions(incoming);
+    peerTitles = new Map(routes.map(r => [r.key,r.title]));
+    for (const route of routes) if (!isRetired(route)) await destination(route);
+
+    const local = [], revisions = [];
     for (const project of registry.list()) {
       const route = await describe(project);
       if (isRetired(route)) {
         if (await mayUnregister(ctx, project, signal)) await registry.delete(project.id);
         else report(new Error('Retired workspace has an open session or user history; registration preserved'));
-      } else if (route.owner === role) {
-        local.push({key: route.key, title: route.title});
+        continue;
       }
+      const {owner,key} = route, identity = `${owner}:${key}`;
+      const file = join(root,'titles',hash(identity)+'.json');
+      const previous = titles.get(identity) ?? await optionalJson(file);
+      let next = previous;
+      if (!next || next.title !== route.title) {
+        next = {owner,key,title:route.title,clock:(previous?.clock ?? 0) + 1,actor:previous ? role : owner};
+      }
+      const remote = otherTitles.get(identity);
+      if (remote && (isNewer(remote,next) || (!previous && owner === peer))) next = remote;
+      else if (!remote && owner === peer && peerTitles.has(key) && !Array.isArray(incoming?.titles)) {
+        // A pre-revision peer only publishes its own authoritative titles.
+        next = {...next,title:peerTitles.get(key)};
+      }
+      if (next.title !== route.title) await project.setTitle(next.title);
+      if (!previous || previous.title !== next.title || previous.clock !== next.clock || previous.actor !== next.actor) {
+        await atomic(file,JSON.stringify(next));
+      }
+      titles.set(identity,next);
+      revisions.push(next);
+      if (owner === role) local.push({key,title:next.title});
     }
-    const inventory = JSON.stringify({v: 1, owner: role, workspaces: local});
-    if (local.length > 4096 || Buffer.byteLength(inventory) > maxCatalog) throw Error('Oversized workspace catalogue');
+    const inventory = JSON.stringify({v:1,owner:role,workspaces:local,titles:revisions});
+    if (local.length > 4096 || revisions.length > 8192 || Buffer.byteLength(inventory) > maxCatalog) throw Error('Oversized workspace catalogue');
     if (inventory !== lastCatalog) {
-      await atomic(join(outbox, catalogName), inventory);
+      await atomic(join(outbox,catalogName),inventory);
       lastCatalog = inventory;
     }
-    const incoming = await optionalJson(join(inbox, catalogName));
-    if (!incoming) return;
-    const routes = catalogRoutes(incoming, peer);
-    peerTitles = new Map(routes.map(r => [r.key, r.title]));
-    for (const route of routes) if (!isRetired(route)) await destination(route);
   }
   const memberships = new Map();
   const membershipPath = id => join(root, 'memberships', hash(id) + '.json');
@@ -200,7 +268,7 @@ export function taskSync(ctx, config, root) {
     const changed = new Set(dirty);
     dirty.clear();
     try {
-      for (const dir of [inbox,outbox,join(root,'routes'),join(root,'memberships')]) await mkdir(dir,{recursive:true,mode:0o700});
+      for (const dir of [inbox,outbox,join(root,'routes'),join(root,'memberships'),join(root,'titles')]) await mkdir(dir,{recursive:true,mode:0o700});
       if (scanAll) {
         retired = retiredRoutes(await optionalJson(join(root, 'retired-workspaces.json')));
         try { await updateCatalog(); } catch (error) { report(error); }

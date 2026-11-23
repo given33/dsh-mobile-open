@@ -55,3 +55,19 @@ export async function mayUnregister(ctx, project, signal) {
   }
   return true;
 }
+
+// A route is a logical workspace ID, independent of which host edited its name.
+export function titleRevisions(catalogue) {
+  const list = catalogue?.titles ?? [];
+  if (!Array.isArray(list) || list.length > 8192) throw Error('Invalid shared workspace titles');
+  const titles = new Map();
+  for (const rev of list) {
+    if (!['desktop','cloud'].includes(rev?.owner) || !validID(rev.key) || !['desktop','cloud'].includes(rev.actor) ||
+        !Number.isSafeInteger(rev.clock) || rev.clock < 1 || rev.clock >= Number.MAX_SAFE_INTEGER ||
+        typeof rev.title !== 'string' || !rev.title.trim() || rev.title.length > 256) throw Error('Invalid shared workspace title');
+    const key = `${rev.owner}:${rev.key}`;
+    if (titles.has(key)) throw Error('Duplicate shared workspace title');
+    titles.set(key,rev);
+  }
+  return titles;
+}
