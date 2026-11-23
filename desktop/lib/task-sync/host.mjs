@@ -1,3 +1,4 @@
+import { finishResultPlans, rememberResultPlan } from './relay-results.mjs';
 import { mkdir, readFile, writeFile, readdir, rename, stat, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -191,10 +192,13 @@ export function taskSync(ctx, config, root) {
     if (sent.get(id) === rev) return;
     const workspace = await describe(project);
     if (isRetired(workspace)) return;
-    let packet, reader;
+    let packet, reader, resultFailure;
     try {
       reader = await store.open(id,'read',options(signal));
       const events = (await reader.read()).events;
+      if (config.turnRelay && role!==workspace.owner) {
+        try { await finishResultPlans(root,id,events,reader.inheritedEventCount,role); } catch (err) { resultFailure=err; }
+      }
       packet = await pack(role, workspace, reader.header, reader.inheritedEventCount, archived, events);
     } catch (error) {
       if (error.name !== 'SessionFormatUnsupportedError' || record.formatStatus !== 'migration-required') throw error;
@@ -203,6 +207,7 @@ export function taskSync(ctx, config, root) {
     } finally { if (reader) await reader.close(); }
     packet.membership = membership;
     await atomic(join(outbox,packetName(role,id)),JSON.stringify(packet));
+    if (resultFailure) throw resultFailure; // History still ships; retry artifact capture on the next full scan.
     sent.set(id,rev);
   }
   async function receive(name, path = join(inbox,name), job = null, relay = false) {
@@ -265,7 +270,9 @@ export function taskSync(ctx, config, root) {
       if (relay) {
         const live = ctx.get?.('agents')?.get(id);
         if (live && (live.status !== 'idle' || live.session.seq !== history.length || live.inbox.nextStep.length || live.inbox.nextTurn.length)) return;
-        await prepareInputs(root,role,packet.workspace,project.path,packet.relayInputs,packet.cloudIntent.security.sandbox !== 'read-only' && ctx.get('sandboxPolicy').defaultMode !== 'read-only' && history.findLast(e=>e.type === 'sandbox/mode')?.data?.mode !== 'read-only');
+        const canWrite = packet.cloudIntent.security.sandbox !== 'read-only' && ctx.get('sandboxPolicy').defaultMode !== 'read-only' && history.findLast(e=>e.type === 'sandbox/mode')?.data?.mode !== 'read-only';
+        await prepareInputs(root,role,packet.workspace,project.path,packet.relayInputs,canWrite);
+        await rememberResultPlan(root,packet,job.slice(0,-5),history.length,canWrite);
       }
       if (await admitCloudTurn(ctx, root, packet, history, signal, relay) === 'uncertain') return;
     }

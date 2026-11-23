@@ -1,3 +1,4 @@
+import { terminalResult } from '../lib/task-sync/relay-results.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, writeFile, link, symlink, rm } from 'node:fs/promises';
@@ -111,4 +112,26 @@ test('dependency guidance never prescribes npm ci over an existing tree or an am
   assert.equal(present.modules,'present-unverified'); assert.equal(present.freshInstall,undefined);
   assert.equal(present.verify,'npm ls --depth=0');
   await writeFile(join(root,'pnpm-lock.yaml'),''); assert.equal((await probe()).verify,undefined);
+});
+
+test('return files only for the received native request that completed, not a later turn', () => {
+  const key = 'a'.repeat(64);
+  const message = {id:'receiver-message', source:{kind:'user',rpcId:key}};
+  const events = [
+    {seq:0,type:'agent/inbox/spliced',data:{inserted:[message]}},
+    {seq:1,type:'turn/start',data:{turn:7}},
+    {seq:2,type:'user/message',data:message},
+    {seq:3,type:'user/message',data:{id:'context',source:{kind:'runtime-context'}}},
+    {seq:4,type:'turn/end',data:{turn:7,reason:{kind:'completed'}}},
+  ];
+  assert.equal(terminalResult(events,0,0,key),'capture');
+  assert.equal(terminalResult(events.slice(0,-1),0,0,key),null);
+  assert.equal(terminalResult(events,0,1,key),null); // previously admitted, not this handoff
+  assert.equal(terminalResult(events,0,0,'c'.repeat(64)),null);
+  events[4].data.reason.kind='aborted';
+  assert.equal(terminalResult(events,0,0,key),'skip');
+  events[4].data.reason.kind='completed'; events[4].data.turn=8;
+  assert.equal(terminalResult(events,0,0,key),'skip');
+  events[4].data.turn=7; events[3].data.source={kind:'user',rpcId:'different'};
+  assert.equal(terminalResult(events,0,0,key),'skip');
 });

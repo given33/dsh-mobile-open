@@ -12,7 +12,7 @@ const inputHelper = fileURLToPath(new URL('./project_inputs.py', import.meta.url
 const sensitive = /(credential|secret|password|token|private[-_]?key)|\.(env|pem|pfx|key|p12|kdbx)$/i;
 const reserved = /^(con|prn|aux|nul|com[0-9]|lpt[0-9]) *(\.|$)/i;
 
-function namesAllowed(names) {
+export function namesAllowed(names) {
   if (!Array.isArray(names) || names.length > 256) return false;
   const paths = new Map();
   for (const name of names) {
@@ -41,8 +41,11 @@ function useTree(names) {
 }
 
 function projectInputs(action, folder, records, managedKey) {
+  return projectHelper(inputHelper,action,folder,records,managedKey);
+}
+export function projectHelper(helper, action, folder, records, managedKey) {
   const win = process.platform === 'win32';
-  const args = [...(win ? ['-3.11'] : []), '-I', inputHelper, action, folder, ...(managedKey ? [managedKey] : [])];
+  const args = [...(win ? ['-3.11'] : []), '-I', helper, action, folder, ...(managedKey ? [managedKey] : [])];
   const payload = JSON.stringify(records);
   if (Buffer.byteLength(payload) > maxWire) throw Error('接力项目输入过大。');
   return new Promise((resolve, reject) => {

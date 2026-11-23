@@ -27,6 +27,7 @@ from unittest.mock import patch
 TRANSFER = Path(__file__).resolve().parents[2] / 'lib/task-sync/transfer.py'
 spec = importlib.util.spec_from_file_location('transfer', TRANSFER)
 transfer = importlib.util.module_from_spec(spec)
+sys.path.insert(0, str(TRANSFER.parent))
 spec.loader.exec_module(transfer)
 
 
@@ -101,7 +102,7 @@ def exchange(desktop, cloud, mode, relay=False, progress=False):
     spawn = subprocess.Popen
     def loopback(argv, **kw):
         assert argv[0] == 'ssh' and 'StrictHostKeyChecking=yes' in argv
-        return spawn([sys.executable, str(TRANSFER), '--peer', str(cloud.sync), 'catalog-v1', 'models-v1', 'turns-v1'] + (['relay-v1'] if relay else []) + (['progress-v1'] if progress else []), **kw)
+        return spawn([sys.executable, str(TRANSFER), '--peer', str(cloud.sync), 'catalog-v1', 'models-v1', 'turns-v1'] + (['relay-v1'] if relay else []) + (['progress-v1'] if progress else []) + (['results-v1'] if 'results-v1' in argv[-1] else []), **kw)
     with patch.object(subprocess, 'Popen', side_effect=loopback), patch.object(sys, 'argv', [str(TRANSFER), mode, str(desktop.sync), 'fixture']):
         transfer.main()
     return True

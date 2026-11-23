@@ -1,5 +1,5 @@
 """Native DSH task exchange over a host-key-checked SSH connection. No remote shell input from a task."""
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 import base64
 import hashlib
 import hmac
@@ -266,12 +266,96 @@ def exchange_progress(root,reader,writer,send_local):
             ack_progress(root,row['run'],row['rev'],row['digest'],answer)
 
 
+def result_support():
+    return all(
+        Path(__file__).with_name(name).is_file()
+        for name in ("result_delivery.py", "project_inputs.py")
+    )
+
+
+def result_op(root, action, *args):
+    # Never allocate a grant / mailbox database as a result of network traffic.
+    if not (root / "result-mailbox.sqlite").is_file():
+        if action == "inventory":
+            return {"have": [], "want": []}
+        if action == "deliver":
+            return
+        if action == "receipts":
+            return {}
+        raise ValueError("No local result mailbox")
+    import result_delivery as results
+
+    with closing(results.database(root)) as db:
+        if action == "receipts":
+            return results.receipts_for(db, *args)
+        if action == "inventory":
+            return results.inventory(db, root, *args)
+        if action == "deliver":
+            return results.deliver(db, root, *args)
+        if action == "get":
+            return results.read_export(db, *args)
+        if action == "ack":
+            return results.acknowledge(db, *args)
+        if action == "put":
+            digest = results.accept(db, root, *args)
+            results.deliver(db, root, args[0])
+            return digest
+        raise ValueError("Unknown local mailbox action")
+
+
+def exchange_results(root, reader, writer, send_local):
+    if not (root / "result-mailbox.sqlite").is_file():
+        return
+    import result_delivery as results
+
+    local = result_op(root, "inventory", "desktop")
+    send(writer, ["results-list", local["have"]])
+    remote = receive(reader)
+    if not isinstance(remote, dict) or set(remote) != {"have", "want", "receipts"}:
+        raise ValueError("Invalid result inventory")
+    for field, entries in remote.items():
+        if (
+            not isinstance(entries, dict if field == "receipts" else list)
+            or len(entries) > results.MAX_JOBS
+            or not all(isinstance(k, str) and results.ID.fullmatch(k) for k in entries)
+        ):
+            raise ValueError("Invalid result inventory entries")
+    receipts = remote["receipts"]
+    if not all(
+        isinstance(v, str) and results.ID.fullmatch(v) for v in receipts.values()
+    ):
+        raise ValueError("Invalid result receipts")
+    # A disconnect after durable receipt but before the ack must not require a
+    # new grant, a second model turn, or a second write to the working tree.
+    for key in set(local["have"]).intersection(receipts):
+        result_op(root, "ack", key, "cloud", receipts[key])
+    received = result_op(root, "receipts", "desktop", remote["have"])
+    wanted = set(local["want"])
+    offers = set(remote["have"])
+    for key in sorted(offers & wanted)[:4]:
+        send(writer, ["results-get", key])
+        received[key] = result_op(root, "put", "desktop", key, receive(reader))
+    for key in sorted(offers.intersection(received)):
+        send(writer, ["results-ack", key, received[key]])
+        if receive(reader) is not True:
+            raise ValueError("Result receipt rejected")
+    if send_local:
+        for key in sorted(set(local["have"]).intersection(remote["want"]))[:4]:
+            send(writer, ["results-put", key, result_op(root, "get", key, "cloud")])
+            result_op(root, "ack", key, "cloud", receive(reader))
+
+
 def main():
     mode, root = sys.argv[1:3]; root = Path(root)
     outbox,inbox = root/'outbox',root/'inbox'
     for d in (outbox,inbox):d.mkdir(mode=0o700,parents=True,exist_ok=True)
     out_cache, in_cache = {}, {}
+    results_available = result_support()
+    if results_available:
+        result_op(root,'deliver','cloud' if mode=='--peer' else 'desktop')
     if mode=='--peer':
+        results = results_available and 'results-v1' in sys.argv[3:]
+        result_offers, result_requests = set(), set()
         watching = 'watch-v1' in sys.argv[3:]
         catalogs = 'catalog-v1' in sys.argv[3:]
         models = 'models-v1' in sys.argv[3:]
@@ -283,7 +367,7 @@ def main():
             return [manifest(outbox, out_cache, catalogs), manifest(inbox, in_cache, catalogs, models)]
         offered_progress = set()
         previous = inventory()
-        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []) + (['catalog-v1'] if catalogs else []) + (['models-v1'] if models else []) + (['turns-v1'] if turns else []) + (['receipts-v1'] if receipts else []) + (['relay-v1'] if relay else []) + (['progress-v1'] if progress else []))
+        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []) + (['catalog-v1'] if catalogs else []) + (['models-v1'] if models else []) + (['turns-v1'] if turns else []) + (['receipts-v1'] if receipts else []) + (['relay-v1'] if relay else []) + (['progress-v1'] if progress else []) + (['results-v1'] if results else []))
         while True:
             cmd=receive(sys.stdin.buffer)
             if cmd==['end']:break
@@ -291,6 +375,17 @@ def main():
                 current = inventory()
                 send(sys.stdout.buffer, None if current == previous else current)
                 previous = current
+            elif results and len(cmd)==2 and cmd[0]=='results-list':
+                state=result_op(root,'inventory','cloud')
+                state['receipts']=result_op(root,'receipts','cloud',cmd[1])
+                result_offers,result_requests=set(state['have']),set(state['want'])
+                send(sys.stdout.buffer,state)
+            elif results and len(cmd)==2 and cmd[0]=='results-get' and cmd[1] in result_offers:
+                send(sys.stdout.buffer,result_op(root,'get',cmd[1],'desktop'))
+            elif results and len(cmd)==3 and cmd[0]=='results-ack' and cmd[1] in result_offers:
+                result_op(root,'ack',cmd[1],'desktop',cmd[2]); result_offers.remove(cmd[1]); send(sys.stdout.buffer,True)
+            elif results and len(cmd)==3 and cmd[0]=='results-put' and cmd[1] in result_requests:
+                send(sys.stdout.buffer,result_op(root,'put','cloud',cmd[1],cmd[2])); result_requests.remove(cmd[1])
             elif progress and len(cmd)==2 and cmd[0]=='progress-heartbeats':
                 send(sys.stdout.buffer,pulses(root,cmd[1]))
             elif progress and cmd == ['progress-list']:
@@ -338,6 +433,7 @@ def exchange(mode, root, host):
     if mode == '--watch':
         command += ' watch-v1'
     if Path(__file__).with_name('script_progress.py').is_file():command += ' progress-v1'
+    if result_support():command += ' results-v1'
     command += ' catalog-v1 models-v1 turns-v1 receipts-v1 relay-v1'
     with subprocess.Popen(['ssh','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=10','-o','ServerAliveCountMax=2',host, command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0) as p:
@@ -388,13 +484,16 @@ def exchange(mode, root, host):
                         if receive(p.stdout) is not True:
                             raise ValueError('Cloud did not acknowledge turn')
                         job.unlink()  # Immutable, command-specific name; the peer has fsynced it.
-                if mode in ('--receive', '--mailbox'):
-                    break  # No pairing credentials, outbound work, model settings, or native DSH writer.
-                for name, digest in manifest(outbox, out_cache, catalogs, models).items():
-                    if received.get(name) != digest:
-                        send(p.stdin, ['put', name, read_packet(outbox, name)])
-                        if receive(p.stdout) is not True:
-                            raise ValueError('Peer did not acknowledge packet')
+                if mode not in ('--receive', '--mailbox'):
+                    for name, digest in manifest(outbox, out_cache, catalogs, models).items():
+                        if received.get(name) != digest:
+                            send(p.stdin, ['put', name, read_packet(outbox, name)])
+                            if receive(p.stdout) is not True:
+                                raise ValueError('Peer did not acknowledge packet')
+                # History, execution fences and new turns go first. A full result
+                # mailbox must not starve ordinary task progress on every retry.
+                if 'results-v1' in initial[2:] and result_support():
+                    exchange_results(root,p.stdout,p.stdin,mode!='--receive')
                 if not watching or time.monotonic() >= deadline:
                     break
                 time.sleep(1.5)

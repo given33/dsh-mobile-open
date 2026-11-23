@@ -1,3 +1,4 @@
+import { authorizeResults } from './relay-results.mjs';
 import { collectInputs } from './relay-inputs.mjs';
 import { appendFileSync, closeSync, fsyncSync, openSync, renameSync, unlinkSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -59,6 +60,7 @@ export function registerTurnRelay(ctx,role,root) {
       const security = {sandbox,approval:approval.overrideOf(session) ?? approval.config.policy ?? 'ask'};
       const intent = {v:2,security,session:session.id,from:role,command:randomUUID().replaceAll('-',''),created:Date.now()};
       const key = claimID(session.id,intent.command);
+      packet.relayOutputs = await authorizeResults(root,role,project,packet.workspace,sandbox,session.id,key);
       const prefix = JSON.stringify({...packet,cloudIntent:intent}).slice(0,-1)+',"relayEnd":';
       if (Buffer.byteLength(prefix)+8192 > maxPacket) throw Error('会话超过接力包大小上限。');
       await mkdir(dir,{recursive:true,mode:0o700});

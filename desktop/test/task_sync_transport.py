@@ -73,7 +73,7 @@ class WatchTest(unittest.TestCase):
             connections = []
             def loopback(args, **options):
                 self.assertIn('StrictHostKeyChecking=yes', args)
-                self.assertTrue(args[-1].endswith(' watch-v1 progress-v1 catalog-v1 models-v1 turns-v1 receipts-v1 relay-v1'))
+                self.assertTrue(args[-1].endswith(' watch-v1 progress-v1 results-v1 catalog-v1 models-v1 turns-v1 receipts-v1 relay-v1'))
                 connections.append(True)
                 return spawn([sys.executable, str(SCRIPT), '--peer', str(cloud), 'watch-v1', 'catalog-v1', 'models-v1', 'turns-v1'], **options)
 

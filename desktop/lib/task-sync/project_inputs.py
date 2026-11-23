@@ -75,6 +75,17 @@ class Folder:
 def directory(path, parent=None):
     absolute = path if parent is None else os.path.join(parent.path, path)
     if os.name == "nt":
+        # The actual path includes two SHA-256 components. Win32 APIs without
+        # the extended prefix can report a missing file beyond MAX_PATH even
+        # after Node successfully created it within the workspace sandbox.
+        if parent is None:
+            absolute = os.path.abspath(absolute)
+            if not absolute.startswith("\\\\?\\"):
+                absolute = (
+                    "\\\\?\\UNC\\" + absolute[2:]
+                    if absolute.startswith("\\\\")
+                    else "\\\\?\\" + absolute
+                )
         handle = win_open(absolute, True)
         try:
             yield Folder(absolute, None)
@@ -149,7 +160,12 @@ def publish_name(parent, temporary, filename):
     # Move the complete inode in a single no-replace operation. link()+unlink()
     # would leave a two-link file that the integrity checks must reject after a crash.
     if os.name == "nt":
-        os.rename(temporary, parent.child(filename))
+        # Publish without replacement and request a write-through move before
+        # the independent mailbox is allowed to acknowledge the final bytes.
+        move = kernel.MoveFileExW
+        move.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD]
+        if not move(temporary, parent.child(filename), 0x8):
+            raise ctypes.WinError(ctypes.get_last_error())
         return
     libc = ctypes.CDLL(None, use_errno=True)
     if sys.platform == "darwin":

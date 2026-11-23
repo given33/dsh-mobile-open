@@ -21,6 +21,7 @@ def create_project(workspace, marker):
         "const fs = require('node:fs'); const format = require('relay-local-lib');\n"
         "const marker = require('../src/data/marker.json');\n"
         "if (fs.readFileSync(require.resolve('relay-local-lib/chunks/1599.txt'),'utf8') !== '1599') throw Error('partial install');\n"
+        "fs.mkdirSync('reports',{recursive:true}); fs.writeFileSync('reports/build.txt', format(marker));\n"
         "fs.appendFileSync('build-count', '1'); console.log(format(marker));\n", encoding='utf8')
     (workspace/'checkpoint.cjs').write_text("require('node:fs').appendFileSync('source-count','1'); console.log('RELAY-CHECKPOINT-' + " + repr(marker) + ');', encoding='utf8')
     artifact = workspace/'vendor/packages/lib.tgz'
@@ -66,7 +67,7 @@ def cut_install(workspace):
             if proc.poll() is None: proc.kill(); proc.wait(timeout=10)
 
 
-def test(root, cli, package, origin, export=None, incoming=None, paired_cut=False):
+def test(root, cli, package, origin, export=None, incoming=None, paired_cut=False, return_files=False):
     target = 'cloud' if origin == 'desktop' else 'desktop'
     reports, native_calls, source_advanced, evidence = [], [], [], []
     class Model(http.server.BaseHTTPRequestHandler):
@@ -114,6 +115,12 @@ def test(root, cli, package, origin, export=None, incoming=None, paired_cut=Fals
                     else:
                         tool = None; text = 'FIXTURE-ERROR'; reports.append(text)
                         print('Fixture tool failed:', str(req['messages'][-1])[-1100:],flush=True)
+                elif return_files and 'Stage the real build report' not in history:
+                    delivery = evidence[-1]['resultDelivery']
+                    directory = delivery['directory']
+                    assert directory == 'dsh-returns/' + evidence[-1]['handoff']['requestId'] and delivery['files'] == ['reports/build.txt']
+                    tool = 'pwsh' if os.name == 'nt' else 'bash'
+                    args = dict(command='node -e "const fs=require(\'fs\');fs.mkdirSync(\'%s/reports\',{recursive:true});fs.copyFileSync(\'reports/build.txt\',\'%s/reports/build.txt\')"' % (directory,directory),description='Stage the real build report')
                 else:
                     text = 'MODEL-FINAL-' + marker
                     reports.append(text)
@@ -150,6 +157,8 @@ def test(root, cli, package, origin, export=None, incoming=None, paired_cut=Fals
             (workspace/'not-shared.txt').write_text('private fixture')
             source.sync.mkdir(exist_ok=True)
             (source.sync/'relay-inputs.json').write_text(json.dumps({origin+':'+wid:inputs}))
+            if return_files:
+                (source.sync/'relay-outputs.json').write_text(json.dumps({origin+':'+wid:['reports/build.txt']}))
             source.prompt(sid,'Continue the fixture build on the paired host.')
             job = wait(lambda:next((source.sync/'relay-outgoing').glob('*.json'),None),50)
             job_contents = job.read_bytes()
@@ -189,6 +198,19 @@ def test(root, cli, package, origin, export=None, incoming=None, paired_cut=Fals
         assert any(s['name'] in ('pwsh','bash') and s['result'] == 'reported-success' for s in h['priorCalls'])
         jobname = fixture['job'] if fixture else job.name
         assert h['requestId'] + '.json' == jobname
+        if return_files:
+            def exported():
+                return h['requestId'] in transfer.result_op(dest.sync,'inventory',target)['have']
+            wait(exported,30)
+            if not fixture:
+                product = workspace/'reports/build.txt'
+                assert source.proc is None and not product.exists()
+                exchange(hosts['desktop'],hosts['cloud'],'--mailbox',relay=True)
+                assert product.read_bytes() == ('RELAY-BUILD-OK-'+marker).encode()
+                stamp=product.stat().st_mtime_ns
+                exchange(hosts['desktop'],hosts['cloud'],'--mailbox',relay=True)
+                assert not exported() and product.stat().st_mtime_ns==stamp
+                print('Offline mailbox: bytes match, acknowledged, no rewrite on reconnect.',flush=True)
         # Simulate power loss after native acceptance but before writing the local ack.
         # Restore only a disposable inbox file and fence. Do not send a second prompt.
         fence = dest.sync/'cloud-claims'/h['requestId']
@@ -199,8 +221,8 @@ def test(root, cli, package, origin, export=None, incoming=None, paired_cut=Fals
         transfer.durable_replace(dest.sync/'relay-incoming', jobname, raw)
         wait(lambda: b'accepted' in fence.read_bytes() and not (dest.sync/'relay-incoming'/jobname).exists(),30)
         assert (peer_work/'build-count').read_text() == '1'
-        assert native_calls.count(target)==5 and not source_advanced, native_calls
-        print('%s -> %s (%s): original host stopped; peer made 5 native model requests, installed the offline locked dependency without hooks, verified it, ran the unmodified npm build once and finished in original session.' % (origin,target,os.name),flush=True)
+        assert native_calls.count(target)==(6 if return_files else 5) and not source_advanced, native_calls
+        print('%s -> %s (%s): original host stopped; peer completed native model rounds, installed the offline locked dependency without hooks, verified it, ran the unmodified npm build once and finished in original session.' % (origin,target,os.name),flush=True)
     except BaseException:
         print('model requests:',native_calls[-12:],flush=True)
         if 'sid' in locals():
@@ -221,6 +243,12 @@ if __name__ == '__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('cli',type=Path);p.add_argument('tgz',type=Path)
     p.add_argument('--origin',choices=['desktop','cloud'],default='desktop')
     p.add_argument('--paired-cut', action='store_true', help='Wait for an out-of-band fixture-copy digest before killing an actual npm install')
+    p.add_argument('--return-files',action='store_true')
+    p.add_argument('--fixture-home',type=Path,help='Create a new isolated directory for external two-host transport verification')
     mode=p.add_mutually_exclusive_group();mode.add_argument('--export-fixture',type=Path);mode.add_argument('--import-fixture',type=Path);a=p.parse_args()
-    with tempfile.TemporaryDirectory(prefix='relay-native-',ignore_cleanup_errors=True) as d:
-        test(Path(d),a.cli.resolve(),a.tgz.resolve(),a.origin,a.export_fixture,a.import_fixture,a.paired_cut)
+    def run(d):
+        test(Path(d),a.cli.resolve(),a.tgz.resolve(),a.origin,a.export_fixture,a.import_fixture,a.paired_cut,a.return_files)
+    if a.fixture_home:
+        a.fixture_home.mkdir(mode=0o700); run(a.fixture_home.resolve())
+    else:
+        with tempfile.TemporaryDirectory(prefix='relay-native-',ignore_cleanup_errors=True) as d: run(d)

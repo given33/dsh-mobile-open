@@ -1,3 +1,4 @@
+import { ownerResultStatus, resultInstructions } from './relay-results.mjs';
 import { access, lstat, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
@@ -78,6 +79,8 @@ export function registerEnvironment(ctx,role,root) {
         // Passive sync can bring the very same accepted request back to its source.
         // Only the real receiver holds this local dispatch fence.
         info.handoff = handoff && await dispatchState(root,handoff.requestId) !== 'ready' ? handoff : null;
+        info.returnedFiles = await ownerResultStatus(root,role,session.id);
+        if (info.handoff) info.resultDelivery = await resultInstructions(root,session.id,handoff.requestId);
       } finally { await reader.close(); }
       exec.signal.throwIfAborted();
       return JSON.stringify(info);

@@ -126,3 +126,21 @@ Linux 沙箱可能看不到插件安装目录。请将包里的 `tools/computati
 `relay_environment` 的 `nodeSetup` 会区分依赖目录**不存在**和**已存在但未经验证**。只有检测到 npm、单一 npm 锁文件且没有 `node_modules` 时，才建议用当前主机的 `npm ci --ignore-scripts --no-audit --no-fund` 安装，再用 `npm ls --depth=0` 核对依赖。插件不自行启动安装，也不传输源机器的 `node_modules`。安装权限仍由原生 DSH 决定。不要为了修复半成品而覆盖其他任务正在使用的依赖目录。
 
 断点验证使用 Windows 和阿里云 Linux 的两个隔离 DSH 实例、脚本化模型和本地 npm 包。先封存接力轮次，确认目标已持久保存整份输入，再在源端真正解包但尚未完成时终止 npm 并退出源 DSH。接手端仅使用此前收到的副本，重新做一遍本机离线安装、校验依赖并完成原会话的后续构建。不执行 `postinstall`，不把退出码当成发布回执。这个过程验证了**安装中断后任务仍能完成**，不是从解包到一半的内存位置恢复，也不覆盖未预交付输入的突然断电。
+
+### 断电恢复后的构建产物（桌面插件 0.7.18）
+
+例如，Windows 把一轮构建交给 Linux，云端完成后能将构建报告交回 **Windows 原工作区**。Windows 不需要启动 DSH，但要有网络且独立收件计划任务能以原用户身份运行。反方向也使用同一个收件协议。此处传送的是已完成的文件，不是运行进程的内存，也不是外部部署回执。
+
+由**原工作区所属主机**在 `DSH_HOME/mobile-task-sync/relay-outputs.json` 指明允许回传的相对路径，不能用仓库中的文件自行授权。例如：
+
+```json
+{"desktop:<原生工作区 ID>":["reports/build.txt","artifacts/summary.json"]}
+```
+
+云端发起时用 `cloud:<原生工作区 ID>`。未配置时不回写原工作区；只读会话不签发回传授权。限 `reports/`、`artifacts/`、`dist/` 下的普通文件，支持文本、JSON、CSV、PDF、图片、Word、Excel 等指定后缀，每次最多 16 个、合计 4 MiB。只在对应的原生接力轮次成功结束、且文件集齐全时交付。接手的模型从 `relay_environment.resultDelivery` 读取暂存路径及清单；原会话下次调用 `relay_environment` 可在 `returnedFiles` 看到这轮的收件状态。
+
+电脑长时间离线不会仅因时间过去而丢弃已封存的产物。原主机先持久保存文件与摘要，然后核对工作区身份并补写文件：同内容不重写、不同内容不覆盖。`delivered` 才表示成功写入工作区；`received` 只代表已落入收件箱；`unavailable` 表示轮次未正常完成或产物不齐/不合规；`conflict` 时保留远端副本，原文件不动。未确认的发件和待处理的本地文件各有 64 MiB 队列上限，满时不会驱逐更早的待交付内容。
+
+在收件主机上，用安装包内的 `result_delivery.py status <收件箱目录> desktop` 查看明细；冲突文件可用 `result_delivery.py recover <收件箱目录> desktop <请求 ID> <新的恢复目录>` 导出到一个**尚不存在**的目录，核对后自行合并。Windows 用 `py -3.11` 运行脚本，Linux 用 `python3`，云端角色写 `cloud`。收件箱目录为 `DSH_HOME/mobile-task-sync`。
+
+部署时先将 `result_delivery.py` 和 `project_inputs.py` 与云端 `task-transfer.py` 安装在同一只读程序目录，再更新 `task-transfer.py`；Windows 更新随包的独立收件程序。旧端不协商 `results-v1`，仍可同步原有会话，但不会交付新格式产物。
