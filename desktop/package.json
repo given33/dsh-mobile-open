@@ -1,6 +1,6 @@
 {
   "name": "dsh-mobile-link",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "private": true,
   "type": "module",
   "description": "DSH Mobile desktop side: a DSH plugin and CLI for pairing phones, following tasks and enabling phone actions over a pinned TLS link",

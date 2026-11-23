@@ -9,16 +9,26 @@ export const hash = value => createHash('sha256').update(value).digest('hex');
 export const validID = id => typeof id === 'string' && /^[\w-][\w.-]{0,159}$/.test(id) && !id.includes('..');
 export const packetName = (role, id) => hash(role + ':' + id) + '.json';
 
-// Do not install half a turn in another DSH runtime: opening the session must
-// never re-dispatch an outstanding tool or approval. Keep its actual events in
-// the inbox until the owner commits turn/end. Outside a turn, every event is safe to append.
+// The standby log may be opened by a real agent. A queued prompt is live work
+// even before turn/start (or after turn/end if another prompt was queued).
+// Keep that suffix in the checkpoint packet, not in the standby's runnable inbox.
 export function committedLength(events) {
-  let start = -1;
-  for (let i = 0; i < events.length; i++) {
-    if (events[i].type === 'turn/start' && start < 0) start = i;
-    if (events[i].type === 'turn/end') start = -1;
+  let closed = 0, inTurn = false;
+  const pending = new Map([['next-turn', 0], ['next-step', 0]]);
+  for (const [i, event] of events.entries()) {
+    if (event.type === 'turn/start') inTurn = true;
+    if (event.type === 'turn/end') inTurn = false;
+    if (event.type === 'agent/inbox/spliced') {
+      const {target, start, removedCount = 0, inserted} = event.data ?? {};
+      const size = pending.get(target);
+      if (size === undefined || !Number.isSafeInteger(start) || start < 0 || start > size ||
+          !Number.isSafeInteger(removedCount) || removedCount < 0 || start + removedCount > size ||
+          !Array.isArray(inserted)) throw Error('Invalid pending task queue');
+      pending.set(target, size - removedCount + inserted.length);
+    }
+    if (!inTurn && !pending.get('next-turn') && !pending.get('next-step')) closed = i + 1;
   }
-  return start < 0 ? events.length : start;
+  return closed;
 }
 
 export async function pack(origin, workspace, header, inherited, archived, events) {

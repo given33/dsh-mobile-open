@@ -3,6 +3,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { setTimeout as delay } from 'node:timers/promises';
 import { committedLength, comparePrefix, hash, maxPacket, pack, packetName, unpack } from './log.mjs';
 
 import { installLegacy, readLegacy } from './legacy.mjs';
@@ -12,7 +13,7 @@ const transfer = fileURLToPath(new URL('./transfer.py', import.meta.url));
 const options = signal => ({signal});
 async function atomic(path, data) {
   const tmp = path + '.' + process.pid + '.tmp';
-  await writeFile(tmp, data, {mode:0o600});
+  await writeFile(tmp, data, {mode:0o600,flush:true});
   await rename(tmp, path);
 }
 
@@ -25,7 +26,8 @@ export function taskSync(ctx, config, root) {
   const seen = new Map(), sent = new Map(), errors = new Set();
   const ctrl = new AbortController();
   const {signal} = ctrl, store = ctx.sessionPersistence, registry = ctx.workspaceRegistry;
-  let busy = false, timer;
+  let busy = false, fullRequested = false, timer;
+  const dirty = new Set();
   function report(error) {
     const message = error.code || error.message;
     if (!signal.aborted && !errors.has(message)) { errors.add(message); console.warn('[dsh-mobile-link/task-sync]',message); }
@@ -72,14 +74,15 @@ export function taskSync(ctx, config, root) {
     sent.set(id,rev);
   }
   async function receive(name) {
-    const path = join(inbox,name), info = await stat(path);
+    const path = join(inbox,name), info = await stat(path, {bigint:true});
     if (info.size > maxPacket) throw Error('Oversized task envelope');
-    const mark = info.size + ':' + info.mtimeMs;
+    const mark = `${info.ino}:${info.size}:${info.mtimeNs}`;
     if (seen.get(name) === mark) return;
     const packet = JSON.parse(await readFile(path,'utf8'));
     const events = await unpack(packet,peer,name), id = packet.source;
     const length = events ? committedLength(events) : 0;
-    if (!length && events?.length) return; // A first turn is still in flight, not an empty finished session.
+    // A first turn is still in flight, not an empty finished session.
+    if (!length && events?.length) { seen.set(name,mark); return; }
     const project = await destination(packet.workspace), header = {...packet.meta,cwd:project.path};
     const existing = await store.stat(id,options(signal));
     if (existing && (existing.header.createdAt !== header.createdAt || resolve(existing.header.cwd || '.') !== resolve(project.path))) throw Error('Session identity conflict; originals retained');
@@ -111,31 +114,64 @@ export function taskSync(ctx, config, root) {
     if (!existing && packet.archived) await registry.archiveSession(id);
     seen.set(name,mark);
   }
-  async function tick() {
-    if (busy || signal.aborted) return;
+  async function receiveInbox() {
+    for (const name of await readdir(inbox)) {
+      signal.throwIfAborted();
+      if (!/^[0-9a-f]{64}\.json$/.test(name)) continue;
+      try { await receive(name); } catch (error) { report(error); }
+    }
+  }
+  async function tick(full = true) {
+    if (signal.aborted) return;
+    fullRequested ||= full;
+    if (busy) return;
     busy = true;
+    const scanAll = fullRequested;
+    fullRequested = false;
+    const changed = new Set(dirty);
+    dirty.clear();
     try {
       for (const dir of [inbox,outbox,join(root,'routes')]) await mkdir(dir,{recursive:true,mode:0o700});
+      // Read packets already delivered even when the peer has since lost power.
+      await receiveInbox();
       const archived = new Set(registry.archivedSessionIds);
       for (const project of registry.list()) for (const id of project.sessionIds) {
         signal.throwIfAborted();
+        if (!scanAll && !changed.has(id)) continue;
         try { await publish(project,id,archived.has(id)); } catch(e) { report(e); }
       }
-      if (role === 'desktop') {
-        await run('py',['-3.11',transfer,'--sync',root,sshHost],{windowsHide:true,timeout:240000,signal});
-      }
-      for (const f of await readdir(inbox)) if (/^[0-9a-f]{64}\.json$/.test(f)) {
-        signal.throwIfAborted();
-        try { await receive(f); } catch(e) { report(e); }
-      }
-    } catch(e) { report(e); } finally { busy = false; }
+    } catch(e) { report(e); } finally {
+      busy = false;
+      if (dirty.size || fullRequested) schedule();
+    }
+  }
+  function schedule() {
+    if (timer || signal.aborted) return;
+    // Throttle, don't debounce: a busy tool stream must not postpone shipping indefinitely.
+    timer = setTimeout(() => { timer = undefined; void tick(false); }, 450);
+  }
+  async function watchPeer() {
+    // The transport owns no DSH writer. Local checkpoints keep advancing during SSH outages.
+    while (!signal.aborted) {
+      try {
+        await run('py',['-3.11',transfer,'--watch',root,sshHost],{windowsHide:true,timeout:240000,signal});
+      } catch { if (!signal.aborted) report(new Error('Task sync SSH unavailable')); }
+      if (signal.aborted) break;
+      try { await delay(2000, undefined, {signal}); } catch { break; }
+    }
   }
   ctx.effect(() => {
-    const first = setTimeout(tick,400), interval = setInterval(tick,12000);
-    return () => { clearTimeout(first); clearInterval(interval); clearTimeout(timer); ctrl.abort(); };
+    const first = setTimeout(() => tick(),400), interval = setInterval(() => tick(),12000);
+    // Imported packets can arrive between full registry scans on either host.
+    const polling = setInterval(() => tick(false),1500);
+    if (role === 'desktop') void watchPeer();
+    return () => { clearTimeout(first); clearInterval(interval); clearInterval(polling); clearTimeout(timer); ctrl.abort(); };
   });
-  ctx.on('session/event', (_,event) => {
-    if (event.type === 'turn/end') { clearTimeout(timer); timer = setTimeout(tick,450); }
+  const boundaries = new Set(['agent/inbox/spliced','turn/start','user/message','step/end','tool/call','tool/result','turn/end']);
+  ctx.on('session/event', (session,event) => {
+    if (!boundaries.has(event.type)) return;
+    dirty.add(session.id);
+    schedule();
   });
   return tick;
 }

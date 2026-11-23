@@ -6,9 +6,11 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 
 MAX = 32 * 1024 * 1024
 NAME = re.compile(r'[0-9a-f]{64}\.json')
@@ -21,14 +23,35 @@ def regular(folder, name):
         raise ValueError('Not a bounded packet')
     return p
 
-def manifest(folder):
-    found = {}
+def file_stamp(st):
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def manifest(folder, cache=None):
+    entries = {}
     for p in folder.glob('*.json'):
-        if NAME.fullmatch(p.name):
-            found[p.name] = hashlib.sha256(regular(folder, p.name).read_bytes()).hexdigest()
-    if len(found) > 16384:
-        raise ValueError('Too many sessions')
-    return found
+        if not NAME.fullmatch(p.name):
+            continue
+        if len(entries) >= 16384:
+            raise ValueError('Too many sessions')
+        st = p.lstat()
+        if not stat.S_ISREG(st.st_mode) or st.st_size > MAX:
+            raise ValueError('Not a bounded packet')
+        previous = cache.get(p.name) if cache is not None else None
+        if previous and previous[0] == file_stamp(st):
+            entries[p.name] = previous
+            continue
+        # Packets are replaced atomically. Stamp the open file, not a path that
+        # could be renamed between stat and read. Unchanged packets are not opened.
+        with p.open('rb') as source:
+            actual = os.fstat(source.fileno())
+            if not stat.S_ISREG(actual.st_mode) or actual.st_size > MAX:
+                raise ValueError('Not a bounded packet')
+            entries[p.name] = (file_stamp(actual), hashlib.sha256(source.read(MAX + 1)).hexdigest())
+    if cache is not None:
+        cache.clear()
+        cache.update(entries)
+    return {name: entry[1] for name, entry in entries.items()}
 
 def receive(src):
     line = src.readline(MAX * 2 + 1)
@@ -54,6 +77,13 @@ def store(folder, name, data, origin):
         with tempfile.NamedTemporaryFile(dir=folder,delete=False) as f:
             tmp=f.name; f.write(raw); f.flush(); os.fsync(f.fileno())
         os.replace(tmp,folder/name)
+        # Linux can acknowledge a durable directory entry only after fsync on the directory.
+        if os.name == 'posix':
+            directory = os.open(str(folder), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
     finally:
         if tmp and os.path.exists(tmp):os.unlink(tmp)
 
@@ -95,31 +125,63 @@ def main():
     mode, root = sys.argv[1:3]; root = Path(root)
     outbox,inbox = root/'outbox',root/'inbox'
     for d in (outbox,inbox):d.mkdir(mode=0o700,parents=True,exist_ok=True)
+    out_cache, in_cache = {}, {}
     if mode=='--peer':
-        send(sys.stdout.buffer,[manifest(outbox),manifest(inbox)])
+        watching = sys.argv[3:] == ['watch-v1']
+        def inventory():
+            return [manifest(outbox, out_cache), manifest(inbox, in_cache)]
+        previous = inventory()
+        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []))
         while True:
             cmd=receive(sys.stdin.buffer)
             if cmd==['end']:break
-            if cmd[0]=='family':
+            if cmd == ['poll'] and watching:
+                current = inventory()
+                send(sys.stdout.buffer, None if current == previous else current)
+                previous = current
+            elif cmd[0]=='family':
                 accept_verifiers(root.parent/'mobile-link', cmd[1]); send(sys.stdout.buffer,True)
             elif cmd[0]=='get':send(sys.stdout.buffer,read_packet(outbox,cmd[1]))
             elif cmd[0]=='put':store(inbox,cmd[1],cmd[2],'desktop');send(sys.stdout.buffer,True)
             else:raise ValueError('Unknown request')
         return
-    if mode!='--sync' or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',sys.argv[3]):raise ValueError('Invalid SSH alias')
-    with subprocess.Popen(['ssh','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=10','-o','ServerAliveCountMax=2',sys.argv[3],'sudo -n -u dsh-cloud /usr/bin/python3 /opt/dsh-cloud/task-transfer.py --peer /var/lib/dsh-cloud/.dsh/mobile-task-sync'],stdin=subprocess.PIPE,stdout=subprocess.PIPE) as p:
+    if mode not in ('--sync', '--watch') or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',sys.argv[3]):raise ValueError('Invalid SSH alias')
+    command = 'sudo -n -u dsh-cloud /usr/bin/python3 /opt/dsh-cloud/task-transfer.py --peer /var/lib/dsh-cloud/.dsh/mobile-task-sync'
+    if mode == '--watch':
+        command += ' watch-v1'
+    with subprocess.Popen(['ssh','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=10','-o','ServerAliveCountMax=2',sys.argv[3], command],stdin=subprocess.PIPE,stdout=subprocess.PIPE) as p:
         try:
-            offered,received=receive(p.stdout); here=manifest(inbox)
-            grant = verifier_manifest(root.parent/'mobile-link')
-            if grant is not None:
-                send(p.stdin, ['family', grant])
-                if receive(p.stdout) is not True: raise ValueError('Family sync failed')
-            for name,h in offered.items():
-                if here.get(name)==h:continue
-                send(p.stdin,['get',name]);store(inbox,name,receive(p.stdout),'cloud')
-            for name,h in manifest(outbox).items():
-                if received.get(name)==h:continue
-                send(p.stdin,['put',name,read_packet(outbox,name)]);assert receive(p.stdout) is True
+            initial = receive(p.stdout)
+            watching = mode == '--watch' and initial[2:] == ['watch-v1']
+            offered, received = initial[:2]
+            last_grant = None
+            # Bound an orphaned helper's lifetime if the host process dies without teardown.
+            # Healthy hosts reopen the connection; idle polls send no digest lists.
+            deadline = time.monotonic() + 60
+            while True:
+                here = manifest(inbox, in_cache)
+                grant = verifier_manifest(root.parent/'mobile-link')
+                if grant is not None and grant != last_grant:
+                    send(p.stdin, ['family', grant])
+                    if receive(p.stdout) is not True:
+                        raise ValueError('Family sync failed')
+                    last_grant = grant
+                for name, digest in offered.items():
+                    if here.get(name) != digest:
+                        send(p.stdin, ['get', name])
+                        store(inbox, name, receive(p.stdout), 'cloud')
+                for name, digest in manifest(outbox, out_cache).items():
+                    if received.get(name) != digest:
+                        send(p.stdin, ['put', name, read_packet(outbox, name)])
+                        if receive(p.stdout) is not True:
+                            raise ValueError('Peer did not acknowledge packet')
+                if not watching or time.monotonic() >= deadline:
+                    break
+                time.sleep(1.5)
+                send(p.stdin, ['poll'])
+                update = receive(p.stdout)
+                if update is not None:
+                    offered, received = update
             send(p.stdin,['end']);p.stdin.close()
             if p.wait(timeout=12):raise RuntimeError('SSH sync did not finish')
         finally:
