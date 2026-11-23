@@ -73,7 +73,7 @@ JS
   done
   python3 scripts/simulator-grants.py "$scratch" &
   grant_pid=$!
-  tests+=(testSwitchBetweenPinnedDevicesFromHeader)
+  tests=(testSwitchBetweenPinnedDevicesFromHeader "${tests[@]}")
 fi
 for test in "${tests[@]}"; do
   fresh_link="$(node --input-type=module -e '
@@ -94,7 +94,7 @@ for test in "${tests[@]}"; do
       mask_test_log "$log" | tail -85
       exit 1
     }
-  if ! grep -Fq '** TEST SUCCEEDED **' "$log" || ! grep -Eq "Test Case .*${test}.* passed" "$log"; then
+  if ! grep -Eq "Test Case .*${test}.* passed" "$log" || ! grep -Eq "Executed 1 test, with 0 failures" "$log"; then
     echo "Expected executed XCTest did not report a pass: $test" >&2
     mask_test_log "$log" | tail -85
     exit 1

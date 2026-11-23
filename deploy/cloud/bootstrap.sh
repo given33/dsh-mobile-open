@@ -1,6 +1,7 @@
 #!/bin/sh
 # Bootstrap a dedicated runtime without changing the host's system Node or DSH installation.
 set -eu
+assets=$(cd "$(dirname "$0")" && pwd)
 root=/opt/dsh-cloud
 state=/var/lib/dsh-cloud
 if ! id dsh-cloud >/dev/null 2>&1; then useradd --system --create-home --home-dir "$state" --shell /sbin/nologin dsh-cloud; fi
@@ -12,5 +13,9 @@ install -d -m 0700 -o dsh-cloud -g dsh-cloud "$state" "$state/workspace" "$state
 runuser -u dsh-cloud -- env HOME="$state" npm install --prefix "$state/install/runtime" --ignore-scripts --no-fund --no-audit --loglevel=error node-linux-x64@24.22.3 pnpm@11.28.5
 install -m 0755 "$state/install/runtime/node_modules/node-linux-x64/bin/node" "$root/node"
 install -d "$root/pnpm"; cp -a "$state/install/runtime/node_modules/pnpm/." "$root/pnpm/"; chown -R root:root "$root/pnpm"
+install -d -m 0755 "$root/bin"
+ln -sfn "$root/pnpm/bin/pnpm.cjs" "$root/bin/pnpm"
+install -d -m 0700 -o dsh-cloud -g dsh-cloud "$state/.dsh/skills" "$state/.dsh/skills/relay-project-tools"
+install -m 0640 -o root -g dsh-cloud "$assets/skills/relay-project-tools/SKILL.md" "$state/.dsh/skills/relay-project-tools/SKILL.md"
 cd "$state/install"
 runuser -u dsh-cloud -- env HOME="$state" PATH="$root:$PATH" "$root/node" "$root/pnpm/bin/pnpm.cjs" add --save-exact --ignore-scripts --config.child-concurrency=1 --network-concurrency=4 --reporter=append-only @deepseek-ai/dsh@0.2.3-alpha.2
