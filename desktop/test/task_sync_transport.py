@@ -38,14 +38,15 @@ class WatchTest(unittest.TestCase):
             connections = []
             def loopback(args, **options):
                 self.assertIn('StrictHostKeyChecking=yes', args)
-                self.assertTrue(args[-1].endswith(' watch-v1'))
+                self.assertTrue(args[-1].endswith(' watch-v1 catalog-v1'))
                 connections.append(True)
-                return spawn([sys.executable, str(SCRIPT), '--peer', str(cloud), 'watch-v1'], **options)
+                return spawn([sys.executable, str(SCRIPT), '--peer', str(cloud), 'watch-v1', 'catalog-v1'], **options)
 
             polls = []
             def wait(_seconds):
                 # Check both directions *before* providing the next checkpoint.
                 for source, dest in ((desktop, cloud), (cloud, desktop)):
+                    self.assertEqual((dest/'inbox'/transfer.CATALOG).read_bytes(), (source/'outbox'/transfer.CATALOG).read_bytes())
                     step = 1 if not polls else 2
                     name, data = packet(source.name, step)
                     self.assertEqual((dest / 'inbox' / name).read_bytes(), data)
@@ -53,6 +54,9 @@ class WatchTest(unittest.TestCase):
                         offer(source, 2)
                 polls.append(True)
 
+            for source in (desktop, cloud):
+                catalogue = dict(v=1, owner=source.name, workspaces=[dict(key='abc', title='项目')])
+                (source/'outbox'/transfer.CATALOG).write_text(json.dumps(catalogue))
             offer(desktop, 1)
             offer(cloud, 1)
             with patch.object(sys, 'argv', [str(SCRIPT), '--watch', str(desktop), 'verified-host']), \

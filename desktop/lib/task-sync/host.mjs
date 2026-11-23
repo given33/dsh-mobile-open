@@ -6,6 +6,8 @@ import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 import { committedLength, comparePrefix, hash, maxPacket, pack, packetName, unpack } from './log.mjs';
 
+import { catalogName, catalogRoutes, maxCatalog, mayUnregister, optionalJson, retiredRoutes } from './catalog.mjs';
+import { checkMembership, isNewer, readMembership, setMembership } from './membership.mjs';
 import { installLegacy, readLegacy } from './legacy.mjs';
 
 const run = promisify(execFile);
@@ -28,6 +30,8 @@ export function taskSync(ctx, config, root) {
   const {signal} = ctrl, store = ctx.sessionPersistence, registry = ctx.workspaceRegistry;
   let busy = false, fullRequested = false, timer;
   const dirty = new Set();
+  let retired = new Set(), peerTitles = new Map(), lastCatalog;
+  const isRetired = route => retired.has(route.owner + ':' + route.key);
   function report(error) {
     const message = error.code || error.message;
     if (!signal.aborted && !errors.has(message)) { errors.add(message); console.warn('[dsh-mobile-link/task-sync]',message); }
@@ -50,17 +54,76 @@ export function taskSync(ctx, config, root) {
     }
     const key = hash(route.owner+':'+route.key), path = join(spaces,key);
     const found = registry.list().find(w => resolve(w.path) === resolve(path));
-    if (found) return found;
+    const title = peerTitles.get(route.key) ?? route.title;
+    if (found) {
+      if (found.title !== title) await found.setTitle(title);
+      return found;
+    }
     await mkdir(path,{recursive:true,mode:0o700});
     await atomic(join(root,'routes',key+'.json'),JSON.stringify(route));
-    return registry.create(path,route.title);
+    return registry.create(path,title);
   }
-  async function publish(project, id, archived) {
+  async function updateCatalog() {
+    const local = [];
+    for (const project of registry.list()) {
+      const route = await describe(project);
+      if (isRetired(route)) {
+        if (await mayUnregister(ctx, project, signal)) await registry.delete(project.id);
+        else report(new Error('Retired workspace has an open session or user history; registration preserved'));
+      } else if (route.owner === role) {
+        local.push({key: route.key, title: route.title});
+      }
+    }
+    const inventory = JSON.stringify({v: 1, owner: role, workspaces: local});
+    if (local.length > 4096 || Buffer.byteLength(inventory) > maxCatalog) throw Error('Oversized workspace catalogue');
+    if (inventory !== lastCatalog) {
+      await atomic(join(outbox, catalogName), inventory);
+      lastCatalog = inventory;
+    }
+    const incoming = await optionalJson(join(inbox, catalogName));
+    if (!incoming) return;
+    const routes = catalogRoutes(incoming, peer);
+    peerTitles = new Map(routes.map(r => [r.key, r.title]));
+    for (const route of routes) if (!isRetired(route)) await destination(route);
+  }
+  const memberships = new Map();
+  const membershipPath = id => join(root, 'memberships', hash(id) + '.json');
+  async function saveMembership(id, value) {
+    await atomic(membershipPath(id), JSON.stringify(value));
+    memberships.set(id, value);
+    return value;
+  }
+  async function localMembership(id, create) {
+    if (!memberships.has(id)) {
+      const saved = await optionalJson(membershipPath(id));
+      memberships.set(id, saved && checkMembership(saved));
+    }
+    const previous = memberships.get(id);
+    const state = readMembership(registry, id);
+    if (!previous && !create) return null;
+    if (previous?.state === state) return previous;
+    return saveMembership(id, {clock: (previous?.clock ?? 0) + 1, actor: role, state});
+  }
+  async function importMembership(packet, existing) {
+    const value = packet.membership;
+    if (!value) {
+      if (!existing && packet.archived) await registry.archiveSession(packet.source);
+      return;
+    }
+    const current = await localMembership(packet.source, false);
+    if (isNewer(value, current)) {
+      await setMembership(registry, packet.source, value.state);
+      await saveMembership(packet.source, value);
+    }
+  }
+  async function publish(project, id) {
     const record = await store.stat(id,options(signal));
     if (!record) return;
-    const rev = JSON.stringify([record.revision,project.title,archived]);
+    const membership = await localMembership(id, true), archived = membership.state === 'archived';
+    const rev = JSON.stringify([record.revision, project.title, membership]);
     if (sent.get(id) === rev) return;
     const workspace = await describe(project);
+    if (isRetired(workspace)) return;
     let packet, reader;
     try {
       reader = await store.open(id,'read',options(signal));
@@ -70,6 +133,7 @@ export function taskSync(ctx, config, root) {
       const {cwd, ...meta} = record.header;
       packet = {v:2,origin:role,source:id,workspace,meta,inherited:0,archived,encoding:'legacy-v3-zstd',data:await readLegacy(record)};
     } finally { if (reader) await reader.close(); }
+    packet.membership = membership;
     await atomic(join(outbox,packetName(role,id)),JSON.stringify(packet));
     sent.set(id,rev);
   }
@@ -80,6 +144,11 @@ export function taskSync(ctx, config, root) {
     if (seen.get(name) === mark) return;
     const packet = JSON.parse(await readFile(path,'utf8'));
     const events = await unpack(packet,peer,name), id = packet.source;
+    if (packet.membership !== undefined) {
+      checkMembership(packet.membership);
+      if ((packet.membership.state === 'archived') !== packet.archived) throw Error('Inconsistent task membership');
+    }
+    if (isRetired(packet.workspace)) { seen.set(name,mark); return; }
     const length = events ? committedLength(events) : 0;
     // A first turn is still in flight, not an empty finished session.
     if (!length && events?.length) { seen.set(name,mark); return; }
@@ -89,7 +158,7 @@ export function taskSync(ctx, config, root) {
     if (!events) {
       if (!existing) await installLegacy(store,packet,project);
       if (!project.sessionIds.includes(id)) await project.attachSession(id);
-      if (!existing && packet.archived) await registry.archiveSession(id);
+      await importMembership(packet, existing);
       seen.set(name,mark);
       return;
     }
@@ -111,7 +180,7 @@ export function taskSync(ctx, config, root) {
       ctx.get?.('sessionProjectionCache')?.coldSnapshot(header,packet.inherited,history);
     }
     if (!project.sessionIds.includes(id)) await project.attachSession(id);
-    if (!existing && packet.archived) await registry.archiveSession(id);
+    await importMembership(packet, existing);
     seen.set(name,mark);
   }
   async function receiveInbox() {
@@ -131,14 +200,17 @@ export function taskSync(ctx, config, root) {
     const changed = new Set(dirty);
     dirty.clear();
     try {
-      for (const dir of [inbox,outbox,join(root,'routes')]) await mkdir(dir,{recursive:true,mode:0o700});
+      for (const dir of [inbox,outbox,join(root,'routes'),join(root,'memberships')]) await mkdir(dir,{recursive:true,mode:0o700});
+      if (scanAll) {
+        retired = retiredRoutes(await optionalJson(join(root, 'retired-workspaces.json')));
+        try { await updateCatalog(); } catch (error) { report(error); }
+      }
       // Read packets already delivered even when the peer has since lost power.
       await receiveInbox();
-      const archived = new Set(registry.archivedSessionIds);
       for (const project of registry.list()) for (const id of project.sessionIds) {
         signal.throwIfAborted();
         if (!scanAll && !changed.has(id)) continue;
-        try { await publish(project,id,archived.has(id)); } catch(e) { report(e); }
+        try { await publish(project,id); } catch(e) { report(e); }
       }
     } catch(e) { report(e); } finally {
       busy = false;

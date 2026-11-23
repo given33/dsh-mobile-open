@@ -15,8 +15,12 @@ import time
 MAX = 32 * 1024 * 1024
 NAME = re.compile(r'[0-9a-f]{64}\.json')
 
+CATALOG = 'workspace-catalog.json'
+MAX_CATALOG = 1024 * 1024
+
+
 def regular(folder, name):
-    if not isinstance(name, str) or not NAME.fullmatch(name):
+    if not isinstance(name, str) or (name != CATALOG and not NAME.fullmatch(name)):
         raise ValueError('Invalid packet name')
     p = folder / name
     if p.is_symlink() or not p.is_file() or p.stat().st_size > MAX:
@@ -27,10 +31,10 @@ def file_stamp(st):
     return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
 
 
-def manifest(folder, cache=None):
+def manifest(folder, cache=None, catalogs=False):
     entries = {}
     for p in folder.glob('*.json'):
-        if not NAME.fullmatch(p.name):
+        if not NAME.fullmatch(p.name) and not (catalogs and p.name == CATALOG):
             continue
         if len(entries) >= 16384:
             raise ValueError('Too many sessions')
@@ -66,12 +70,16 @@ def read_packet(folder, name):
     return base64.b64encode(regular(folder,name).read_bytes()).decode('ascii')
 
 def store(folder, name, data, origin):
-    if not NAME.fullmatch(name): raise ValueError('Invalid packet name')
+    if not isinstance(name, str) or (name != CATALOG and not NAME.fullmatch(name)): raise ValueError('Invalid packet name')
     raw = base64.b64decode(data,validate=True)
     if len(raw)>MAX: raise ValueError('Packet too large')
     obj=json.loads(raw)
-    if obj.get('v')!=2 or obj.get('origin')!=origin or not isinstance(obj.get('source'),str) or not re.fullmatch(r'[\w.-]{1,160}',obj['source'],re.ASCII): raise ValueError('Unexpected origin or source')
-    if hashlib.sha256((origin+':'+obj['source']).encode()).hexdigest()+'.json'!=name: raise ValueError('Wrong packet identity')
+    if name == CATALOG:
+        if len(raw) > MAX_CATALOG or obj.get('owner') != origin or obj.get('v') != 1 or not isinstance(obj.get('workspaces'), list):
+            raise ValueError('Invalid workspace catalogue')
+    else:
+        if obj.get('v')!=2 or obj.get('origin')!=origin or not isinstance(obj.get('source'),str) or not re.fullmatch(r'[\w.-]{1,160}',obj['source'],re.ASCII): raise ValueError('Unexpected origin or source')
+        if hashlib.sha256((origin+':'+obj['source']).encode()).hexdigest()+'.json'!=name: raise ValueError('Wrong packet identity')
     tmp=None
     try:
         with tempfile.NamedTemporaryFile(dir=folder,delete=False) as f:
@@ -127,11 +135,12 @@ def main():
     for d in (outbox,inbox):d.mkdir(mode=0o700,parents=True,exist_ok=True)
     out_cache, in_cache = {}, {}
     if mode=='--peer':
-        watching = sys.argv[3:] == ['watch-v1']
+        watching = 'watch-v1' in sys.argv[3:]
+        catalogs = 'catalog-v1' in sys.argv[3:]
         def inventory():
-            return [manifest(outbox, out_cache), manifest(inbox, in_cache)]
+            return [manifest(outbox, out_cache, catalogs), manifest(inbox, in_cache, catalogs)]
         previous = inventory()
-        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []))
+        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []) + (['catalog-v1'] if catalogs else []))
         while True:
             cmd=receive(sys.stdin.buffer)
             if cmd==['end']:break
@@ -149,17 +158,19 @@ def main():
     command = 'sudo -n -u dsh-cloud /usr/bin/python3 /opt/dsh-cloud/task-transfer.py --peer /var/lib/dsh-cloud/.dsh/mobile-task-sync'
     if mode == '--watch':
         command += ' watch-v1'
+    command += ' catalog-v1'
     with subprocess.Popen(['ssh','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=10','-o','ServerAliveCountMax=2',sys.argv[3], command],stdin=subprocess.PIPE,stdout=subprocess.PIPE) as p:
         try:
             initial = receive(p.stdout)
-            watching = mode == '--watch' and initial[2:] == ['watch-v1']
+            watching = mode == '--watch' and 'watch-v1' in initial[2:]
+            catalogs = 'catalog-v1' in initial[2:]
             offered, received = initial[:2]
             last_grant = None
             # Bound an orphaned helper's lifetime if the host process dies without teardown.
             # Healthy hosts reopen the connection; idle polls send no digest lists.
             deadline = time.monotonic() + 60
             while True:
-                here = manifest(inbox, in_cache)
+                here = manifest(inbox, in_cache, catalogs)
                 grant = verifier_manifest(root.parent/'mobile-link')
                 if grant is not None and grant != last_grant:
                     send(p.stdin, ['family', grant])
@@ -170,7 +181,7 @@ def main():
                     if here.get(name) != digest:
                         send(p.stdin, ['get', name])
                         store(inbox, name, receive(p.stdout), 'cloud')
-                for name, digest in manifest(outbox, out_cache).items():
+                for name, digest in manifest(outbox, out_cache, catalogs).items():
                     if received.get(name) != digest:
                         send(p.stdin, ['put', name, read_packet(outbox, name)])
                         if receive(p.stdout) is not True:

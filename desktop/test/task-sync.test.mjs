@@ -103,3 +103,67 @@ test('a live tool checkpoint is published without turn/end; it is not a standby 
   assert.deepEqual(mirrored,live);
   assert.equal(committedLength(mirrored),4);
 });
+
+test('paired hosts share empty native workspaces, preserve session identity in both directions and retire only designated buckets', async t => {
+  const {readFile, readdir, copyFile} = await import('node:fs/promises');
+  const root = await mkdtemp(join(tmpdir(), 'dsh-workspace-relay-'));
+  t.after(() => rm(root, {recursive: true, force: true}));
+  function host(role) {
+    const dir = join(root, role), projects = new Map(), rows = new Map();
+    const archived = new Set(), pinned = new Set();
+    let index = 0;
+    const registry = {
+      list: () => [...projects.values()], delete: async id => projects.delete(id),
+      get archivedSessionIds() { return [...archived]; }, get pinnedSessionIds() { return [...pinned]; },
+      archiveSession: async id => { archived.add(id); pinned.delete(id); }, unarchiveSession: async id => archived.delete(id),
+      pinSession: async id => pinned.add(id), unpinSession: async id => pinned.delete(id),
+      async create(path, title) {
+        const id = `${role}-${++index}`;
+        const project = {id, path, title, sessionIds: [], async setTitle(value) { this.title = value; },
+          async attachSession(sid) { if (!this.sessionIds.includes(sid)) this.sessionIds.push(sid); }};
+        projects.set(id, project); return project;
+      },
+    };
+    const handle = row => ({header:row.header, inheritedEventCount:0, read:async()=>({events:[...row.events]}),
+      append:async data=>row.events.push(...data),flush:async()=>{},close:async()=>{}});
+    const store = {stat:async id=> rows.has(id) ? {header:rows.get(id).header, revision:rows.get(id).events.length} : null,
+      async create(header) { const row={header, events:[]}; assert.ok(!rows.has(header.id)); rows.set(header.id,row); return handle(row); },
+      open:async id=>handle(rows.get(id))};
+    const tick = taskSync({workspaceRegistry:registry, sessionPersistence:store, effect(){}, on(){}}, {role,sshHost:'fixture'}, dir);
+    return {dir, registry, rows, tick};
+  }
+  const pc=host('desktop'), cloud=host('cloud');
+  async function deliver(from, to) {
+    await from.tick();
+    await mkdir(join(to.dir,'inbox'),{recursive:true});
+    for (const f of await readdir(join(from.dir,'outbox'))) await copyFile(join(from.dir,'outbox',f),join(to.dir,'inbox',f));
+    await to.tick();
+  }
+  const project=await pc.registry.create(join(root,'normal'), '原项目');
+  const old=await pc.registry.create(join(root,'legacy'), '来自电脑的任务');
+  const legitimate=await pc.registry.create(join(root,'unrelated'), old.title);
+  await deliver(pc,cloud);
+  const replica = cloud.registry.list().find(p=>p.title === project.title);
+  assert.ok(replica); assert.equal(cloud.registry.list().length,3);
+  const retirement = JSON.stringify({desktop:[old.id],cloud:[]});
+  for (const h of [pc,cloud]) await writeFile(join(h.dir,'retired-workspaces.json'),retirement);
+  await project.setTitle('新名称'); await deliver(pc,cloud);
+  assert.equal(replica.title,project.title); assert.equal(cloud.registry.list().length,2);
+  assert.ok(pc.registry.list().includes(legitimate));
+  // Even an older session packet left in transit cannot recreate the retired shelf.
+  const stale = await pack('desktop',{owner:'desktop',key:old.id,title:old.title},header,0,false,events);
+  await writeFile(join(cloud.dir,'inbox',packetName('desktop',header.id)), JSON.stringify(stale)); await cloud.tick();
+  assert.equal(cloud.registry.list().length,2); assert.equal(cloud.rows.size,0);
+  pc.rows.set(header.id,{header:{...header,cwd:project.path},events:[...events]}); await project.attachSession(header.id);
+  await deliver(pc,cloud); assert.deepEqual(replica.sessionIds,[header.id]);
+  // No source host is running while the standby appends the next confirmed round.
+  const next=events.map(e=>({...e,seq:e.seq+4,time:e.time+10})); cloud.rows.get(header.id).events.push(...next);
+  await cloud.registry.pinSession(header.id); await deliver(cloud,pc);
+  assert.deepEqual(pc.rows.get(header.id).events,[...events,...next]); assert.deepEqual(pc.registry.pinnedSessionIds,[header.id]);
+  await pc.registry.archiveSession(header.id); await deliver(pc,cloud); assert.deepEqual(cloud.registry.archivedSessionIds,[header.id]);
+  await cloud.registry.unarchiveSession(header.id); await deliver(cloud,pc); assert.deepEqual(pc.registry.archivedSessionIds,[]);
+  assert.deepEqual(project.sessionIds,[header.id]); assert.ok(await readFile(join(cloud.dir,'outbox','workspace-catalog.json'),'utf8'));
+  // Refuse to retire real history even if an operator accidentally supplied its ID.
+  await writeFile(join(pc.dir,'retired-workspaces.json'), JSON.stringify({desktop:[project.id],cloud:[]})); await pc.tick();
+  assert.ok(pc.registry.list().includes(project)); assert.equal(pc.rows.get(header.id).events.length,8);
+});
