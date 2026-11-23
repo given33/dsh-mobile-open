@@ -1,15 +1,70 @@
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { constants } from 'node:fs';
 import { open, link, lstat, readFile, realpath, unlink } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { hash } from './log.mjs';
 
-const limit = 1024 * 1024;
+const limit = 8 * 1024 * 1024;
+const maxWire = 12 * 1024 * 1024;
+const inputHelper = fileURLToPath(new URL('./project_inputs.py', import.meta.url));
+const sensitive = /(credential|secret|password|token|private[-_]?key)|\.(env|pem|pfx|key|p12|kdbx)$/i;
+const reserved = /^(con|prn|aux|nul|com[0-9]|lpt[0-9]) *(\.|$)/i;
+
 function namesAllowed(names) {
-  return Array.isArray(names) && names.length <= 32 && names.every(n => typeof n === 'string' &&
-    /^[a-z0-9][a-z0-9._-]{0,95}$/i.test(n) && !n.endsWith('.') && !/^(con|prn|aux|nul|com\d|lpt\d)(\.|$)/i.test(n) &&
-    !/(credential|secret|password|token|private[-_]?key)|\.(env|pem|pfx|key|p12|kdbx)$/i.test(n)) &&
-    new Set(names.map(n=>n.toLowerCase())).size === names.length;
+  if (!Array.isArray(names) || names.length > 256) return false;
+  const paths = new Map();
+  for (const name of names) {
+    if (typeof name !== 'string' || name.length > 240 || name.normalize('NFKC') !== name) return false;
+    const parts = name.split('/');
+    if (parts.length > 12) return false;
+    let path = '';
+    for (const [index, part] of parts.entries()) {
+      if (!/^[\p{L}\p{N}][\p{L}\p{N} ._-]{0,95}$/u.test(part) || /[. ]$/.test(part) || reserved.test(part)
+          || sensitive.test(part) || /^(node_modules|__pycache__|id_(rsa|dsa|ecdsa|ed25519))$/i.test(part)) return false;
+      path += '/' + part;
+      const key = path.toUpperCase();
+      const directory = index < parts.length - 1;
+      const old = paths.get(key);
+      if (old && (!directory || !old.directory || old.path !== path)) return false;
+      paths.set(key, {directory, path});
+    }
+  }
+  return true;
+}
+
+// Retain the old, Python-free path for ordinary flat input packets. A nested
+// tree needs native directory handles; never fall back to following path strings.
+function useTree(names) {
+  return names.length > 32 || names.some(name => name.includes('/'));
+}
+
+function projectInputs(action, folder, records, managedKey) {
+  const win = process.platform === 'win32';
+  const args = [...(win ? ['-3.11'] : []), '-I', inputHelper, action, folder, ...(managedKey ? [managedKey] : [])];
+  const payload = JSON.stringify(records);
+  if (Buffer.byteLength(payload) > maxWire) throw Error('接力项目输入过大。');
+  return new Promise((resolve, reject) => {
+    const child = spawn(win ? 'py' : 'python3', args, {windowsHide:true, stdio:['pipe','pipe','pipe']});
+    const output = [];
+    let size = 0, diagnostic = '';
+    const timer = setTimeout(() => child.kill(), 45000);
+    child.stdout.on('data', chunk => {
+      size += chunk.length;
+      if (size > maxWire) child.kill();
+      else output.push(chunk);
+    });
+    child.stderr.setEncoding('utf8').on('data', chunk => { if (diagnostic.length < 600) diagnostic += chunk; });
+    child.once('error', reject);
+    child.once('close', code => {
+      clearTimeout(timer);
+      if (code !== 0 || size > maxWire) return reject(Error('接力文件处理失败：' + diagnostic.trim().slice(0,600)));
+      try { resolve(JSON.parse(Buffer.concat(output).toString('utf8'))); } catch { reject(Error('接力文件响应无效。')); }
+    });
+    child.stdin.on('error', () => {});
+    child.stdin.end(payload);
+  });
 }
 async function regularBytes(path, budget) {
   const before = await lstat(path,{bigint:true});
@@ -39,6 +94,7 @@ export async function collectInputs(root,route,cwd) {
   if (names === undefined) return [];
   if (!namesAllowed(names)) throw Error('接力输入白名单无效。');
   const folder = await realpath(cwd), files = [];
+  if (useTree(names)) return projectInputs('collect', folder, names.map(name => ({name})));
   let remaining = limit;
   for (const name of names) {
     const bytes = await regularBytes(join(folder,name),remaining);
@@ -57,6 +113,12 @@ export async function prepareInputs(root,role,route,cwd,files,canWrite) {
     if (resolve(folder) !== resolve(await realpath(base),hash(route.owner+':'+route.key)) || dirname(resolve(cwd)) !== resolve(base)) throw Error('不是受管工作区，拒绝写入。');
   }
   let remaining = limit;
+  if (useTree(files.map(file => file.name))) {
+    const base = managing ? await realpath(root) : folder;
+    const key = managing ? hash(route.owner + ':' + route.key) : undefined;
+    await projectInputs(managing && canWrite ? 'prepare' : 'check', base, files, key);
+    return;
+  }
   const missing = [];
   for (const file of files) {
     if (typeof file.bytes !== 'string' || file.bytes.length > Math.ceil(remaining/3)*4) throw Error('接力输入过大。');

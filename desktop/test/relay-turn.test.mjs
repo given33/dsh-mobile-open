@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, readFile, writeFile, link, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, link, symlink, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { hash } from '../lib/task-sync/log.mjs';
@@ -56,4 +56,59 @@ test('opted-in files cross once; paths, hard links, changed files and owner dire
   await assert.rejects(prepareInputs(root,'cloud',route,replica,files,true));
   assert.equal(await readFile(join(replica,'package.json'),'utf8'),'changed');
   await rm(input); await assert.rejects(prepareInputs(root,'desktop',route,source,files,true));
+});
+
+test('project inputs preserve the tree and do not copy neighbouring files or overwrite conflicts', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'relay-project-'));
+  t.after(() => rm(root, { recursive:true, force:true }));
+  const route = { owner:'desktop', key:'project' };
+  const src = join(root, 'source');
+  const replica = join(root, 'workspaces', hash('desktop:project'));
+  await mkdir(join(src,'src','页面'), { recursive:true });
+  await mkdir(replica, { recursive:true });
+  const filename = 'src/页面/首页.txt';
+  await writeFile(join(src, filename), '你好');
+  await writeFile(join(src, 'src', 'private.pem'), 'not selected');
+  const cfg = names => writeFile(join(root,'relay-inputs.json'), JSON.stringify({'desktop:project':names}));
+  await cfg([filename]);
+  const files = await collectInputs(root, route, src);
+  assert.deepEqual(files.map(f=>f.name), [filename]);
+  await assert.rejects(prepareInputs(root,'cloud',route,replica,files,false));
+  await prepareInputs(root,'cloud',route,replica,files,true);
+  await prepareInputs(root,'cloud',route,replica,files,false);
+  assert.equal(await readFile(join(replica,filename),'utf8'), '你好');
+  await assert.rejects(readFile(join(replica,'src','private.pem')), {code:'ENOENT'});
+  await writeFile(join(replica,filename), '他端的修改');
+  await assert.rejects(prepareInputs(root,'cloud',route,replica,[{...files[0],name:'other/new.txt'},...files],true));
+  await assert.rejects(readFile(join(replica,'other','new.txt')), {code:'ENOENT'});
+  assert.equal(await readFile(join(replica,filename),'utf8'), '他端的修改');
+  for (const names of [['src/../hidden'],['Src/a','src/b'],['src/a','src/A'],['src','src/a'],['src/A','src'],
+    ['src/.git/config'],['src/key.pem'],['node_modules/foo/x'],['src/CON.txt'],['src/file:extra'],['src\\wrong.txt']]) {
+    await cfg(names);
+    await assert.rejects(collectInputs(root,route,src),/白名单/);
+    await assert.rejects(prepareInputs(root,'cloud',route,replica,names.map(name=>({...files[0],name})),true),/无效/);
+  }
+  const elsewhere = join(root,'elsewhere'); await mkdir(elsewhere);
+  await symlink(elsewhere, join(replica,'redirect'), process.platform==='win32'?'junction':'dir');
+  await assert.rejects(prepareInputs(root,'cloud',route,replica,[{...files[0],name:'redirect/new.txt'}],true));
+  await assert.rejects(readFile(join(elsewhere,'new.txt')), {code:'ENOENT'});
+  await symlink(elsewhere, join(src,'redirect'), process.platform==='win32'?'junction':'dir');
+  await writeFile(join(elsewhere,'clip.txt'),'not project data'); await cfg(['redirect/clip.txt']);
+  await assert.rejects(collectInputs(root,route,src));
+});
+
+test('dependency guidance never prescribes npm ci over an existing tree or an ambiguous lock', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'relay-node-env-'));
+  t.after(() => rm(root, {recursive:true, force:true}));
+  const { environment } = await import('../lib/task-sync/relay-environment.mjs');
+  const probe = async () => (await environment(root,'cloud',['bash'],root)).nodeSetup;
+  const bin = join(root, process.platform === 'win32' ? 'npm.cmd' : 'npm');
+  await writeFile(bin, '', {mode:0o700});
+  await writeFile(join(root,'package.json'),'{}'); await writeFile(join(root,'package-lock.json'),'{}');
+  assert.equal((await probe()).freshInstall,'npm ci --ignore-scripts --no-fund --no-audit');
+  await mkdir(join(root,'node_modules'));
+  const present = await probe();
+  assert.equal(present.modules,'present-unverified'); assert.equal(present.freshInstall,undefined);
+  assert.equal(present.verify,'npm ls --depth=0');
+  await writeFile(join(root,'pnpm-lock.yaml'),''); assert.equal((await probe()).verify,undefined);
 });

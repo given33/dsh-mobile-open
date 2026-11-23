@@ -1,4 +1,4 @@
-import { access, stat } from 'node:fs/promises';
+import { access, lstat, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 
@@ -8,10 +8,30 @@ import { handoffEvidence } from './relay-evidence.mjs';
 
 const programs = ['node', 'npm', 'npx', 'pnpm', 'yarn', 'python3.11', 'python3', 'python', 'py', 'git', 'bash', 'pwsh', 'powershell',
   'make', 'cmake', 'gcc', 'g++', 'tar', 'unzip', 'rg', 'jq', 'go', 'cargo', 'rustc', 'dotnet', 'java'];
-const manifests = ['package.json', 'package-lock.json', 'pnpm-lock.yaml', 'yarn.lock', 'pyproject.toml',
+const manifests = ['package.json', 'package-lock.json', 'npm-shrinkwrap.json', 'pnpm-lock.yaml', 'yarn.lock', 'bun.lock', 'bun.lockb', 'pyproject.toml',
   'requirements.txt', 'Cargo.toml', 'go.mod', 'CMakeLists.txt', 'Makefile', 'pom.xml', 'global.json'];
 export const noArgs = {type:'object', properties:{}, additionalProperties:false};
 export const textOutput = {schema:{type:'string'}, render:(_args,text) => [{type:'text',text}]};
+
+// A lock file is evidence about the project, not permission to reinstall. In
+// particular, npm ci removes an existing node_modules before it installs.
+async function nodeSetup(cwd, files, foundOnPath) {
+  if (!files.includes('package.json')) return null;
+  const locks = files.filter(name => ['package-lock.json','npm-shrinkwrap.json','pnpm-lock.yaml','yarn.lock','bun.lock','bun.lockb'].includes(name));
+  let modules;
+  try {
+    const entry = await lstat(join(cwd,'node_modules'));
+    modules = entry.isDirectory() ? 'present-unverified' : 'not-a-plain-directory';
+  } catch (err) {
+    modules = err.code === 'ENOENT' ? 'absent' : 'unreadable';
+  }
+  const setup = {locks, modules};
+  if (locks.length === 1 && ['package-lock.json','npm-shrinkwrap.json'].includes(locks[0]) && foundOnPath.includes('npm')) {
+    setup.verify = 'npm ls --depth=0';
+    if (modules === 'absent') setup.freshInstall = 'npm ci --ignore-scripts --no-fund --no-audit';
+  }
+  return setup;
+}
 
 // Observe the service account's actual search path. Never invoke an executable just to discover it,
 // run a project's install hooks, read manifest contents or include the host environment in a packet.
@@ -30,11 +50,13 @@ export async function environment(cwd, role, shells, searchPath = process.env.PA
     }
   }));
   const files = await Promise.all(manifests.map(async name => {
-    try { if ((await stat(join(cwd,name))).isFile()) return name; } catch { /* Absent or private. */ }
+    try { if ((await lstat(join(cwd,name))).isFile()) return name; } catch { /* Absent or private. */ }
   }));
+  const workspaceManifests = files.filter(Boolean);
+  const foundOnPath = tools.filter(Boolean);
   return {role, platform:process.platform, arch:process.arch, cwd:resolve(cwd), hostNode:process.versions.node,
-    gitReleaseHelper, nativeShellTools:shells, foundOnPath:tools.filter(Boolean), notFound:programs.filter(p=>!tools.includes(p)),
-    workspaceManifests:files.filter(Boolean)};
+    gitReleaseHelper, nativeShellTools:shells, foundOnPath, notFound:programs.filter(p=>!tools.includes(p)),
+    workspaceManifests, nodeSetup:await nodeSetup(cwd,workspaceManifests,foundOnPath)};
 }
 
 export function registerEnvironment(ctx,role,root) {
