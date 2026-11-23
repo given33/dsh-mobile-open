@@ -2,6 +2,7 @@ import { access, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 
+import { gitReleaseHelper } from './git-release-tool.mjs';
 import { dispatchState } from './cloud-turn.mjs';
 import { handoffEvidence } from './relay-evidence.mjs';
 
@@ -32,7 +33,7 @@ export async function environment(cwd, role, shells, searchPath = process.env.PA
     try { if ((await stat(join(cwd,name))).isFile()) return name; } catch { /* Absent or private. */ }
   }));
   return {role, platform:process.platform, arch:process.arch, cwd:resolve(cwd), hostNode:process.versions.node,
-    nativeShellTools:shells, foundOnPath:tools.filter(Boolean), notFound:programs.filter(p=>!tools.includes(p)),
+    gitReleaseHelper, nativeShellTools:shells, foundOnPath:tools.filter(Boolean), notFound:programs.filter(p=>!tools.includes(p)),
     workspaceManifests:files.filter(Boolean)};
 }
 

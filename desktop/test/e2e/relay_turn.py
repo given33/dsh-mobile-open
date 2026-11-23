@@ -26,6 +26,9 @@ def test(root, cli, package, origin, export=None, incoming=None):
                     elif 'RELAY-CHECKPOINT-' + marker not in history:
                         tool = 'pwsh' if os.name == 'nt' else 'bash'
                         args = dict(command='npm run checkpoint',description='Record the fixture checkpoint')
+                    elif 'planObject' not in history:
+                        tool = 'relay_git_release_plan'
+                        args = dict(remote='origin',branch='release',identity='1'*40,base='2'*40,desired='3'*40)
                     else: tool = 'relay_remaining_task'
                 elif '"foundOnPath"' not in history.replace('\\"','"'):
                     tool = 'relay_environment'
@@ -103,6 +106,7 @@ def test(root, cli, package, origin, export=None, incoming=None):
         assert not (peer_work/'source-count').exists() and not (peer_work/'checkpoint.cjs').exists()
         assert evidence and evidence[0]['platform'] == ('win32' if os.name == 'nt' else 'linux'), 'missing host evidence'
         h = evidence[0]['handoff']
+        assert len(h['gitReleases']) == 1 and h['gitReleases'][0]['desired'] == '3'*40 and len(h['gitReleases'][0]['operation']) == 64
         assert h['from'] == origin and h['to'] == target and h['externalEffects'] == 'not-verified'
         assert any(s['name'] in ('pwsh','bash') and s['result'] == 'reported-success' for s in h['priorCalls'])
         jobname = fixture['job'] if fixture else job.name

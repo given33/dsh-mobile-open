@@ -9,7 +9,8 @@ import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { installModelRouting } from './model-routing.mjs';
-import { registerEnvironment } from '../lib/task-sync/relay-environment.mjs';
+import { registerGitReleasePlan } from '../lib/task-sync/git-release-tool.mjs';
+import { registerEnvironment, textOutput } from '../lib/task-sync/relay-environment.mjs';
 import { registerTurnRelay } from '../lib/task-sync/relay-turn.mjs';
 import { registerCloudRun } from '../lib/task-sync/cloud-turn.mjs';
 import { registerPortableSteps, registerStepReceipts } from '../lib/task-sync/portable-step.mjs';
@@ -80,10 +81,11 @@ export function apply(ctx, rawConfig = {}) {
     const root = join(config.stateDir,'..','mobile-task-sync');
     const role = rawConfig.taskSync.role;
     if (['desktop','cloud'].includes(role) && rawConfig.taskSync.turnRelay === true) {
+      ctx.inject(['tools'],child => registerGitReleasePlan(child,textOutput));
       ctx.inject(['tools','workingDirectory','sessions','sessionPersistence'], child => registerEnvironment(child,role,root));
       ctx.inject(['tools','sessions','sessionPersistence','workspaceRegistry'], child => registerTurnRelay(child,role,root));
       ctx.inject(['systemPrompt'], child => child.systemPrompt.section({name:'mobile-link:relay', order:850,
-        text:'This DSH has a paired execution host. Use relay_environment to check the actual OS, native shells and workspace manifests. When the owner wants work to survive this host going offline, proactively call relay_remaining_task alone at a completed step boundary BEFORE starting the next long operation, if the task can run there. On the peer, verify source files, dependencies, credentials and previous side effects; never translate a destructive command blindly or bypass required approvals. A live process is not portable. Do not transfer again merely because of an automatic handoff.',
+        text:'This DSH has a paired execution host. Use relay_environment to check the actual OS, native shells and workspace manifests. When the owner wants work to survive this host going offline, proactively call relay_remaining_task alone at a completed step boundary BEFORE starting the next long operation, if the task can run there. On the peer, verify source files, dependencies, credentials and previous side effects; never translate a destructive command blindly or bypass required approvals. For an authorized release to an opted-in Git target, record relay_git_release_plan before any push. Use the helper returned by relay_environment through the native shell: node HELPER status|prepare|finish REMOTE BRANCH OPERATION IDENTITY BASE DESIRED. Keep the original operation; check target status before retries. Committed means the Git branch was updated, not that CI or deployment succeeded. Do not enable target policies yourself. A live process is not portable. Do not transfer again merely because of an automatic handoff.',
         retirement:'The paired-host execution relay is unavailable.'}));
     }
     if (rawConfig.taskSync.portableSteps === true) {
