@@ -23,8 +23,12 @@ if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $python -PathType Leaf)) { 
 $pythonw = Join-Path (Split-Path $python) 'pythonw.exe'
 if (!(Test-Path -LiteralPath $pythonw -PathType Leaf)) { throw 'Python windowless runtime missing.' }
 # Keep the helper independent of an unpacked plugin directory or a future plugin upgrade.
-$helper = Join-Path $root ('receiver-' + (Get-FileHash -LiteralPath $source).Hash + '.py')
+$progress = Join-Path (Split-Path $source) 'script_progress.py'
+$bundle = Join-Path $root ('receiver-' + (Get-FileHash -LiteralPath $source).Hash.Substring(0,16) + '-' + (Get-FileHash -LiteralPath $progress).Hash.Substring(0,16))
+[void][IO.Directory]::CreateDirectory($bundle)
+$helper = Join-Path $bundle 'transfer.py'
 Copy-Item -LiteralPath $source -Destination $helper -Force
+Copy-Item -LiteralPath $progress -Destination (Join-Path $bundle 'script_progress.py') -Force
 $action = New-ScheduledTaskAction -Execute $pythonw -Argument ('"{0}" --mailbox "{1}" {2}' -f $helper,$root,$SshHost)
 $repeat = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1)
 if ($BeforeSignIn) {

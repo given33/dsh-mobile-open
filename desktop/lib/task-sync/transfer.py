@@ -214,6 +214,58 @@ def collect_receipts(root, reader, writer):
         after = r['seq']
     if rows: durable_replace(dest, 'cursor',str(after).encode())
 
+def progress_db(root):
+    # No checkpoint database or Python module is required for legacy installations.
+    from script_progress import connect
+    return connect(root)
+
+
+def pending_progress(root):
+    if not (root/'script-progress.sqlite').exists():return []
+    from script_progress import pending
+    db=progress_db(root)
+    try:return pending(db)
+    finally:db.close()
+
+
+def store_progress(root, frame):
+    from script_progress import apply
+    db=progress_db(root)
+    try:return apply(db,frame)
+    finally:db.close()
+
+
+def ack_progress(root, run, rev, digest, status):
+    from script_progress import acknowledge
+    db=progress_db(root)
+    try:acknowledge(db,run,rev,digest,status)
+    finally:db.close()
+
+
+def pulses(root,remote=None):
+    if not (root/'script-progress.sqlite').exists():return []
+    from script_progress import live_pulses,observe
+    db=progress_db(root)
+    try:
+        if remote is not None:observe(db,remote)
+        return live_pulses(db)
+    finally:db.close()
+
+
+def exchange_progress(root,reader,writer,send_local):
+    send(writer,['progress-heartbeats',pulses(root) if send_local else []]);pulses(root,receive(reader))
+    send(writer,['progress-list']);rows=receive(reader)
+    if not isinstance(rows,list) or len(rows)>8:raise ValueError('Invalid progress inventory')
+    for row in rows:
+        answer=store_progress(root,row)
+        send(writer,['progress-ack',row['run'],row['rev'],row['digest'],answer]);
+        if receive(reader) is not True:raise ValueError('Progress acknowledgement failed')
+    if send_local:
+        for row in pending_progress(root):
+            send(writer,['progress-put',row]);answer=receive(reader)
+            ack_progress(root,row['run'],row['rev'],row['digest'],answer)
+
+
 def main():
     mode, root = sys.argv[1:3]; root = Path(root)
     outbox,inbox = root/'outbox',root/'inbox'
@@ -225,11 +277,13 @@ def main():
         models = 'models-v1' in sys.argv[3:]
         turns = 'turns-v1' in sys.argv[3:]
         relay = 'relay-v1' in sys.argv[3:]
+        progress = 'progress-v1' in sys.argv[3:] and Path(__file__).with_name('script_progress.py').is_file()
         receipts = 'receipts-v1' in sys.argv[3:] and Path(__file__).with_name('portable_worker.py').is_file()
         def inventory():
             return [manifest(outbox, out_cache, catalogs), manifest(inbox, in_cache, catalogs, models)]
+        offered_progress = set()
         previous = inventory()
-        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []) + (['catalog-v1'] if catalogs else []) + (['models-v1'] if models else []) + (['turns-v1'] if turns else []) + (['receipts-v1'] if receipts else []) + (['relay-v1'] if relay else []))
+        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []) + (['catalog-v1'] if catalogs else []) + (['models-v1'] if models else []) + (['turns-v1'] if turns else []) + (['receipts-v1'] if receipts else []) + (['relay-v1'] if relay else []) + (['progress-v1'] if progress else []))
         while True:
             cmd=receive(sys.stdin.buffer)
             if cmd==['end']:break
@@ -237,6 +291,21 @@ def main():
                 current = inventory()
                 send(sys.stdout.buffer, None if current == previous else current)
                 previous = current
+            elif progress and len(cmd)==2 and cmd[0]=='progress-heartbeats':
+                send(sys.stdout.buffer,pulses(root,cmd[1]))
+            elif progress and cmd == ['progress-list']:
+                rows = pending_progress(root)
+                offered_progress = {(row['run'], row['rev'], row['digest']) for row in rows}
+                send(sys.stdout.buffer, rows)
+            elif progress and len(cmd)==2 and cmd[0]=='progress-put':
+                send(sys.stdout.buffer,store_progress(root,cmd[1]))
+            elif progress and len(cmd)==5 and cmd[0]=='progress-ack':
+                key = tuple(cmd[1:4])
+                if key not in offered_progress:
+                    raise ValueError('Checkpoint was not offered on this connection')
+                ack_progress(root, *cmd[1:])
+                offered_progress.remove(key)
+                send(sys.stdout.buffer, True)
             elif cmd[0]=='receipts' and receipts:
                 send(sys.stdout.buffer, receipt_page(root,cmd[1]))
             elif cmd == ['relay-list'] and relay:
@@ -268,6 +337,7 @@ def exchange(mode, root, host):
     command = 'sudo -n -u dsh-cloud /usr/bin/python3 /opt/dsh-cloud/task-transfer.py --peer /var/lib/dsh-cloud/.dsh/mobile-task-sync'
     if mode == '--watch':
         command += ' watch-v1'
+    if Path(__file__).with_name('script_progress.py').is_file():command += ' progress-v1'
     command += ' catalog-v1 models-v1 turns-v1 receipts-v1 relay-v1'
     with subprocess.Popen(['ssh','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=10','-o','ServerAliveCountMax=2',host, command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0) as p:
@@ -282,6 +352,8 @@ def exchange(mode, root, host):
             # Healthy hosts reopen the connection; idle polls send no digest lists.
             deadline = time.monotonic() + 60
             while True:
+                if 'progress-v1' in initial[2:]:
+                    exchange_progress(root,p.stdout,p.stdin,mode!='--receive')
                 if 'receipts-v1' in initial[2:]:
                     collect_receipts(root,p.stdout,p.stdin)
                 here = manifest(inbox, in_cache, catalogs)

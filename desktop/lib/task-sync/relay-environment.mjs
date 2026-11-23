@@ -45,6 +45,9 @@ export function registerEnvironment(ctx,role,root) {
       const shells = ['bash','pwsh'].filter(n => !!ctx.tools.get(n,exec.agent,exec.toolSet));
       const info = await environment(cwd,role,shells);
       const session = exec.agent.session;
+      info.scriptProgress = {nodeModule:new URL('../../tools/script-progress.mjs',import.meta.url).href,
+        session:session.id, nativeTool:'relay_script_checkpoint', modelStateLimit:32*1024,
+        maxStateBytes:256*1024, scope:'cooperative-replay-safe-compute'};
       await ctx.sessions.flush(session);
       const reader = await ctx.sessionPersistence.open(session.id,'read',{signal:exec.signal});
       try {

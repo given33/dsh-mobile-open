@@ -96,12 +96,12 @@ class Host:
         return json.loads((self.root/'storages/workspace.json').read_bytes())['tables']['workspaces']
 
 
-def exchange(desktop, cloud, mode, relay=False):
+def exchange(desktop, cloud, mode, relay=False, progress=False):
     # Only the carrier changes; peer, validation, digests, fsync and mailbox paths are real.
     spawn = subprocess.Popen
     def loopback(argv, **kw):
         assert argv[0] == 'ssh' and 'StrictHostKeyChecking=yes' in argv
-        return spawn([sys.executable, str(TRANSFER), '--peer', str(cloud.sync), 'catalog-v1', 'models-v1', 'turns-v1'] + (['relay-v1'] if relay else []), **kw)
+        return spawn([sys.executable, str(TRANSFER), '--peer', str(cloud.sync), 'catalog-v1', 'models-v1', 'turns-v1'] + (['relay-v1'] if relay else []) + (['progress-v1'] if progress else []), **kw)
     with patch.object(subprocess, 'Popen', side_effect=loopback), patch.object(sys, 'argv', [str(TRANSFER), mode, str(desktop.sync), 'fixture']):
         transfer.main()
     return True
