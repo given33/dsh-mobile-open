@@ -104,7 +104,7 @@ def durable_replace(folder, name, raw):
     finally:
         if tmp and os.path.exists(tmp):os.unlink(tmp)
 
-def queue_turn(root, name, blob):
+def queue_turn(root, name, blob, origin='desktop', relay=False):
     if not isinstance(name, str) or not NAME.fullmatch(name):
         raise ValueError('Invalid cloud turn name')
     raw = base64.b64decode(blob, validate=True)
@@ -113,11 +113,15 @@ def queue_turn(root, name, blob):
     packet = json.loads(raw)
     intent = packet['cloudIntent']
     sid, command = intent['session'], intent['command']
-    if (packet.get('v') != 2 or packet.get('origin') != 'desktop' or sid != packet.get('source') or
+    if relay and (intent.get('v') != 2 or intent.get('from') != origin or not re.fullmatch(r'[0-9a-f]{32}', command)):
+        raise ValueError('Invalid relay intent')
+    if not relay and intent.get('v') != 1:
+        raise ValueError('Invalid legacy cloud intent')
+    if (packet.get('v') != 2 or packet.get('origin') != origin or sid != packet.get('source') or
             not all(isinstance(k, str) and re.fullmatch(r'[\w.-]{1,160}', k, re.ASCII) for k in (sid, command)) or
             name != hashlib.sha256(('dsh-cloud-run/v1:'+sid+':'+command).encode()).hexdigest()+'.json'):
         raise ValueError('Invalid cloud turn')
-    folder = root/'cloud-incoming'
+    folder = root/('relay-incoming' if relay else 'cloud-incoming')
     folder.mkdir(mode=0o700, exist_ok=True)
     if not (root/'cloud-claims'/name[:-5]).exists():
         durable_replace(folder, name, raw)
@@ -220,11 +224,12 @@ def main():
         catalogs = 'catalog-v1' in sys.argv[3:]
         models = 'models-v1' in sys.argv[3:]
         turns = 'turns-v1' in sys.argv[3:]
+        relay = 'relay-v1' in sys.argv[3:]
         receipts = 'receipts-v1' in sys.argv[3:] and Path(__file__).with_name('portable_worker.py').is_file()
         def inventory():
             return [manifest(outbox, out_cache, catalogs), manifest(inbox, in_cache, catalogs, models)]
         previous = inventory()
-        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []) + (['catalog-v1'] if catalogs else []) + (['models-v1'] if models else []) + (['turns-v1'] if turns else []) + (['receipts-v1'] if receipts else []))
+        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []) + (['catalog-v1'] if catalogs else []) + (['models-v1'] if models else []) + (['turns-v1'] if turns else []) + (['receipts-v1'] if receipts else []) + (['relay-v1'] if relay else []))
         while True:
             cmd=receive(sys.stdin.buffer)
             if cmd==['end']:break
@@ -234,6 +239,14 @@ def main():
                 previous = current
             elif cmd[0]=='receipts' and receipts:
                 send(sys.stdout.buffer, receipt_page(root,cmd[1]))
+            elif cmd == ['relay-list'] and relay:
+                send(sys.stdout.buffer, sorted(manifest(root/'relay-outgoing'))[:64])
+            elif cmd[0] == 'relay-get' and relay:
+                send(sys.stdout.buffer, read_packet(root/'relay-outgoing', cmd[1]) if NAME.fullmatch(cmd[1]) else None)
+            elif cmd[0] == 'relay-ack' and relay and NAME.fullmatch(cmd[1]):
+                regular(root/'relay-outgoing', cmd[1]).unlink(); send(sys.stdout.buffer, True)
+            elif cmd[0] == 'relay-put' and relay:
+                queue_turn(root, cmd[1], cmd[2], 'desktop', True); send(sys.stdout.buffer, True)
             elif cmd[0]=='turn' and turns:
                 queue_turn(root, cmd[1], cmd[2]); send(sys.stdout.buffer, True)
             elif cmd[0]=='family':
@@ -255,7 +268,7 @@ def exchange(mode, root, host):
     command = 'sudo -n -u dsh-cloud /usr/bin/python3 /opt/dsh-cloud/task-transfer.py --peer /var/lib/dsh-cloud/.dsh/mobile-task-sync'
     if mode == '--watch':
         command += ' watch-v1'
-    command += ' catalog-v1 models-v1 turns-v1 receipts-v1'
+    command += ' catalog-v1 models-v1 turns-v1 receipts-v1 relay-v1'
     with subprocess.Popen(['ssh','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=10','-o','ServerAliveCountMax=2',host, command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0) as p:
         try:
@@ -284,6 +297,19 @@ def exchange(mode, root, host):
                     if here.get(name) != digest:
                         send(p.stdin, ['get', name])
                         store(inbox, name, receive(p.stdout), 'cloud')
+                if 'relay-v1' in initial[2:]:
+                    send(p.stdin, ['relay-list']); jobs = receive(p.stdout)
+                    if not isinstance(jobs,list) or len(jobs)>64: raise ValueError('Invalid relay inventory')
+                    for name in jobs:
+                        if not isinstance(name,str) or not NAME.fullmatch(name): raise ValueError('Invalid relay id')
+                        send(p.stdin, ['relay-get',name]); queue_turn(root,name,receive(p.stdout),'cloud',True)
+                        send(p.stdin, ['relay-ack',name]);
+                        if receive(p.stdout) is not True: raise ValueError('Relay acknowledgement failed')
+                    if mode != '--receive':
+                        for job in sorted((root/'relay-outgoing').glob('*.json'))[:64]:
+                            send(p.stdin, ['relay-put',job.name,read_packet(job.parent,job.name)])
+                            if receive(p.stdout) is not True: raise ValueError('Relay delivery failed')
+                            job.unlink()
                 if mode != '--receive' and 'turns-v1' in initial[2:]:
                     for job in sorted((root/'cloud-outgoing').glob('*.json')):
                         send(p.stdin, ['turn', job.name, read_packet(job.parent, job.name)])

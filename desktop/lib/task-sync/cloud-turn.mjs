@@ -5,6 +5,8 @@ import { appendFileSync, renameSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { committedLength, hash, pack, validID } from './log.mjs';
 
+import { verifiedRelay, continuation } from './relay-boundary.mjs';
+
 const name = 'cloud-run';
 const maxAge = 15 * 60_000;
 const textLimit = 16 * 1024;
@@ -104,9 +106,9 @@ export function submittedText(intent, sid, events, now = Date.now()) {
   if (text && Buffer.byteLength(text) <= textLimit) return text;
 }
 
-export async function admitCloudTurn(ctx, root, packet, history, signal) {
+export async function admitCloudTurn(ctx, root, packet, history, signal, relay = false) {
   const sid = packet.source;
-  const text = submittedText(packet.cloudIntent, sid, history);
+  const text = relay ? (verifiedRelay(packet,history) && continuation) : submittedText(packet.cloudIntent, sid, history);
   if (!text || packet.archived || ctx.workspaceRegistry.archivedSessionIds.includes(sid)) return;
   const controller = ctx.get?.('sessionController');
   if (!controller) throw Error('Cloud session controller unavailable');

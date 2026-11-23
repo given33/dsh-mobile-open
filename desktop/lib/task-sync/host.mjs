@@ -12,6 +12,8 @@ import { installLegacy, readLegacy } from './legacy.mjs';
 
 import { modelFile, modelSnapshot, applyModelSnapshot } from './models.mjs';
 
+import { prepareInputs } from './relay-inputs.mjs';
+import { verifiedRelay, compatiblePolicy } from './relay-boundary.mjs';
 import { claimID, admitCloudTurn, workspaceRoute } from './cloud-turn.mjs';
 
 const run = promisify(execFile);
@@ -203,7 +205,7 @@ export function taskSync(ctx, config, root) {
     await atomic(join(outbox,packetName(role,id)),JSON.stringify(packet));
     sent.set(id,rev);
   }
-  async function receive(name, path = join(inbox,name), job = null) {
+  async function receive(name, path = join(inbox,name), job = null, relay = false) {
     const info = await stat(path, {bigint:true});
     if (info.size > maxPacket) throw Error('Oversized task envelope');
     const mark = `${info.ino}:${info.size}:${info.mtimeNs}`;
@@ -212,6 +214,7 @@ export function taskSync(ctx, config, root) {
     if (job) name = packetName(peer, packet.source);
     const events = await unpack(packet,peer,name), id = packet.source;
     if (job && (!packet.cloudIntent || job !== claimID(id,packet.cloudIntent.command) + '.json')) throw Error('Invalid cloud job ID');
+    if (relay && (!events || !verifiedRelay(packet,events) || !compatiblePolicy(ctx,packet.cloudIntent.security,events))) throw Error('Invalid or expired execution relay');
     if (packet.membership !== undefined) {
       checkMembership(packet.membership);
       if ((packet.membership.state === 'archived') !== packet.archived) throw Error('Inconsistent task membership');
@@ -251,7 +254,12 @@ export function taskSync(ctx, config, root) {
     if (!project.sessionIds.includes(id)) await project.attachSession(id);
     await importMembership(packet, existing);
     if (job && missing >= 0 && length === events.length && readMembership(registry,id) !== 'archived') {
-      await admitCloudTurn(ctx, root, packet, history, signal);
+      if (relay) {
+        const live = ctx.get?.('agents')?.get(id);
+        if (live && (live.status !== 'idle' || live.session.seq !== history.length || live.inbox.nextStep.length || live.inbox.nextTurn.length)) return;
+        await prepareInputs(root,role,packet.workspace,project.path,packet.relayInputs,packet.cloudIntent.security.sandbox !== 'read-only' && ctx.get('sandboxPolicy').defaultMode !== 'read-only' && history.findLast(e=>e.type === 'sandbox/mode')?.data?.mode !== 'read-only');
+      }
+      await admitCloudTurn(ctx, root, packet, history, signal, relay);
     }
     if (job) await unlink(path);
     else seen.set(name,mark);
@@ -262,16 +270,17 @@ export function taskSync(ctx, config, root) {
       if (!/^[0-9a-f]{64}\.json$/.test(name)) continue;
       try { await receive(name); } catch (error) { report(error); }
     }
-    if (role === 'cloud' && config.cloudTurns === true) {
-      const dir = join(root,'cloud-incoming');
+    for (const [enabled,folder] of [[config.turnRelay === true,'relay-incoming'],[role === 'cloud' && config.cloudTurns === true,'cloud-incoming']]) {
+      if (!enabled) continue;
+      const dir = join(root,folder);
       let jobs;
-      try { jobs = await readdir(dir); } catch (error) { if (error.code === 'ENOENT') return; throw error; }
+      try { jobs = await readdir(dir); } catch (error) { if (error.code === 'ENOENT') continue; throw error; }
       for (const job of jobs) {
         if (!/^[0-9a-f]{64}\.json$/.test(job)) continue;
         const path = join(dir,job);
         try {
           // Job identity is a separate transport namespace from passive history.
-          await receive(null,path,job);
+          await receive(null,path,job,folder === 'relay-incoming');
         } catch (error) { report(error); }
       }
     }

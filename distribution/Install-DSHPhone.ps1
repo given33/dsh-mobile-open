@@ -1,7 +1,7 @@
 ﻿[CmdletBinding()] param([string]$DshCli)
 $ErrorActionPreference = 'Stop'
 try {
-  $name = 'dsh-mobile-link-0.7.11.tgz'
+  $name = 'dsh-mobile-link-0.7.12.tgz'
   $package = Join-Path $PSScriptRoot $name
   if (!(Test-Path -LiteralPath $package -PathType Leaf)) { throw '请先解压整个 ZIP，再双击 Install.cmd。' }
   if (!$DshCli) {
