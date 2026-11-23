@@ -36,11 +36,12 @@ export function httpUpstream({ base, cookie }, { rpcTimeoutMs = 20e3 } = {}) {
         return { status: res.status, body: Buffer.from(await res.arrayBuffer()) };
       } catch (error) { healthy = false; throw error; }
     },
-    async upload({ sessionId, name, body }) {
+    async upload({ sessionId, name, mediaType, body }) {
       const url = new URL('api/session/uploadFileBinary', base);
       url.searchParams.set('sessionId', sessionId);
       if (name) url.searchParams.set('name', name);
-      const res = await fetch(url, { method: 'POST', body, redirect: 'manual', signal: AbortSignal.timeout(60e3),
+      if (mediaType) url.searchParams.set('mediaType', mediaType);
+      const res = await fetch(url, { method: 'POST', body, duplex: 'half', redirect: 'manual', signal: AbortSignal.timeout(20 * 60e3),
         headers: { Cookie: cookie, 'Content-Type': 'application/octet-stream' } });
       healthy = res.status !== 401;
       return { status: res.status, body: Buffer.from(await res.arrayBuffer()) };

@@ -226,8 +226,8 @@ test('phone actions require opt-in and decisions are bound to the receiving phon
           body: { type: 'client-request', rpcId: 'phone-action', method, payload: { args } },
         });
       },
-      upload: body => pinned(port, fingerprint, {
-        method: 'POST', path: '/api/session/uploadFileBinary?sessionId=s1&name=test.txt', token: response.json.token, body,
+      upload: (body, query = '') => pinned(port, fingerprint, {
+        method: 'POST', path: '/api/session/uploadFileBinary?sessionId=s1&name=test.txt' + query, token: response.json.token, body,
       }),
     };
   };
@@ -254,6 +254,9 @@ test('phone actions require opt-in and decisions are bound to the receiving phon
   assert.equal((await one.upload(bytes)).json.value.receiptId, 'receipt-test');
   assert.deepEqual(host.seen.upload.bytes, bytes);
   assert.equal(host.seen.upload.url.searchParams.get('sessionId'), 's1');
+  assert.equal(host.seen.upload.url.searchParams.has('mediaType'), false);
+  assert.equal((await one.upload(bytes, '&mediaType=image%2Fjpeg')).status, 200);
+  assert.equal(host.seen.upload.url.searchParams.get('mediaType'), 'image/jpeg');
 
   const ws = new WebSocket('wss://127.0.0.1:' + one.port + '/api/remote.mux', {
     rejectUnauthorized: false, headers: { Authorization: 'Bearer ' + one.token },

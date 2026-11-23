@@ -2,6 +2,7 @@
 // served over the paired phone link. Never alters desktop Electron or DSH's
 // native visual design tokens, typography, icons, or workflow components.
 
+import { installAttachmentPicker, ATTACHMENT_PICKER_CSS, MOBILE_FILE_LIMIT } from './mobile-attachments.mjs';
 import { createHash } from 'node:crypto';
 import { installWeather, weatherScene, WEATHER_CSS } from './mobile-weather.mjs';
 import { installMobileVoice, voiceReleaseAction } from './mobile-voice.mjs';
@@ -328,7 +329,8 @@ const HOST_TAIL_SLOT = '[class$="_toBottomSlot"], [class*="_toBottomSlot_"]';
 const HOST_TAIL = `#root :is(${HOST_TAIL_SLOT}), #root [data-conversation-content] button:is([aria-label="回到底部"], [aria-label="Back to bottom"])`;
 const SCROLL_BLOCKED = 'html:is([data-dml-routing], [data-dml-snap-cover], [data-dml-composer-full], [data-dml-popup-open], :has(dialog[open], [role="dialog"][aria-modal="true"]:not([hidden], [aria-hidden="true"], [data-state="closed"]), .dml-hub-backdrop:not(dialog), .dsh-lightbox, [data-trigger-menu], [data-sidebar-drawer]:not([data-sidebar-collapsed]), [data-rightbar-fullscreen], body[data-dsh-keyboard-open], #dml-voice-hud:not([hidden])))';
 
-export const MOBILE_SHELL_CSS = WEATHER_CSS + `/* DSH Mobile shell: preserves 100% native DSH styling while polishing iOS layout, popups, and 120Hz smoothness. */
+export const MOBILE_SHELL_CSS = WEATHER_CSS + `${ATTACHMENT_PICKER_CSS}
+/* DSH Mobile shell: preserves 100% native DSH styling while polishing iOS layout, popups, and 120Hz smoothness. */
 :root, html, body {
   /* Replace expensive 40px Gaussian backdrop blurs on iOS WKWebView with opaque elevated surfaces for 120Hz smoothness. */
   --dsw-mask-blur: none !important;
@@ -3268,6 +3270,7 @@ export const MOBILE_SHELL_JS = `(() => {
     scheduleOverlayHeight();
     installScrollBottom();
     installComposerEnhance();
+    (${installAttachmentPicker.toString()})(showToast, ${MOBILE_FILE_LIMIT});
     installLightbox();
 
     const attrObserver = new MutationObserver(() => {

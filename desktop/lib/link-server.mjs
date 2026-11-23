@@ -24,6 +24,7 @@ import { promisify } from 'node:util';
 import { createDesktopWeather } from './desktop-weather.mjs';
 import { directoryPickerFallback } from './directory-picker.mjs';
 import { writePrivate } from './identity.mjs';
+import { MOBILE_FILE_LIMIT } from './mobile-attachments.mjs';
 import { MOBILE_SHELL_CSS, MOBILE_SHELL_JS } from './mobile-shell.mjs';
 import { WebSocket, WebSocketServer } from 'ws';
 
@@ -180,9 +181,14 @@ function buildShellAsset(type, raw) {
     version: digest.slice(0, 10),
   };
 }
-const readerWorker = Buffer.concat([readFileSync(join(dirname(createRequire(import.meta.url).resolve('fflate')), '../umd/index.js')), Buffer.from('\n;'), readFileSync(new URL('./reader-worker.js',import.meta.url))]);
+const fflateBrowser = readFileSync(join(dirname(createRequire(import.meta.url).resolve('fflate')), '../umd/index.js'));
+function workerAsset(file) {
+  const source = Buffer.concat([fflateBrowser, Buffer.from('\n;'), readFileSync(new URL(file, import.meta.url))]);
+  return buildShellAsset('text/javascript; charset=utf-8', source);
+}
 const SHELL_ASSETS = {
-  '/mobile/v1/reader-worker.js': buildShellAsset('text/javascript; charset=utf-8', readerWorker),
+  '/mobile/v1/reader-worker.js': workerAsset('./reader-worker.js'),
+  '/mobile/v1/folder-worker.js': workerAsset('./folder-worker.js'),
   '/mobile/v1/shell.css': buildShellAsset('text/css; charset=utf-8', MOBILE_SHELL_CSS),
   '/mobile/v1/shell.js': buildShellAsset('text/javascript; charset=utf-8', MOBILE_SHELL_JS),
 };
@@ -317,7 +323,8 @@ export function createLinkServer({
     cert: identity.cert,
     minVersion: 'TLSv1.2',
     sessionTimeout: 86400,
-    requestTimeout: 120e3,
+    // A 200 MiB upload over a mobile uplink can take several minutes.
+    requestTimeout: 20 * 60e3,
     headersTimeout: 95e3,
     keepAliveTimeout: 90e3,
   }, async (req, res) => {
@@ -451,17 +458,42 @@ export function createLinkServer({
       if (path === '/api/session/uploadFileBinary' && req.method === 'POST') {
         if (!actions()) return json(res, 403, { error: 'actions-disabled' });
         if (typeof upstream.upload !== 'function') return json(res, 501, { error: 'upload-unavailable' });
-        if (req.headers['content-type'] !== 'application/octet-stream') return json(res, 415, { error: 'binary-required' });
+        if (String(req.headers['content-type']).split(';')[0].trim().toLowerCase() !== 'application/octet-stream') return json(res, 415, { error: 'binary-required' });
         const sessionId = url.searchParams.get('sessionId');
         if (!sessionId || sessionId.length > 128) return json(res, 400, { error: 'session-required' });
-        const name = url.searchParams.get('name')?.slice(0, 256);
-        let body;
-        try { body = await readBody(req, 20 * 1024 * 1024); }
-        catch (error) { return json(res, error.status ?? 400, { error: 'invalid-file' }); }
-        if (!body.length) return json(res, 400, { error: 'empty-file' });
-        if (!authorize(req)) return json(res, 401, { error: 'pairing-required' });
-        if (!actions()) return json(res, 403, { error: 'actions-disabled' });
-        const result = await upstream.upload({ sessionId, name, body }, device.id);
+        const name = url.searchParams.get('name');
+        const mediaType = url.searchParams.get('mediaType');
+        const tooLarge = { error: 'file-too-large', maxBytes: MOBILE_FILE_LIMIT };
+        if (Number(req.headers['content-length']) > MOBILE_FILE_LIMIT) return json(res, 413, tooLarge);
+
+        // The upstream commits the attachment only after EOF. Do not yield EOF for
+        // oversized, aborted or revoked uploads, even when no Content-Length was sent.
+        let rejected;
+        const checkAccess = () => {
+          if (!authorize(req)) rejected = [401, { error: 'pairing-required' }];
+          else if (!actions()) rejected = [403, { error: 'actions-disabled' }];
+          if (rejected) throw new Error(rejected[1].error);
+        };
+        async function* readUpload() {
+          let bytes = 0, lastCheck = Date.now();
+          for await (const chunk of req.iterator({ destroyOnReturn: false })) {
+            bytes += chunk.length;
+            if (bytes > MOBILE_FILE_LIMIT) {
+              rejected = [413, tooLarge];
+              throw new Error(tooLarge.error);
+            }
+            if (Date.now() - lastCheck >= 1000) { checkAccess(); lastCheck = Date.now(); }
+            yield chunk;
+          }
+          checkAccess();
+        }
+        let result;
+        try {
+          result = await upstream.upload({ sessionId, name, mediaType, body: readUpload() }, device.id);
+        } catch (error) {
+          if (!rejected) throw error;
+        }
+        if (rejected) return json(res, ...rejected);
         res.writeHead(result.status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
         return res.end(result.body);
       }

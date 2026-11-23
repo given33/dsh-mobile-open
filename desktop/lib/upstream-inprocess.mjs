@@ -102,11 +102,12 @@ export function inProcessUpstream({ connection, typertGateway, local = {}, nativ
       outHeaders['content-length'] = String(bytes.length);
       return { status: response.status, headers: outHeaders, body: bytes };
     },
-    async upload({ sessionId, name, body }, id) {
+    async upload({ sessionId, name, mediaType, body }, id) {
       const url = new URL('http://localhost/api/session/uploadFileBinary');
       url.searchParams.set('sessionId', sessionId);
       if (name) url.searchParams.set('name', name);
-      const request = new Request(url, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body });
+      if (mediaType) url.searchParams.set('mediaType', mediaType);
+      const request = new Request(url, { method: 'POST', headers: { 'content-type': 'application/octet-stream' }, body, duplex: 'half' });
       const response = await api.fetch(request, peerFor(id));
       return { status: response.status, body: Buffer.from(await response.arrayBuffer()) };
     },
