@@ -29,6 +29,13 @@ struct DSHMobileApp: App {
     }
 }
 
+private struct DeviceButtonBounds: PreferenceKey {
+    static var defaultValue: Anchor<CGRect>? { nil }
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        value = nextValue() ?? value
+    }
+}
+
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
     @State private var showForget = false
@@ -109,6 +116,32 @@ struct RootView: View {
                 .ignoresSafeArea(.all, edges: .bottom)
             }
         }
+        .overlayPreferenceValue(DeviceButtonBounds.self) { anchor in
+            if model.showDeviceMenu, let anchor {
+                GeometryReader { proxy in
+                    let trigger = proxy[anchor]
+                    let width = max(0, min(304, proxy.size.width - 16))
+                    let left = max(8, min(trigger.minX, proxy.size.width - width - 8))
+                    let top = trigger.maxY + 6
+                    ZStack(alignment: .topLeading) {
+                        Color.clear.contentShape(Rectangle()).ignoresSafeArea()
+                            .onTapGesture { model.showDeviceMenu = false }
+                            .accessibilityHidden(true)
+                        ViewThatFits(in: .vertical) {
+                            deviceOptions
+                            ScrollView { deviceOptions }
+                        }
+                        .frame(width: width)
+                        .background(Theme.sheet, in: RoundedRectangle(cornerRadius: 14))
+                        .overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.borderL2, lineWidth: 0.5) }
+                        .shadow(color: .black.opacity(0.15), radius: 9, y: 3)
+                        .frame(maxHeight: max(0, proxy.size.height - top - 8), alignment: .top)
+                        .offset(x: left, y: top)
+                        .accessibilityAction(.escape) { model.showDeviceMenu = false }
+                    }
+                }
+            }
+        }
         .overlay {
             if model.offerCloud {
                 ZStack {
@@ -117,41 +150,13 @@ struct RootView: View {
                         Text("电脑暂时连不上").font(.headline)
                         Text("继续重连，或打开云端工作区。不会重新执行电脑上的指令。")
                             .font(.subheadline).foregroundStyle(Theme.labelSecondary)
-                        Button("切换到云端") { if let cloud = model.cloudHost { model.chooseDevice(cloud, openWorkspace: true) } }
+                        Button("切换到云端") { if let cloud = model.cloudHost { model.showDeviceMenu = true; model.chooseDevice(cloud, openWorkspace: true) } }
                             .buttonStyle(PrimaryButtonStyle())
                         Button("继续重连") { model.dismissCloudOffer() }.buttonStyle(SecondaryButtonStyle())
                     }.padding(20).frame(maxWidth: 340).background(Theme.sheet, in: RoundedRectangle(cornerRadius: 18))
                         .padding(.horizontal, 16).accessibilityAddTraits(.isModal)
                 }
             }
-        }
-        .sheet(isPresented: $model.showDeviceDrawer) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Text("切换设备").font(.headline)
-                    Spacer()
-                    Button("完成") { model.showDeviceDrawer = false }.foregroundStyle(Theme.business)
-                }
-                ForEach([model.localHost, model.cloudHost].compactMap { $0 }) { host in
-                    Button { model.chooseDevice(host) } label: {
-                        HStack(spacing: 12) {
-                            Image(systemName: host.id == model.cloudHost?.id ? "cloud" : "desktopcomputer").frame(width: 25)
-                            Text(host.name).lineLimit(1)
-                            Spacer()
-                            if host.id == model.selectedDevice?.id { Image(systemName: "checkmark").foregroundStyle(Theme.business) }
-                        }.padding(.horizontal, 14).frame(minHeight: 48).background(Theme.hover, in: RoundedRectangle(cornerRadius: 12))
-                    }.buttonStyle(.plain).disabled(model.switchingDevice)
-                }
-                if model.switchingDevice { ProgressView("正在连接") }
-                if let issue = model.deviceIssue { Text(issue).font(.footnote).foregroundStyle(Theme.warnText) }
-                if let selected = model.selectedDevice, let owner = model.desktop, selected.id != owner.id {
-                    Text("当前会话仍由「" + owner.name + "」执行").font(.footnote).foregroundStyle(Theme.labelSecondary)
-                    Button("进入「" + selected.name + "」工作区") { model.chooseDevice(selected, openWorkspace: true) }
-                        .buttonStyle(SecondaryButtonStyle()).disabled(model.switchingDevice)
-                }
-            }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
-                .presentationBackground(Theme.sheet).presentationDragIndicator(.visible)
-                .presentationDetents([.height(315), .medium])
         }
         .onOpenURL { url in
             guard url.scheme?.lowercased() == "dshmobile" else { return }
@@ -177,6 +182,41 @@ struct RootView: View {
         } message: { Text("之后需要用电脑「手机连接」里的新二维码重新配对。") }
     }
 
+    private var deviceOptions: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach([model.localHost, model.cloudHost].compactMap { $0 }) { host in
+                let isCloud = host.id == model.cloudHost?.id
+                let selected = host.id == model.selectedDevice?.id
+                Button { model.chooseDevice(host) } label: {
+                    HStack(spacing: 10) {
+                        Image(systemName: isCloud ? "cloud" : "desktopcomputer").frame(width: 24)
+                        Text(host.name).lineLimit(2).multilineTextAlignment(.leading)
+                        Spacer(minLength: 4)
+                        if model.switchTargetID == host.id { ProgressView().controlSize(.small) }
+                        else if selected { Image(systemName: "checkmark").foregroundStyle(Theme.business) }
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+                }
+                .disabled(model.switchingDevice).buttonStyle(.plain)
+                .accessibilityIdentifier(isCloud ? "choose-cloud-device" : "choose-local-device")
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+            if let issue = model.deviceIssue {
+                Text(issue).font(.footnote).foregroundStyle(Theme.warnText).padding(10)
+            }
+            if let selected = model.selectedDevice, let owner = model.desktop, selected.id != owner.id {
+                Divider()
+                Text("当前会话仍由「" + owner.name + "」执行").font(.footnote)
+                    .foregroundStyle(Theme.labelSecondary).padding(.horizontal, 12).padding(.top, 8)
+                Button("进入「" + selected.name + "」工作区") { model.chooseDevice(selected, openWorkspace: true) }
+                    .padding(.horizontal, 12).frame(minHeight: 44).disabled(model.switchingDevice)
+            }
+        }
+        .font(.subheadline).padding(4)
+        .accessibilityElement(children: .contain).accessibilityAddTraits(.isModal)
+    }
+
     private var statusColor: Color {
         if model.connecting || model.reconnecting || model.wsHealth == .connecting { return Theme.warn }
         if model.browser != nil && model.wsHealth == .connected { return Theme.success }
@@ -200,7 +240,7 @@ struct RootView: View {
                 .accessibilityValue(model.drawerOpen ? "展开" : "收起")
             }
 
-            Button { model.showDeviceDrawer = true } label: {
+            Button { model.showDeviceMenu.toggle() } label: {
                 HStack(spacing: 5) {
                     Circle()
                         .fill(statusColor)
@@ -222,20 +262,9 @@ struct RootView: View {
                             .lineLimit(1)
                             .fixedSize()
                     }
-                    if model.pendingApprovalsCount > 0 {
-                        Button { model.openHub("tasks") } label: {
-                            Text("待确认 \(model.pendingApprovalsCount)")
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(Theme.warnText)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Theme.warnTertiary, in: Capsule())
-                                .lineLimit(1)
-                                .fixedSize()
-                        }
-                        .buttonStyle(.plain)
-                        .accessibilityIdentifier("pending-approval-badge")
-                    }
+                    Image(systemName: model.showDeviceMenu ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.meta)
+                        .accessibilityHidden(true)
                     if model.browser != nil && !model.actionsEnabled {
                         Text("只读")
                             .font(.caption2.weight(.medium))
@@ -254,6 +283,24 @@ struct RootView: View {
             .buttonStyle(.plain)
             .accessibilityIdentifier("connection-status-pill")
             .accessibilityValue(model.fixtureObservation ?? syncAccessibilityStatus)
+            .accessibilityHint("展开或收起设备列表")
+            .frame(minHeight: 36)
+            .anchorPreference(key: DeviceButtonBounds.self, value: .bounds) { $0 }
+
+            if model.pendingApprovalsCount > 0 {
+                Button { model.openHub("tasks") } label: {
+                    Text("待确认 \(model.pendingApprovalsCount)")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Theme.warnText)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Theme.warnTertiary, in: Capsule())
+                        .lineLimit(1)
+                        .fixedSize()
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("pending-approval-badge")
+            }
 
             Spacer(minLength: 4)
 

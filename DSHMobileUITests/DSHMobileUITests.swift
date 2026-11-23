@@ -57,6 +57,32 @@ final class DSHMobileUITests: XCTestCase {
                       "Expected a rejection from the desktop after TLS: \(message.label)")
     }
 
+    @MainActor
+    func testSwitchBetweenPinnedDevicesFromHeader() throws {
+        let link = try XCTUnwrap(ProcessInfo.processInfo.environment["DSH_UI_LINK"])
+        let app = XCUIApplication()
+        app.launchEnvironment["DSH_DEMO_LINK"] = link
+        app.launch()
+        try waitForWebView(in: app)
+        let status = app.buttons["connection-status-pill"]
+        let connected = NSPredicate(format: "value CONTAINS 'connected|busy:false' AND NOT (value CONTAINS 'disconnected') AND NOT (value BEGINSWITH 'doc:0')")
+        expectation(for: connected, evaluatedWith: status); waitForExpectations(timeout: 30)
+        status.tap()
+        let cloud = app.buttons["choose-cloud-device"]
+        XCTAssertTrue(cloud.waitForExistence(timeout: 10))
+        XCTAssertTrue(cloud.label.contains("模拟云服务器"))
+        cloud.tap()
+        XCTAssertTrue(cloud.waitForNonExistence(timeout: 20))
+        XCTAssertTrue(status.label.contains("模拟云服务器"))
+        expectation(for: connected, evaluatedWith: status); waitForExpectations(timeout: 30)
+        status.tap()
+        XCTAssertTrue(cloud.isSelected)
+        app.buttons["choose-local-device"].tap()
+        XCTAssertTrue(cloud.waitForNonExistence(timeout: 15))
+        XCTAssertFalse(status.label.contains("模拟云服务器"))
+        expectation(for: connected, evaluatedWith: status); waitForExpectations(timeout: 30)
+    }
+
     /// Pairs against an isolated real DeepSeek Harness instance running dsh-mobile-link,
     /// verifies the official desktop web UI loads inside WKWebView with pinned TLS,
     /// and verifies the native sidebar drawer toggle and connection menu.
@@ -101,9 +127,17 @@ final class DSHMobileUITests: XCTestCase {
         let statusPill = app.buttons["connection-status-pill"]
         XCTAssertTrue(statusPill.waitForExistence(timeout: 8))
         statusPill.tap()
-        XCTAssertTrue(app.staticTexts["切换设备"].waitForExistence(timeout: 8))
-        app.buttons["完成"].tap()
-        XCTAssertTrue(app.staticTexts["切换设备"].waitForNonExistence(timeout: 8))
+        let local = app.buttons["choose-local-device"]
+        XCTAssertTrue(local.waitForExistence(timeout: 8))
+        XCTAssertTrue(local.isSelected)
+        XCTAssertGreaterThanOrEqual(local.frame.minY, statusPill.frame.maxY)
+        XCTAssertLessThan(local.frame.minY - statusPill.frame.maxY, 24)
+        XCTAssertEqual(app.sheets.count, 0)
+        statusPill.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(local.waitForNonExistence(timeout: 8))
+        statusPill.tap()
+        local.tap()
+        XCTAssertTrue(local.waitForNonExistence(timeout: 8))
 
         let menuButton = app.buttons["connection-help"]
         XCTAssertTrue(menuButton.waitForExistence(timeout: 8))

@@ -136,9 +136,7 @@ struct LinkClient: Sendable {
               [pair.token, grant.fingerprint].allSatisfy({ $0.range(of: "^[a-zA-Z0-9_-]{43}$", options: .regularExpression) != nil }),
               let endpoint = Endpoint(grant.endpoint), endpoint.kind == .other else { throw LinkError.badResponse }
         let offer = PairingOffer(desktopID: pair.desktop.id, desktopName: "云端", endpoints: [endpoint], fingerprint: grant.fingerprint, code: "", expiresAt: nil)
-        var cloud = PairedDesktop(offer: offer, response: pair, preferred: endpoint)
-        cloud.name = "云端"
-        return cloud
+        return PairedDesktop(offer: offer, response: pair, preferred: endpoint).preparedCloudGrant()
     }
 
     func checkSession() async throws -> (actions: Bool, terminal: Bool) {

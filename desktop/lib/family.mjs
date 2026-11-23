@@ -1,6 +1,7 @@
 import { createHash, createHmac } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { cleanName } from './identity.mjs';
 
 const id = /^[A-Za-z0-9_-]{8,64}$/;
 const pin = /^[A-Za-z0-9_-]{43}$/;
@@ -14,7 +15,7 @@ export async function cloudRoute(dir, desktopID, device) {
   // The cloud receives only a verifier for a domain-separated credential, never the PC bearer or its verifier.
   const scope = ['dsh-cloud/v1', desktopID, route.cloudID, route.fingerprint, device.id].join(':');
   const token = createHmac('sha256', Buffer.from(device.tokenHash, 'base64url')).update(scope).digest('base64url');
-  return { familyID: desktopID, endpoint: route.endpoint, fingerprint: route.fingerprint, desktop: {id: route.cloudID, name: '云端'}, token };
+  return { familyID: desktopID, endpoint: route.endpoint, fingerprint: route.fingerprint, desktop: {id: route.cloudID, name: cleanName(route.displayName) || '云端'}, token };
 }
 
 export async function familyDevices(dir, identity) {

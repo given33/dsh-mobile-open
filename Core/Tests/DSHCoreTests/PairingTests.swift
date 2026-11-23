@@ -55,6 +55,21 @@ final class PairingTests: XCTestCase {
         XCTAssertThrowsError(try PairingOffer(link: noHosts)) { XCTAssertEqual($0 as? PairingError, .noAddress) }
     }
 
+    func testCachedCloudGrantKeepsIdentityAndPinWhenAddingScopedRelay() throws {
+        let offer = try PairingOffer(link: link())
+        let reply = try JSONDecoder().decode(PairResponse.self, from: Data(#"{"desktop":{"id":"cloud-fixture","name":"云端"},"token":"fixture"}"#.utf8))
+        var old = PairedDesktop(offer: offer, response: reply)
+        let original = try XCTUnwrap(Endpoint("dsh-cloud.192-0-2-1.sslip.io:443"))
+        old.endpoints = [original]; old.preferred = original
+        let upgraded = old.preparedCloudGrant()
+        XCTAssertEqual(upgraded.candidates.map(\.authority), ["192-0-2-1.dsh-cloud.sslip.io:443", original.authority])
+        XCTAssertEqual(upgraded.preparedCloudGrant(), upgraded)
+        XCTAssertEqual(upgraded.fingerprint, old.fingerprint); XCTAssertEqual(upgraded.token, old.token)
+        XCTAssertNotEqual(upgraded.name, "云端")
+        old.name = "模拟云服务器"; old.endpoints = [try XCTUnwrap(Endpoint("cloud.example:443"))]
+        XCTAssertEqual(old.preparedCloudGrant(), old)
+    }
+
     func testEndpointParsing() {
         XCTAssertEqual(Endpoint("192.168.0.2:3081")?.host, "192.168.0.2")
         XCTAssertEqual(Endpoint("[FD7A:115C:A1E0::5]:443")?.host, "fd7a:115c:a1e0::5")

@@ -216,6 +216,28 @@ public struct PairedDesktop: Codable, Equatable, Sendable, Identifiable {
         fingerprint = offer.fingerprint; token = response.token; self.pairedAt = pairedAt; self.preferred = preferred
     }
 
+    /// Apply only to a cloud grant received from the paired desktop (including a
+    /// cached one). Keep the original route as fallback; both use the same pin.
+    public func preparedCloudGrant() -> Self {
+        var grant = self
+        let label = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if label.isEmpty || label == "云端" {
+            grant.name = "DSH 云服务器 · " + id.suffix(6).uppercased()
+        }
+        if let old = endpoints.first, old.host.hasPrefix("dsh-cloud."), old.host.hasSuffix(".sslip.io") {
+            let parts = old.host.split(separator: ".")
+            if parts.count == 4 {
+                let address = parts[1].split(separator: "-", omittingEmptySubsequences: false)
+                if address.count == 4 && address.allSatisfy({ UInt8($0).map { String($0) } == String($0) }) {
+                    let relay = Endpoint(host: "\(parts[1]).dsh-cloud.sslip.io", port: old.port)
+                    if !grant.endpoints.contains(relay) { grant.endpoints.insert(relay, at: 0) }
+                    grant.preferred = relay
+                }
+            }
+        }
+        return grant
+    }
+
     public var safetyCode: String { Fingerprint.display(fingerprint) }
 
     /// Candidates in try order: the last good endpoint first.

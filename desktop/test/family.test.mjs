@@ -19,6 +19,10 @@ test('one pairing produces a cloud-only credential; rotation/revocation drops ex
   await write('family-policy.json', config);
   const route = await cloudRoute(dir, config.familyID, pc.verify(phone.token));
   assert.equal(route.desktop.name, '云端'); assert.notEqual(phone.token, route.token);
+  await write('family-route.json', { ...config, displayName: '阿里云 ECS · 广州' });
+  const named = await cloudRoute(dir, config.familyID, pc.verify(phone.token));
+  assert.equal(named.desktop.name, '阿里云 ECS · 广州');
+  assert.equal(named.token, route.token);
   assert.equal(pc.verify(route.token), undefined);
   await write('family-grants.json', {...config,hashes:[digest(route.token)]});
   const identity = {id:config.cloudID, fingerprint:config.fingerprint};

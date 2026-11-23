@@ -45,4 +45,5 @@ jobs:
         if: ${{ inputs.simulator == true }}
         run: |
           npm install -g pnpm
-          bash scripts/test-official-simulator.sh
+          echo '127.0.0.1 relay-fixture.dsh-cloud.sslip.io' | sudo tee -a /etc/hosts >/dev/null
+          DSH_SIMULATE_CLOUD=1 bash scripts/test-official-simulator.sh

@@ -4,7 +4,11 @@ cd "$(dirname "$0")/.."
 
 scratch="$(mktemp -d)"
 fixture_pid=
+cloud_pid=
+grant_pid=
 cleanup() {
+  if [ -n "$grant_pid" ]; then kill "$grant_pid" 2>/dev/null || true; fi
+  if [ -n "$cloud_pid" ]; then kill "$cloud_pid" 2>/dev/null || true; fi
   if [ -n "$fixture_pid" ]; then kill "$fixture_pid" 2>/dev/null || true; fi
   rm -rf "$scratch"
 }
@@ -44,7 +48,34 @@ xcodebuild -skipPackagePluginValidation build-for-testing "${args[@]}" >"$scratc
 mask_test_log() {
   sed -E 's/(dshmobile:\/\/pair)[^[:space:]]*/\1[redacted]/g' "$1"
 }
-for test in testOfficialDesktopUILoadsAndTogglesSidebarDrawer testOfficialDesktopStalledFirstPaintCanBeRetried; do
+tests=(testOfficialDesktopUILoadsAndTogglesSidebarDrawer testOfficialDesktopStalledFirstPaintCanBeRetried)
+if [[ "${DSH_SIMULATE_CLOUD:-0}" == 1 ]]; then
+  # The CI runner maps this DNS name to loopback. This deliberately exercises
+  # named-host ATS, not the existing IP exception. Never pair a production host.
+  python3 -c 'import socket; assert socket.gethostbyname("relay-fixture.dsh-cloud.sslip.io") == "127.0.0.1"'
+  node --input-type=module - "$scratch" <<'JS'
+import { readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { loadIdentity } from './desktop/lib/identity.mjs';
+const scratch = process.argv[2];
+const local = new URL(await readFile(join(scratch, 'pair.txt'), 'utf8')).searchParams.get('id');
+const dir = join(scratch, 'cloud-home/mobile-link');
+const cloud = await loadIdentity(dir, {name: '模拟云服务器'});
+await writeFile(join(dir, 'family-policy.json'), JSON.stringify({familyID:local, cloudID:cloud.id, fingerprint:cloud.fingerprint}));
+JS
+  node desktop/tools/official-fixture.mjs --cli "$DSH_TEST_CLI" --bundle "$PWD/build/$bundle" \
+    --home "$scratch/cloud-home" --output "$scratch/cloud" >"$scratch/cloud.log" 2>&1 &
+  cloud_pid=$!
+  for ((n=0; n<120; n++)); do
+    [ -s "$scratch/cloud/host.json" ] && break
+    kill -0 "$cloud_pid" || exit 1
+    sleep 1
+  done
+  python3 scripts/simulator-grants.py "$scratch" &
+  grant_pid=$!
+  tests+=(testSwitchBetweenPinnedDevicesFromHeader)
+fi
+for test in "${tests[@]}"; do
   fresh_link="$(node --input-type=module -e '
     import { readFileSync } from "node:fs";
     const h=JSON.parse(readFileSync(process.argv[1]));

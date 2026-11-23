@@ -12,7 +12,7 @@ settings:
     TARGETED_DEVICE_FAMILY: '1,2'
     IPHONEOS_DEPLOYMENT_TARGET: '17.0'
     MARKETING_VERSION: '0.7.2'
-    CURRENT_PROJECT_VERSION: '34'
+    CURRENT_PROJECT_VERSION: '35'
 targets:
   DSHMobile:
     type: application
@@ -50,6 +50,11 @@ targets:
           # CFNetwork must allow the app's trust delegate to check the pinned
           # desktop key. This client only constructs HTTPS and WSS URLs.
           NSExceptionDomains:
+            # Self-hosted cloud relay namespace only. URLSession and WKWebView
+            # still require HTTPS and the exact paired P-256 leaf key.
+            'dsh-cloud.sslip.io':
+              NSIncludesSubdomains: true
+              NSExceptionAllowsInsecureHTTPLoads: true
             '0.0.0.0/0':
               NSExceptionAllowsInsecureHTTPLoads: true
             '::/0':

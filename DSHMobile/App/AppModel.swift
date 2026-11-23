@@ -433,9 +433,10 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
 
     @Published private(set) var cloudHost: PairedDesktop?
     @Published private(set) var selectedDevice: PairedDesktop?
-    @Published var showDeviceDrawer = false
+    @Published var showDeviceMenu = false
     @Published private(set) var deviceIssue: String?
-    @Published private(set) var switchingDevice = false
+    @Published private(set) var switchTargetID: String?
+    var switchingDevice: Bool { switchTargetID != nil }
     @Published private(set) var offerCloud = false
     private var offeredThisOutage = false
     private var offlineAttempts = 0
@@ -448,18 +449,19 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
 
     private func loadFamily(_ primary: PairedDesktop) {
         familyID = primary.id
-        cloudHost = SecureStore.read("cloud." + primary.id).flatMap { try? JSONDecoder().decode(PairedDesktop.self, from: $0) }
+        cloudHost = ephemeral ? nil : SecureStore.read("cloud." + primary.id)
+            .flatMap { try? JSONDecoder().decode(PairedDesktop.self, from: $0) }?.preparedCloudGrant()
     }
 
     private func refreshGrant(_ primary: PairedDesktop, endpoint: Endpoint, using transport: PinnedTransport) {
-        guard primary.id == familyID, !ephemeral, grantTask == nil else { return }
+        guard primary.id == familyID, grantTask == nil else { return }
         grantTask = Task { [weak self] in
             guard let self else { return }
             defer { if !Task.isCancelled { self.grantTask = nil } }
             do {
                 let cloud = try await LinkClient(transport: transport, base: endpoint.baseURL, token: primary.token).familyCloud(for: primary.id)
                 guard !Task.isCancelled, self.familyID == primary.id else { return }
-                try SecureStore.write("cloud." + primary.id, try cloud.map { try JSONEncoder().encode($0) })
+                if !self.ephemeral { try SecureStore.write("cloud." + primary.id, try cloud.map { try JSONEncoder().encode($0) }) }
                 self.cloudHost = cloud
             } catch { /* Keep the last pinned grant on transient network errors. */ }
         }
@@ -476,10 +478,10 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         offerCloud = false; deviceIssue = nil
         if desktop?.id == target.id, !linkInterrupted, wsHealth == .connected {
             selectedDevice = target; persistSelection(); watchSelectedDevice()
-            switchingDevice = false; showDeviceDrawer = false
+            switchTargetID = nil; showDeviceMenu = false
             return
         }
-        switchingDevice = true
+        switchTargetID = target.id
         switchTask = Task { [weak self] in
             let channel = PinnedTransport(fingerprint: target.fingerprint)
             var adopted = false
@@ -487,7 +489,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             do {
                 let ready = try await BrowserConnector.connect(target, keeping: nil, transport: channel)
                 guard let self, !Task.isCancelled, self.switchID == ticket, self.familyID == owner else { return }
-                self.switchingDevice = false; self.showDeviceDrawer = false
+                self.switchTargetID = nil; self.showDeviceMenu = false
                 var chosen = target; chosen.preferred = ready.endpoint
                 self.selectedDevice = chosen
                 if self.taskRunning && self.wsHealth == .connected && !openWorkspace {
@@ -498,9 +500,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 self.activate(chosen, transport: channel, ready: ready, sharedSessionID: self.currentSessionID)
             } catch {
                 guard let self, !Task.isCancelled, self.switchID == ticket else { return }
-                self.switchingDevice = false
-                self.deviceIssue = "未切换到" + target.name + "：" + error.localizedDescription
-                self.showDeviceDrawer = true
+                self.switchTargetID = nil
+                self.deviceIssue = "仍保留当前连接。" + error.localizedDescription
             }
         }
     }
@@ -547,7 +548,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     private func activate(_ selected: PairedDesktop, transport channel: PinnedTransport, ready: BrowserSession? = nil, sharedSessionID: String? = nil) {
         controlWatch?.cancel(); grantTask?.cancel(); grantTask = nil
         connectionTask?.cancel(); recoveryTask?.cancel(); generation = UUID(); frameGeneration = UUID()
-        switchTask?.cancel(); switchID = UUID(); switchingDevice = false
+        switchTask?.cancel(); switchID = UUID(); switchTargetID = nil; showDeviceMenu = false
         offlineAttempts = 0; offeredThisOutage = false; offerCloud = false; deviceIssue = nil
         pendingCommand = nil
         transport?.invalidate()
@@ -976,6 +977,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     }
 
     func sceneChanged(_ phase: ScenePhase) {
+        if phase == .background { showDeviceMenu = false }
         isForeground = (phase == .active)
         if !ephemeral {taskPush.scene(isForeground)}
         syncIdleTimer()
@@ -1355,7 +1357,11 @@ enum BrowserConnector {
                     } catch {
                         if Task.isCancelled { throw CancellationError() }
                         let offline: Set<URLError.Code> = [.notConnectedToInternet, .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost, .dnsLookupFailed]
-                        return .failure(error.localizedDescription, unpaired: (error as? LinkError) == .unpaired, network: (error as? URLError).map { offline.contains($0.code) } ?? false, starting: (error as? LinkError) == .http(503))
+                        let tlsErrors: Set<URLError.Code> = [.secureConnectionFailed, .serverCertificateUntrusted, .serverCertificateHasBadDate,
+                            .serverCertificateNotYetValid, .serverCertificateHasUnknownRoot, .appTransportSecurityRequiresSecureConnection]
+                        let secureFailure = (error as? URLError).map { tlsErrors.contains($0.code) } ?? false
+                        let message = secureFailure ? "无法验证设备的安全连接，请检查配对入口和证书后重试。" : error.localizedDescription
+                        return .failure(message, unpaired: (error as? LinkError) == .unpaired, network: (error as? URLError).map { offline.contains($0.code) } ?? false, starting: (error as? LinkError) == .http(503))
                     }
                 }
             }
