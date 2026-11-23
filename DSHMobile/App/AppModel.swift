@@ -437,7 +437,6 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     @Published private(set) var deviceIssue: String?
     @Published private(set) var switchingDevice = false
     @Published private(set) var offerCloud = false
-    private var createAfterRestore = false
     private var offeredThisOutage = false
     private var offlineAttempts = 0
     private var familyID: String?
@@ -470,7 +469,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
 
     // Route selection is independent from the conversation's executor. In particular
     // a cloud-backed turn must not lose its WKWebView, socket, approvals or scroll position.
-    func chooseDevice(_ target: PairedDesktop, openWorkspace: Bool = false, newSharedTask: Bool = false) {
+    func chooseDevice(_ target: PairedDesktop, openWorkspace: Bool = false) {
         guard let owner = familyID, [localHost?.id, cloudHost?.id].contains(target.id) else { return }
         switchTask?.cancel()
         let ticket = UUID(); switchID = ticket
@@ -478,7 +477,6 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         if desktop?.id == target.id, !linkInterrupted, wsHealth == .connected {
             selectedDevice = target; persistSelection(); watchSelectedDevice()
             switchingDevice = false; showDeviceDrawer = false
-            if newSharedTask { pendingCommand = .newSession(UUID()) }
             return
         }
         switchingDevice = true
@@ -492,12 +490,12 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 self.switchingDevice = false; self.showDeviceDrawer = false
                 var chosen = target; chosen.preferred = ready.endpoint
                 self.selectedDevice = chosen
-                if self.taskRunning && self.wsHealth == .connected && !openWorkspace && !newSharedTask {
+                if self.taskRunning && self.wsHealth == .connected && !openWorkspace {
                     self.persistSelection(); self.watchSelectedDevice()
                     return
                 }
                 adopted = true
-                self.activate(chosen, transport: channel, ready: ready, newConversation: newSharedTask)
+                self.activate(chosen, transport: channel, ready: ready, sharedSessionID: self.currentSessionID)
             } catch {
                 guard let self, !Task.isCancelled, self.switchID == ticket else { return }
                 self.switchingDevice = false
@@ -546,11 +544,10 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         activate(selected, transport: channel)
     }
 
-    private func activate(_ selected: PairedDesktop, transport channel: PinnedTransport, ready: BrowserSession? = nil, newConversation: Bool = false) {
+    private func activate(_ selected: PairedDesktop, transport channel: PinnedTransport, ready: BrowserSession? = nil, sharedSessionID: String? = nil) {
         controlWatch?.cancel(); grantTask?.cancel(); grantTask = nil
         connectionTask?.cancel(); recoveryTask?.cancel(); generation = UUID(); frameGeneration = UUID()
         switchTask?.cancel(); switchID = UUID(); switchingDevice = false
-        createAfterRestore = newConversation
         offlineAttempts = 0; offeredThisOutage = false; offerCloud = false; deviceIssue = nil
         pendingCommand = nil
         transport?.invalidate()
@@ -559,11 +556,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         needsLaunchSelection = true; recoveryFailures = 0; revoked = false
         desktop = selected
         if !ephemeral { taskPush.bind(selected,channel) }
-        currentSessionID = ephemeral ? nil : UserDefaults.standard.string(forKey: "dsh.lastSession." + selected.id)
-        if newConversation {
-            currentSessionID = nil
-            UserDefaults.standard.removeObject(forKey: "dsh.lastSession." + selected.id)
-        }
+        currentSessionID = ephemeral ? nil : (sharedSessionID ?? UserDefaults.standard.string(forKey: "dsh.lastSession." + selected.id))
         persistSelection(); watchSelectedDevice()
         pageTheme = loadSavedTheme(for: selected.id)
         if !ephemeral, let data = try? Data(contentsOf: frameURL(selected.id)),
@@ -657,10 +650,6 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     }
 
     func startNewSession() {
-        if let cloudHost, desktop?.id != cloudHost.id {
-            chooseDevice(cloudHost, newSharedTask: true)
-            return
-        }
         guard browser != nil, actionsEnabled else { return }
         performHaptic("light")
         pendingCommand = .newSession(UUID())
@@ -858,10 +847,6 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             cancelDocumentDeadline()
             needsLaunchSelection = false
             remember(body["sessionId"] as? String)
-            if createAfterRestore {
-                createAfterRestore = false
-                if actionsEnabled { pendingCommand = .newSession(UUID()) }
-            }
             if let target=linkedTask, target.desktop==desktop?.id {linkedTask=nil;openNotificationSession(target.session)}
         case "ready":
             if followDesktop {

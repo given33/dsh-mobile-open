@@ -1,2 +1,0 @@
-{"name":"dsh-shared-sessions","version":"0.1.1","type":"module","license":"MIT","main":"host.mjs","exports":{ ".":"./host.mjs","./package.json":"./package.json"},"files":["host.mjs","transcript.mjs","transfer.py","cordis.patch.yml"],"dsh":{"bundle":{"patch":"./cordis.patch.yml"}}}
-

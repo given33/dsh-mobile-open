@@ -8,6 +8,7 @@
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { taskSync } from '../lib/task-sync/host.mjs';
 import { createLinkService } from '../lib/link-service.mjs';
 import { inProcessUpstream } from '../lib/upstream-inprocess.mjs';
 import { mobileHostActions, nativeScheduleAction } from '../lib/mobile-host-actions.mjs';
@@ -66,6 +67,11 @@ async function readJsonBody(req, limit = 4096) {
 
 export function apply(ctx, rawConfig = {}) {
   const config = readConfig(rawConfig);
+  if (rawConfig.taskSync?.role) {
+    ctx.inject(['workspaceRegistry','sessionPersistence'], child => {
+      taskSync(child, rawConfig.taskSync, join(config.stateDir,'..','mobile-task-sync'));
+    });
+  }
   const say = (...parts) => console.log('[dsh-mobile-link]', ...parts);
   let service, disposed = false;
   ctx.on?.('session/event', (session, event) => service?.notifications?.event(session.id, event, () => {

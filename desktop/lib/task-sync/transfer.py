@@ -1,4 +1,4 @@
-"""Two-way transcript exchange over a host-key-checked SSH connection. No remote shell input from a task."""
+"""Native DSH task exchange over a host-key-checked SSH connection. No remote shell input from a task."""
 import base64
 import hashlib
 import hmac
@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 
-MAX = 8 * 1024 * 1024
+MAX = 32 * 1024 * 1024
 NAME = re.compile(r'[0-9a-f]{64}\.json')
 
 def regular(folder, name):
@@ -47,7 +47,7 @@ def store(folder, name, data, origin):
     raw = base64.b64decode(data,validate=True)
     if len(raw)>MAX: raise ValueError('Packet too large')
     obj=json.loads(raw)
-    if obj.get('v')!=1 or obj.get('origin')!=origin or not isinstance(obj.get('source'),str) or not re.fullmatch(r'[\w.-]{1,160}',obj['source'],re.ASCII): raise ValueError('Unexpected origin or source')
+    if obj.get('v')!=2 or obj.get('origin')!=origin or not isinstance(obj.get('source'),str) or not re.fullmatch(r'[\w.-]{1,160}',obj['source'],re.ASCII): raise ValueError('Unexpected origin or source')
     if hashlib.sha256((origin+':'+obj['source']).encode()).hexdigest()+'.json'!=name: raise ValueError('Wrong packet identity')
     tmp=None
     try:
@@ -107,7 +107,7 @@ def main():
             else:raise ValueError('Unknown request')
         return
     if mode!='--sync' or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*',sys.argv[3]):raise ValueError('Invalid SSH alias')
-    with subprocess.Popen(['ssh','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=10','-o','ServerAliveCountMax=2',sys.argv[3],'sudo -n -u dsh-cloud /usr/bin/python3 /opt/dsh-cloud/transfer.py --peer /var/lib/dsh-cloud/.dsh/shared-sessions'],stdin=subprocess.PIPE,stdout=subprocess.PIPE) as p:
+    with subprocess.Popen(['ssh','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=10','-o','ServerAliveCountMax=2',sys.argv[3],'sudo -n -u dsh-cloud /usr/bin/python3 /opt/dsh-cloud/task-transfer.py --peer /var/lib/dsh-cloud/.dsh/mobile-task-sync'],stdin=subprocess.PIPE,stdout=subprocess.PIPE) as p:
         try:
             offered,received=receive(p.stdout); here=manifest(inbox)
             grant = verifier_manifest(root.parent/'mobile-link')
