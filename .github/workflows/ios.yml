@@ -5,7 +5,7 @@ on:
       runner:
         type: choice
         description: Standard macOS runner for this manual build
-        options: [macos-15, macos-26]
+        options: [macos-15, macos-26, macos-15-intel]
         default: macos-15
       simulator:
         type: boolean
