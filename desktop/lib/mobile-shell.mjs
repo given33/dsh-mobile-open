@@ -552,9 +552,9 @@ body > [data-dsh-submenu-parent],
   -webkit-backdrop-filter: none !important;
 }
 
-/* The conversation tabs' More menu is 288px on desktop. Size its mobile
-   portal to the longest row; keep the host's row padding and viewport clamp. */
-[role="menu"]:has([data-slot="conversation.session.header.views.actions"]) {
+/* Both plugin More menus are 288px on desktop. On mobile, fit the longest
+   row (including any pin action) without changing the native row insets. */
+[role="menu"]:has([data-slot="conversation.session.header.views.actions"], [data-slot="sidebar.panellist.actions"]) {
   width: max-content !important;
   min-width: 0 !important;
 }
@@ -2522,10 +2522,15 @@ export const MOBILE_SHELL_JS = `(() => {
     const vh = Math.max(200, rawVh - (nativeKbMode ? nativeKbInset : 0));
     const pad = 10;
     const topMin = 10;
-    const maxAvailW = Math.max(180, vw - pad * 2);
-
     const policy = inferPlacementPolicy(popup, binding);
     const anchorRect = getTriggerRect(binding.trigger);
+    let maxAvailW = Math.max(180, vw - pad * 2);
+    // A plugin can contribute a much longer label. Its portaled menu must
+    // still fit the drawer's full-width More row, not the viewport behind it.
+    if (binding.trigger?.closest?.('[data-sidebar-drawer]:not([data-sidebar-collapsed])') &&
+        anchorRect.width > 0 && popup.querySelector('[data-slot="sidebar.panellist.actions"]')) {
+      maxAvailW = Math.min(maxAvailW, Math.floor(anchorRect.width));
+    }
 
     popup.setAttribute('data-dsh-positioned', 'true');
     // Reset opposing constraints so intrinsic size is measured accurately.

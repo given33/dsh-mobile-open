@@ -8,6 +8,21 @@ from urllib.parse import urlsplit
 from playwright.sync_api import sync_playwright, expect
 from workspace_sync import connect
 
+
+def check_plugin_menu_insets(page, engine, width):
+    browse = page.get_by_role('menuitem', name='浏览更多插件', exact=True)
+    browse.wait_for()
+    left, right = browse.evaluate("""row => {
+        const menu = row.closest('[role="menu"]').getBoundingClientRect();
+        const range = document.createRange();
+        range.selectNodeContents(row.querySelector('[class$="_itemLabel"]'));
+        return [row.querySelector('svg').getBoundingClientRect().left - menu.left,
+                menu.right - range.getBoundingClientRect().right];
+    }""")
+    assert 0 < left and abs(left - right) <= 1, (engine, width, left, right)
+    return browse
+
+
 fixture = Path(sys.argv[1])
 host = json.loads((fixture / 'host.json').read_text())
 assert urlsplit(host['base']).hostname == '127.0.0.1'
@@ -83,6 +98,27 @@ with sync_playwright() as pw:
     page.get_by_role('button',name='关闭工具箱').click()
     assert page.evaluate('geoCalls') == 0
     assert {'mode':'clock'} in received
+    # The sidebar More menu uses a different portal from the conversation menu.
+    page.evaluate('__DSH_MOBILE_BRIDGE__.toggleSidebar()')
+    more = page.get_by_role('button', name='更多', exact=True)
+    for width in [320, 393, 430]:
+        page.set_viewport_size({'width': width, 'height': 745})
+        more.click()
+        browse = check_plugin_menu_insets(page, engine, width)
+        menu = page.locator('[role="menu"]:has([data-slot="sidebar.panellist.actions"])')
+        box, row = menu.bounding_box(), more.bounding_box()
+        assert abs(box['x'] - row['x']) <= 2, (engine, width, box, row)
+        assert box['x'] + box['width'] <= row['x'] + row['width'] + 1
+        if width == 393:
+            page.screenshot(path=fixture / ('sidebar-more-' + engine + '.png'))
+            # Plugin-contributed labels can be longer than either built-in action.
+            browse.locator('[class$="_itemLabel"]').evaluate("e => e.textContent = '很长的插件名称'.repeat(16)")
+            expanded = menu.bounding_box()
+            assert box['width'] < expanded['width'] <= row['width'] + 1
+            assert menu.evaluate('e => e.scrollWidth <= e.clientWidth + 1')
+        page.keyboard.press('Escape')
+        browse.wait_for(state='hidden')
+    page.evaluate('__DSH_MOBILE_BRIDGE__.toggleSidebar()')
     for title in ['插件','自动化任务']:
         page.evaluate('__DSH_MOBILE_BRIDGE__.toggleSidebar()')
         page.get_by_role('button', name=title, exact=True).first.click()
@@ -112,16 +148,7 @@ with sync_playwright() as pw:
             # The desktop menu has a fixed width. On a phone, compare actual
             # text ink (not its flex container) to the inset before the icon.
             page.locator('[class$="_viewsMoreAnchor"] button[aria-haspopup="menu"]').click()
-            browse = page.get_by_role('menuitem', name='浏览更多插件', exact=True)
-            browse.wait_for()
-            left, right = browse.evaluate("""row => {
-                const menu = row.closest('[role="menu"]').getBoundingClientRect();
-                const range = document.createRange();
-                range.selectNodeContents(row.querySelector('[class$="_itemLabel"]'));
-                return [row.querySelector('svg').getBoundingClientRect().left - menu.left,
-                        menu.right - range.getBoundingClientRect().right];
-            }""")
-            assert 0 < left and abs(left - right) <= 1, (engine, width, left, right)
+            browse = check_plugin_menu_insets(page, engine, width)
             page.keyboard.press('Escape')
             browse.wait_for(state='hidden')
         page.screenshot(path=fixture / ('conversation-title-'+engine+'.png'))
