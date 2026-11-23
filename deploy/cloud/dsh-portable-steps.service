@@ -1,0 +1,22 @@
+[Unit]
+Description=DSH portable terminal step recovery
+After=local-fs.target
+
+[Service]
+User=dsh-cloud
+Group=dsh-cloud
+ExecStart=/usr/bin/python3 /opt/dsh-cloud/portable_worker.py --worker /var/lib/dsh-cloud/.dsh/mobile-task-sync
+Restart=on-failure
+RestartSec=2
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/dsh-cloud/.dsh/mobile-task-sync
+CapabilityBoundingSet=
+PrivateNetwork=yes
+MemoryMax=96M
+
+[Install]
+WantedBy=multi-user.target

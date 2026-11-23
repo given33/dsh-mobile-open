@@ -10,6 +10,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { installModelRouting } from './model-routing.mjs';
 import { registerCloudRun } from '../lib/task-sync/cloud-turn.mjs';
+import { registerPortableSteps, registerStepReceipts } from '../lib/task-sync/portable-step.mjs';
 import { taskSync, syncModels } from '../lib/task-sync/host.mjs';
 import { createLinkService } from '../lib/link-service.mjs';
 import { inProcessUpstream } from '../lib/upstream-inprocess.mjs';
@@ -75,6 +76,13 @@ export function apply(ctx, rawConfig = {}) {
   let submitCloudTurn;
   if (rawConfig.taskSync?.role) {
     const root = join(config.stateDir,'..','mobile-task-sync');
+    if (rawConfig.taskSync.portableSteps === true) {
+      const {role, sshHost} = rawConfig.taskSync;
+      if (role === 'desktop') {
+        ctx.inject(['tools','workingDirectory','workspaceRegistry'], child => registerPortableSteps(child,sshHost));
+      }
+      ctx.inject(['commands'], child => registerStepReceipts(child,role,root));
+    }
     if (rawConfig.taskSync.role === 'desktop' && rawConfig.taskSync.cloudTurns === true) {
       ctx.inject(['commands','sessions','workspaceRegistry','sessionPersistence','sessionController'], child => {
         submitCloudTurn = registerCloudRun(child, root);

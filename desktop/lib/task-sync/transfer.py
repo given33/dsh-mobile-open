@@ -181,6 +181,35 @@ def transport_slot(root):
         yield True
 
 
+
+def receipt_page(root, after):
+    if not (root/'portable-steps.sqlite').is_file(): return []
+    from portable_worker import database, page
+    db = database(root)
+    try: return page(db, after)
+    finally: db.close()
+
+
+def collect_receipts(root, reader, writer):
+    dest = root/'step-results'
+    dest.mkdir(mode=0o700, exist_ok=True)
+    cursor = dest/'cursor'
+    after = int(cursor.read_text()) if cursor.exists() else 0
+    # Bound each exchange; a backlogged mailbox catches up on subsequent polls.
+    send(writer, ['receipts',after]); rows = receive(reader)
+    if not isinstance(rows,list) or len(rows)>64: raise ValueError('Invalid receipt page')
+    for r in rows:
+        if (type(r.get('seq')) is not int or r['seq']<=after or
+                not all(isinstance(r.get(k),str) and re.fullmatch(r'[A-Za-z0-9_-][A-Za-z0-9_.-]{0,159}',r[k]) for k in ('session','call')) or
+                r.get('status') not in ('completed','failed','cancelled','unconfirmed') or
+                r.get('owner') not in ('desktop','cloud') or not isinstance(r.get('result'),str) or len(r['result'])>512):
+            raise ValueError('Invalid step receipt')
+        folder = dest/hashlib.sha256(r['session'].encode()).hexdigest()
+        folder.mkdir(mode=0o700,exist_ok=True)
+        durable_replace(folder, str(r['seq'])+'.json',json.dumps(r).encode())
+        after = r['seq']
+    if rows: durable_replace(dest, 'cursor',str(after).encode())
+
 def main():
     mode, root = sys.argv[1:3]; root = Path(root)
     outbox,inbox = root/'outbox',root/'inbox'
@@ -191,10 +220,11 @@ def main():
         catalogs = 'catalog-v1' in sys.argv[3:]
         models = 'models-v1' in sys.argv[3:]
         turns = 'turns-v1' in sys.argv[3:]
+        receipts = 'receipts-v1' in sys.argv[3:] and Path(__file__).with_name('portable_worker.py').is_file()
         def inventory():
             return [manifest(outbox, out_cache, catalogs), manifest(inbox, in_cache, catalogs, models)]
         previous = inventory()
-        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []) + (['catalog-v1'] if catalogs else []) + (['models-v1'] if models else []) + (['turns-v1'] if turns else []))
+        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []) + (['catalog-v1'] if catalogs else []) + (['models-v1'] if models else []) + (['turns-v1'] if turns else []) + (['receipts-v1'] if receipts else []))
         while True:
             cmd=receive(sys.stdin.buffer)
             if cmd==['end']:break
@@ -202,6 +232,8 @@ def main():
                 current = inventory()
                 send(sys.stdout.buffer, None if current == previous else current)
                 previous = current
+            elif cmd[0]=='receipts' and receipts:
+                send(sys.stdout.buffer, receipt_page(root,cmd[1]))
             elif cmd[0]=='turn' and turns:
                 queue_turn(root, cmd[1], cmd[2]); send(sys.stdout.buffer, True)
             elif cmd[0]=='family':
@@ -223,7 +255,7 @@ def exchange(mode, root, host):
     command = 'sudo -n -u dsh-cloud /usr/bin/python3 /opt/dsh-cloud/task-transfer.py --peer /var/lib/dsh-cloud/.dsh/mobile-task-sync'
     if mode == '--watch':
         command += ' watch-v1'
-    command += ' catalog-v1 models-v1 turns-v1'
+    command += ' catalog-v1 models-v1 turns-v1 receipts-v1'
     with subprocess.Popen(['ssh','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=10','-o','ServerAliveCountMax=2',host, command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0) as p:
         try:
@@ -237,6 +269,8 @@ def exchange(mode, root, host):
             # Healthy hosts reopen the connection; idle polls send no digest lists.
             deadline = time.monotonic() + 60
             while True:
+                if 'receipts-v1' in initial[2:]:
+                    collect_receipts(root,p.stdout,p.stdin)
                 here = manifest(inbox, in_cache, catalogs)
                 grant = None if mode in ('--receive', '--mailbox') else verifier_manifest(root.parent/'mobile-link')
                 if grant is not None and grant != last_grant:
