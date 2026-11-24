@@ -172,7 +172,7 @@ struct RootView: View {
                                 withAnimation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.84)) {
                                     model.setDeviceMenu(true)
                                 }
-                                model.chooseDevice(cloud, openWorkspace: true)
+                                model.chooseDevice(cloud)
                             }
                         }
                         .buttonStyle(PrimaryButtonStyle())
@@ -274,7 +274,7 @@ struct RootView: View {
         return Button(action: action) {
             HStack(spacing: 10) {
                 ZStack(alignment: .bottomTrailing) {
-                    Image(systemName: isCloud ? "cloud.fill" : "desktopcomputer")
+                    Image(systemName: isCloud ? "cloud.fill" : "laptopcomputer")
                         .font(.system(size: 14, weight: .semibold))
                         .foregroundStyle(selected ? Theme.business : Theme.labelSecondary)
                         .frame(width: 34, height: 34)
@@ -353,29 +353,6 @@ struct RootView: View {
                 .background(Theme.warnTertiary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 .padding(.top, 2)
             }
-            if let selected = model.selectedDevice, let owner = model.desktop, selected.id != owner.id {
-                Divider().padding(.vertical, 2)
-                Text("当前会话仍由「" + owner.name + "」执行")
-                    .font(.footnote)
-                    .foregroundStyle(Theme.labelSecondary)
-                    .padding(.horizontal, 10)
-                    .padding(.top, 4)
-                Button {
-                    model.chooseDevice(selected, openWorkspace: true)
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "arrow.right.circle.fill")
-                        Text("进入「" + selected.name + "」工作区")
-                    }
-                    .font(.subheadline.weight(.medium))
-                    .foregroundStyle(Theme.business)
-                    .padding(.horizontal, 10)
-                    .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .disabled(model.switchingDevice)
-            }
             if !extraDesktops.isEmpty {
                 Divider().padding(.vertical, 2)
                 Text("其他已配对设备")
@@ -390,44 +367,6 @@ struct RootView: View {
                     }
                 }
             }
-            Divider().padding(.vertical, 2)
-            HStack(spacing: 8) {
-                Button {
-                    model.probeDeviceStatuses(force: true)
-                } label: {
-                    HStack(spacing: 5) {
-                        if model.probingDevices {
-                            ProgressView().controlSize(.mini)
-                        } else {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.caption.weight(.semibold))
-                        }
-                        Text(model.probingDevices ? "正在检测…" : "刷新状态")
-                    }
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(Theme.business)
-                    .padding(.horizontal, 10)
-                    .frame(minHeight: 32)
-                    .background(Theme.hover.opacity(0.65), in: Capsule())
-                }
-                .buttonStyle(.plain)
-                .disabled(model.probingDevices)
-
-                Spacer(minLength: 4)
-
-                Button {
-                    dismissDeviceMenu()
-                    showConnectionInfo = true
-                } label: {
-                    Text("连接详情")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(Theme.labelSecondary)
-                        .padding(.horizontal, 10)
-                        .frame(minHeight: 32)
-                }
-                .buttonStyle(.plain)
-            }
-            .padding(.horizontal, 4)
         }
         .font(.subheadline)
         .padding(4)
@@ -604,7 +543,7 @@ struct RootView: View {
                     }
                     if let focus = model.desktopFocus, !focus.sessionId.isEmpty {
                         Button { model.jumpToDesktopFocus() } label: {
-                            Label(focus.title.isEmpty ? "跳转到桌面当前会话" : "跳转：\(focus.title)", systemImage: "desktopcomputer")
+                            Label(focus.title.isEmpty ? "跳转到桌面当前会话" : "跳转：\(focus.title)", systemImage: "laptopcomputer")
                         }
                     }
                     Divider()

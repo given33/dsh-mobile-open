@@ -6,16 +6,21 @@ export function voiceReleaseAction(origin, point, target) {
   return moved && inside ? 'cancel' : 'draft';
 }
 
-// WeChat-style slide-up cancel gesture: triggers cancel when dragged into the expanded
-// circular target OR slid upward out of the bottom composer bar past the cancel threshold.
-export function voiceGestureAction(origin, point, target, options = {}) {
-  const pad = Number.isFinite(options.tolerance) ? options.tolerance : 14;
+// WeChat-style slide-up gesture: supports left-wing 'cancel', right-wing 'edit',
+// and sliding upward from the bottom composer bar.
+export function voiceGestureAction(origin, point, cancelTarget, options = {}) {
+  const pad = Number.isFinite(options.tolerance) ? options.tolerance : 12;
   const moved = Math.hypot(point.x - origin.x, point.y - origin.y) >= 20;
   if (!moved) return 'draft';
-  const inside = point.x >= target.left - pad && point.x <= target.right + pad &&
-    point.y >= target.top - pad && point.y <= target.bottom + pad;
-  if (inside) return 'cancel';
-  if (origin.y >= target.bottom - 8 && (origin.y - point.y) >= 56 && point.y <= target.bottom + pad) {
+  const hit = rect => rect &&
+    point.x >= rect.left - pad && point.x <= rect.right + pad &&
+    point.y >= rect.top - pad && point.y <= rect.bottom + pad;
+  if (hit(cancelTarget)) return 'cancel';
+  if (hit(options.editTarget)) return 'edit';
+  if (origin.y >= cancelTarget.bottom - 8 && (origin.y - point.y) >= 56 && point.y <= cancelTarget.bottom + pad) {
+    if (options.editTarget && point.x >= (cancelTarget.right + options.editTarget.left) / 2) {
+      return 'edit';
+    }
     return 'cancel';
   }
   return 'draft';
@@ -36,31 +41,55 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
   const hud = make('div', 'dml-voice-hud',
     '<div class="dml-voice-scrim" aria-hidden="true"></div>' +
     '<div class="dml-voice-bubble">' +
-      '<div class="dml-voice-wave" aria-hidden="true">' + '<i></i>'.repeat(13) + '</div>' +
-      '<span class="dml-voice-timer" aria-hidden="true">0:00</span>' +
-    '</div>' +
-    '<div class="dml-voice-controls">' +
-      '<span data-target="cancel" role="status">' +
-        '<span class="dml-voice-cancel-orb" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg></span>' +
-        '<span class="dml-voice-cancel-label">滑到此处取消</span>' +
-      '</span>' +
-    '</div>' +
-    '<div class="dml-voice-arc" aria-hidden="true">' +
-      '<div class="dml-voice-arc-ring"></div>' +
-      '<div class="dml-voice-arc-content">' +
-        '<svg viewBox="0 0 24 24" width="21" height="21" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8.5 14.5a5 5 0 0 1 0-5"/><path d="M15.5 9.5a5 5 0 0 1 0 5"/><path d="M5.5 17.5a9.5 9.5 0 0 1 0-11"/><path d="M18.5 6.5a9.5 9.5 0 0 1 0 11"/><circle cx="12" cy="12" r="1.5" fill="currentColor" stroke="none"/></svg>' +
-        '<span class="dml-voice-arc-tip">松开 转文字</span>' +
+      '<div class="dml-voice-transcript" aria-live="polite"></div>' +
+      '<div class="dml-voice-meter" aria-hidden="true">' +
+        '<div class="dml-voice-fringe" data-side="left">' + '<span></span>'.repeat(6) + '</div>' +
+        '<div class="dml-voice-wave">' + '<i></i>'.repeat(13) + '</div>' +
+        '<div class="dml-voice-fringe" data-side="right">' + '<span></span>'.repeat(6) + '</div>' +
       '</div>' +
+      '<span class="dml-voice-countdown" aria-hidden="true"></span>' +
+      '<span class="dml-voice-tail" aria-hidden="true"></span>' +
+    '</div>' +
+    '<div class="dml-voice-finishing-pill" role="status">正在转文字…</div>' +
+    '<div class="dml-voice-stage">' +
+      '<div class="dml-voice-stage-inner">' +
+        '<svg class="dml-voice-svg" viewBox="0 0 393 300" preserveAspectRatio="xMidYMax slice" aria-hidden="true">' +
+          '<defs><linearGradient id="dml-voice-dome-grad" x1="0" y1="0" x2="0" y2="1">' +
+            '<stop offset="0%" stop-color="#9E9E9E"/>' +
+            '<stop offset="48%" stop-color="#B3B3B3"/>' +
+            '<stop offset="100%" stop-color="#C5C5C5"/>' +
+          '</linearGradient></defs>' +
+          '<g class="dml-voice-wing-svg" data-side="left" data-target="cancel">' +
+            '<path class="dml-voice-wing-path" d="M -34.7 125.1 A 682.6 682.6 0 0 1 137.0 87.2 A 37.1 37.1 0 0 1 143.5 161.2 A 608.4 608.4 0 0 0 -9.6 194.9 Z"/>' +
+          '</g>' +
+          '<g class="dml-voice-wing-svg" data-side="right" data-target="edit">' +
+            '<path class="dml-voice-wing-path" d="M 256.0 87.2 A 682.6 682.6 0 0 1 427.7 125.1 L 402.6 194.9 A 608.4 608.4 0 0 0 249.5 161.2 A 37.1 37.1 0 0 1 256.0 87.2 Z"/>' +
+          '</g>' +
+          '<path class="dml-voice-dome-path" d="M -8.0 211.0 A 592.6 592.6 0 0 1 401.0 211.0 L 401 306 L -8 306 Z"/>' +
+          '<path class="dml-voice-dome-rim" d="M -8.0 211.0 A 592.6 592.6 0 0 1 401.0 211.0" fill="none"/>' +
+        '</svg>' +
+        '<div class="dml-voice-wing-labels" data-side="left">' +
+          '<span class="dml-voice-wing-hint" aria-hidden="true">松手 取消</span>' +
+          '<span class="dml-voice-wing-text">取消</span>' +
+        '</div>' +
+        '<div class="dml-voice-wing-labels" data-side="right">' +
+          '<span class="dml-voice-wing-hint" aria-hidden="true">松手 编辑文字</span>' +
+          '<span class="dml-voice-wing-text">滑到这里 转文字</span>' +
+        '</div>' +
+        '<span class="dml-voice-arc-label">松开 填入</span>' +
+      '</div>' +
+      '<div class="dml-voice-stage-safe" aria-hidden="true"></div>' +
     '</div>'
   );
   const panel = make('dialog', 'dml-voice-panel', '<div class="dml-voice-title" tabindex="-1" autofocus>语音转文字</div><div role="status"></div><div class="dml-voice-actions"><button type="button" data-voice-cancel>取消</button><button type="button" data-voice-record hidden>开始录音</button></div>');
   panel.setAttribute('aria-label', '语音转文字'); hud.hidden = true;
   document.body.append(hud, panel);
   const cancelTarget = hud.querySelector('[data-target=cancel]');
-  const cancelLabel = hud.querySelector('.dml-voice-cancel-label');
-  const arcTip = hud.querySelector('.dml-voice-arc-tip');
-  const timerEl = hud.querySelector('.dml-voice-timer');
-  const bars = [...hud.querySelectorAll('i')];
+  const editTarget = hud.querySelector('[data-target=edit]');
+  const transcriptEl = hud.querySelector('.dml-voice-transcript');
+  const arcLabel = hud.querySelector('.dml-voice-arc-label');
+  const countdownEl = hud.querySelector('.dml-voice-countdown');
+  const bars = [...hud.querySelectorAll('.dml-voice-meter span, .dml-voice-meter i')];
   const status = panel.querySelector('[role=status]');
   const record = panel.querySelector('[data-voice-record]');
   const levels = new Float32Array(Math.ceil(bars.length / 2));
@@ -70,20 +99,23 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
     clockTimer = 0;
   }
   function updateClock(startedAt) {
-    if (!timerEl) return;
+    if (!countdownEl) return;
     const sec = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-    if (sec >= 45) {
-      timerEl.setAttribute('data-countdown', 'true');
-      timerEl.textContent = '还可说 ' + Math.max(1, 55 - sec) + '″';
+    if (sec >= 50) {
+      countdownEl.textContent = '还可说 ' + Math.max(1, 60 - sec) + ' 秒';
     } else {
-      timerEl.removeAttribute('data-countdown');
-      timerEl.textContent = Math.floor(sec / 60) + ':' + String(sec % 60).padStart(2, '0');
+      countdownEl.textContent = '';
     }
+  }
+  function renderTranscript(item) {
+    if (!transcriptEl) return;
+    const text = (item?.partial || item?.final || '').trim();
+    transcriptEl.textContent = text || '正在聆听…';
+    transcriptEl.toggleAttribute('data-placeholder', !text);
   }
   function resetWave() {
     clearTimeout(silenceTimer);
     levels.fill(0);
-    hud.style.setProperty('--dml-voice-lvl', '0');
     for (const bar of bars) bar.style.removeProperty('transform');
   }
   function showLevel(value) {
@@ -91,13 +123,13 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
     const level = Math.max(0, Math.min(1, value));
     levels.copyWithin(1, 0);
     levels[0] = level;
-    hud.style.setProperty('--dml-voice-lvl', level.toFixed(3));
-    // The middle reacts immediately; older samples spread out toward both edges.
+    // Keep the center responsive while fanning a smooth 25-bar symmetric WeChat speech envelope outward.
     const middle = levels.length - 1;
     bars.forEach((bar, i) => {
       const distance = Math.abs(i - middle);
-      const energy = levels[distance] * (1 - 0.45 * distance / middle);
-      bar.style.transform = 'scaleY(' + (0.11 + 0.89 * energy) + ')';
+      const envelope = Math.exp(-(distance * distance) / 36) * (distance % 2 === 0 ? 1 : 0.78);
+      const energy = Math.min(1, Math.max(levels[distance], level * envelope) * (1 - 0.55 * distance / middle));
+      bar.style.transform = 'scaleY(' + (0.14 + 0.86 * energy) + ')';
     });
     clearTimeout(silenceTimer);
     silenceTimer = setTimeout(resetWave, 250);
@@ -140,11 +172,16 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
     record.textContent = mode === 'tap' ? '完成' : '开始录音';
     if (!panel.open) panel.showModal();
   }
+  function applyHudState(action) {
+    hud.dataset.action = action;
+    if (arcLabel) arcLabel.textContent = action === 'draft' ? '松开 填入' : '语音';
+    if (action === 'edit') renderTranscript(current);
+  }
   function start(position, mode) {
     const card = mic.closest('[data-composer-card]');
     if (current || readOnly() || !card || document.hidden) return false;
     const startedAt = Date.now();
-    const item = { id: 'dml-' + startedAt + '-' + (++serial), session: session(), card, mode, phase: 'starting', startedAt };
+    const item = { id: 'dml-' + startedAt + '-' + (++serial), session: session(), card, mode, phase: 'starting', startedAt, partial: '', focusAfter: false };
     current = item;
     item.watchdog = setTimeout(() => {
       if (current === item) { abandon(); showToast('语音识别未响应'); }
@@ -155,9 +192,9 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
     hud.removeAttribute('data-closing');
     hud.removeAttribute('data-finishing');
     if (mode === 'press') {
-      hud.hidden = false; hud.dataset.action = 'draft';
-      cancelLabel.textContent = '滑到此处取消';
-      if (arcTip) arcTip.textContent = '松开 转文字';
+      hud.hidden = false;
+      applyHudState('draft');
+      renderTranscript(item);
       updateClock(startedAt);
       stopClock();
       clockTimer = setInterval(() => updateClock(startedAt), 500);
@@ -172,13 +209,16 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
     if (!item || item.phase === 'finishing') return;
     if (action === 'cancel' || !sameSession(item)) { abandon(); return; }
     item.phase = 'finishing';
+    item.focusAfter = action === 'edit';
     stopClock();
     clearTimeout(item.watchdog);
     item.watchdog = setTimeout(() => {
       if (current === item) { abandon(); showToast('语音识别未完成，请重试'); }
     }, 4600);
     if (item.mode === 'press') {
-      hud.setAttribute('data-finishing', ''); hud.dataset.action = 'draft'; cancelLabel.textContent = '正在转文字…'; resetWave();
+      hud.setAttribute('data-finishing', '');
+      hud.dataset.action = 'draft';
+      resetWave();
     } else if (item.mode !== 'inline') showPanel('wait', '正在转文字…');
     if (item.final !== undefined) applyFinal(item, item.final);
     else command('stop', item);
@@ -186,7 +226,7 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
   function applyFinal(item, text) {
     clearTimeout(item.watchdog);
     if (!text) { abandon(); showToast('没有识别到文字'); return; }
-    if (sameSession(item) && !insertDraft(text, { focus: item.mode === 'inline' })) showToast('无法插入当前草稿');
+    if (sameSession(item) && !insertDraft(text, { focus: item.mode === 'inline' || !!item.focusAfter })) showToast('无法插入当前草稿');
     abandon();
   }
   function resetMicLabel() {
@@ -206,7 +246,9 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
     if (!start(position, 'inline')) resetMicLabel();
   }
   function actionAt(e, g) {
-    return decideAction(g, {x: e.clientX, y: e.clientY}, cancelTarget.getBoundingClientRect());
+    return decideAction(g, { x: e.clientX, y: e.clientY }, cancelTarget.getBoundingClientRect(), {
+      editTarget: editTarget?.getBoundingClientRect(),
+    });
   }
   {
     const control = mic;
@@ -222,9 +264,7 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
       const action = actionAt(e, gesture);
       if (hud.dataset.action === action) return;
       haptic(action === 'cancel' ? 'medium' : 'light');
-      hud.dataset.action = action;
-      cancelLabel.textContent = action === 'cancel' ? '松开取消' : '滑到此处取消';
-      if (arcTip) arcTip.textContent = action === 'cancel' ? '移回底部保留' : '松开 转文字';
+      applyHudState(action);
     });
     control.addEventListener('pointerup', e => {
       if (gesture?.id !== e.pointerId) return;
@@ -281,6 +321,10 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
       if (data.status === 'level' && !hud.hidden && item.phase !== 'finishing') {
         showLevel(data.level);
       }
+      if (data.status === 'partial' && typeof data.text === 'string' && !hud.hidden && item.phase !== 'finishing') {
+        item.partial = data.text.trim();
+        renderTranscript(item);
+      }
       if (data.status === 'recording' && item.phase === 'finishing') { command('stop', item); return; }
       if (data.status === 'recording' && item.phase === 'starting') {
         item.phase = 'recording';
@@ -293,7 +337,11 @@ export function installMobileVoice({ post, readOnly, session, insertDraft, showT
       if (data.status === 'final') {
         const text = typeof data.text === 'string' ? data.text.trim() : '';
         // Some OS recognizers finish at a pause before the user releases their finger.
-        if (item.phase !== 'finishing' && item.mode !== 'inline') { item.final = text; return; }
+        if (item.phase !== 'finishing' && item.mode !== 'inline') {
+          item.final = text;
+          if (!hud.hidden) renderTranscript(item);
+          return;
+        }
         applyFinal(item, text);
       }
     },

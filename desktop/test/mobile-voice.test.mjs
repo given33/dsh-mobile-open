@@ -25,3 +25,14 @@ test('WeChat slide-up gesture cancels when sliding above the bottom dock and res
   // Sliding back down into the bottom arc restores draft mode.
   assert.equal(voiceGestureAction(micOrigin, {x: 300, y: 705}, target), 'draft')
 })
+
+test('WeChat 3-zone gesture handles right edit wing and bottom return to draft', () => {
+  const cancelTarget = {left: 0, right: 170, top: 550, bottom: 622}
+  const editTarget = {left: 223, right: 393, top: 550, bottom: 622}
+  const micOrigin = {x: 311, y: 710}
+  assert.equal(voiceGestureAction(micOrigin, {x: 80, y: 586}, cancelTarget, { editTarget }), 'cancel')
+  assert.equal(voiceGestureAction(micOrigin, {x: 310, y: 586}, cancelTarget, { editTarget }), 'edit')
+  assert.equal(voiceGestureAction(micOrigin, {x: 310, y: 530}, cancelTarget, { editTarget }), 'edit')
+  assert.equal(voiceGestureAction(micOrigin, {x: 70, y: 530}, cancelTarget, { editTarget }), 'cancel')
+  assert.equal(voiceGestureAction(micOrigin, {x: 300, y: 705}, cancelTarget, { editTarget }), 'draft')
+})

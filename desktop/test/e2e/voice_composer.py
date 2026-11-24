@@ -140,13 +140,15 @@ with sync_playwright() as pw:
     target = cancel.bounding_box()
     cx, cy = target['x'] + target['width']/2, target['y'] + target['height']/2
     page.mouse.move(cx, cy)
-    assert cancel.inner_text() == '松开取消'
+    assert hud.get_attribute('data-action') == 'cancel'
+    assert hud.locator('[data-side="left"] .dml-voice-wing-hint').inner_text() == '松手 取消'
     page.mouse.up(); hud.wait_for(state='hidden')
     assert editor.inner_text() == before
     assert page.evaluate("messages.at(-1).type==='voice-cancel'")
     x, y = down()
     page.mouse.move(cx, cy); page.mouse.move(x + 45, y)
-    assert cancel.inner_text() == '滑到此处取消'
+    assert hud.get_attribute('data-action') == 'draft'
+    assert hud.locator('.dml-voice-arc-label').inner_text() == '松开 填入'
     page.mouse.up()
     page.wait_for_function("t=>document.querySelector('[data-composer-card] [contenteditable=true]').textContent !== t", arg=before)
     assert editor.inner_text().count('测试 voice 日本語') == before.count('测试 voice 日本語') + 1

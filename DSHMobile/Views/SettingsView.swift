@@ -53,7 +53,7 @@ struct SettingsView: View {
                 Section("连接") {
                     ForEach(model.otherDesktops) { desktop in
                         Button { model.use(desktop); dismiss() } label: {
-                            Label(desktop.name, systemImage: "desktopcomputer")
+                            Label(desktop.name, systemImage: "laptopcomputer")
                         }
                     }
                     Button { dismiss(); model.presentPairing() } label: {

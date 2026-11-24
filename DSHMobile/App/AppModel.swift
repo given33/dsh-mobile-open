@@ -415,9 +415,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             loadFamily(first)
             let defaults = UserDefaults.standard
             let lastView = defaults.string(forKey: "dsh.family.view." + first.id)
-            let lastDevice = defaults.string(forKey: "dsh.family.device." + first.id)
             let view = cloudHost.flatMap { $0.id == lastView ? $0 : nil } ?? first
-            selectedDevice = cloudHost.flatMap { $0.id == lastDevice ? $0 : nil } ?? first
+            selectedDevice = view
             activate(view, transport: PinnedTransport(fingerprint: view.fingerprint))
         } else if !fixture.isEmpty {
             Task { [weak self] in
@@ -464,7 +463,6 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     private var familyID: String?
     private var switchTask: Task<Void, Never>?
     private var probeTask: Task<Void, Never>?
-    private var controlWatch: Task<Void, Never>?
     private var grantTask: Task<Void, Never>?
     private var switchID = UUID()
     var localHost: PairedDesktop? { savedDesktops.first { $0.id == familyID } }
@@ -501,7 +499,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         }
         showDeviceMenu = open
         if open {
-            probeDeviceStatuses(force: false)
+            probeDeviceStatuses(force: true)
         } else {
             probeTask?.cancel()
             probeTask = nil
@@ -535,11 +533,13 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                     nextStatuses[host.id] = .online(route: route, latencyMs: lastLatencyMs)
                     if force { toProbe.append(host) }
                 } else {
-                    nextStatuses[host.id] = force ? .checking : .offline(problem)
+                    if nextStatuses[host.id] == nil {
+                        nextStatuses[host.id] = force ? .checking : .offline(problem)
+                    }
                     toProbe.append(host)
                 }
             } else {
-                if force || nextStatuses[host.id] == nil || nextStatuses[host.id]?.isHealthy != true {
+                if nextStatuses[host.id] == nil {
                     nextStatuses[host.id] = .checking
                 }
                 toProbe.append(host)
@@ -595,23 +595,24 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         }
     }
 
-    // Route selection is independent from the conversation's executor. In particular
-    // a cloud-backed turn must not lose its WKWebView, socket, approvals or scroll position.
-    func chooseDevice(_ target: PairedDesktop, openWorkspace: Bool = false) {
-        guard let owner = familyID, [localHost?.id, cloudHost?.id].contains(target.id) else { return }
-        switchTask?.cancel()
+    // The browser stays on the source until the target confirms native admission.
+    func chooseDevice(_ target: PairedDesktop) {
+        guard let owner = familyID, [localHost?.id, cloudHost?.id].contains(target.id), !switchingDevice else { return }
         let ticket = UUID(); switchID = ticket
         offerCloud = false; deviceIssue = nil
         performHaptic("selection")
         if desktop?.id == target.id, !linkInterrupted, wsHealth == .connected {
             let route = browser?.endpoint.kind.label ?? target.preferred?.kind.label
             deviceStatuses[target.id] = .online(route: route, latencyMs: lastLatencyMs)
-            selectedDevice = target; persistSelection(); watchSelectedDevice()
-            switchTargetID = nil; setDeviceMenu(false)
+            selectedDevice = target; persistSelection(); setDeviceMenu(false)
             return
         }
-        switchTargetID = target.id
+        let session = currentSessionID, source = desktop
+        let sourceLink = transport.flatMap { channel in browser.flatMap { view in
+            source.map { LinkClient(transport: channel, base: view.endpoint.baseURL, token: $0.token) }
+        } }
         deviceStatuses[target.id] = .connecting
+        switchTargetID = target.id
         switchTask = Task { [weak self] in
             let channel = PinnedTransport(fingerprint: target.fingerprint)
             var adopted = false
@@ -619,24 +620,67 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             do {
                 let ready = try await BrowserConnector.connect(target, keeping: nil, transport: channel)
                 guard let self, !Task.isCancelled, self.switchID == ticket, self.familyID == owner else { return }
-                self.switchTargetID = nil
-                self.probeTask?.cancel(); self.probeTask = nil; self.probingDevices = false
-                self.showDeviceMenu = false
+                if let session, let source, source.id != target.id {
+                    let destination = LinkClient(transport: channel, base: ready.endpoint.baseURL, token: target.token)
+                    let targetRole = target.id == owner ? "desktop" : "cloud"
+                    let capability = try await destination.rpc("mobileRelay/status", args: .object([:]))
+                    guard capability["role"].string == targetRole, capability["protocol"].int == 1 else { throw LinkError.badResponse }
+                    let key = "dsh.handoff.\(owner).\(source.id).\(target.id).\(session)"
+                    let defaults = UserDefaults.standard
+                    var command = defaults.string(forKey: key) ?? UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+                    let statusArgs: () -> JSON = { .object(["sessionId": .string(session), "command": .string(command)]) }
+                    // If the reply was lost after the old host yielded, reconnect to the SAME claim.
+                    let previous = try await destination.rpc("mobileRelay/status", args: statusArgs())
+                    if previous["state"].string != "accepted" {
+                        let result: JSON
+                        if ["received", "uncertain"].contains(previous["state"].string) {
+                            // Delivery survived a source power loss. Poll the target; never re-submit.
+                            result = .object(["state": .string("yielded"), "command": .string(command)])
+                        } else {
+                            guard let sourceLink else { throw ClientError.message("原设备离线，目标设备还没有交接记录。没有重跑任务。") }
+                            defaults.set(command, forKey: key)
+                            result = try await sourceLink.rpc("mobileRelay/request", args: .object([
+                                "sessionId": .string(session), "target": .string(targetRole), "command": .string(command), "expectedRunning": .bool(self.taskRunning)
+                            ]))
+                        }
+                        if result["state"].string != "idle" && result["state"].string != "finished" {
+                            guard ["requested", "sealing", "yielded"].contains(result["state"].string) else {
+                                defaults.removeObject(forKey: key)
+                                throw ClientError.message(result["message"].string.isEmpty ? "原设备未能交接任务。" : result["message"].string)
+                            }
+                            command = result["command"].string
+                            defaults.set(command, forKey: key)
+                            let deadline = ContinuousClock.now.advanced(by: .seconds(90))
+                            while true {
+                                try Task.checkCancellation()
+                                let state = try await destination.rpc("mobileRelay/status", args: statusArgs())
+                                if state["state"].string == "accepted" { break }
+                                if let sourceLink, state["state"].string == "ready", let original = try? await sourceLink.rpc("mobileRelay/status", args: statusArgs()) {
+                                    if original["state"].string == "finished" { break }
+                                    if original["state"].string == "failed" {
+                                        defaults.removeObject(forKey: key)
+                                        throw ClientError.message(original["message"].string)
+                                    }
+                                }
+                                guard ContinuousClock.now < deadline else { throw ClientError.message("交接尚未确认。再次选择此设备可查询同一次交接，不会重新执行。") }
+                                try await Task.sleep(for: .milliseconds(750))
+                            }
+                        }
+                    }
+                    guard self.switchID == ticket, self.currentSessionID == session, !Task.isCancelled else { throw CancellationError() }
+                    defaults.removeObject(forKey: key)
+                }
+                guard !Task.isCancelled, self.switchID == ticket, self.currentSessionID == session else { throw CancellationError() }
                 var chosen = target; chosen.preferred = ready.endpoint
-                self.selectedDevice = chosen
                 self.deviceStatuses[chosen.id] = .online(route: ready.endpoint.kind.label, latencyMs: self.lastLatencyMs)
                 self.performHaptic("success")
-                if self.taskRunning && self.wsHealth == .connected && !openWorkspace {
-                    self.persistSelection(); self.watchSelectedDevice()
-                    return
-                }
-                adopted = true
-                self.activate(chosen, transport: channel, ready: ready, sharedSessionID: self.currentSessionID)
+                adopted = true; self.selectedDevice = chosen
+                self.activate(chosen, transport: channel, ready: ready, sharedSessionID: session)
             } catch {
                 guard let self, !Task.isCancelled, self.switchID == ticket else { return }
                 self.switchTargetID = nil
-                self.deviceStatuses[target.id] = .offline("连接失败")
                 self.performHaptic("error")
+                self.probeDeviceStatuses(force: true)
                 self.deviceIssue = "仍保留当前连接。" + error.localizedDescription
             }
         }
@@ -646,29 +690,6 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         guard !ephemeral, let familyID else { return }
         UserDefaults.standard.set(desktop?.id, forKey: "dsh.family.view." + familyID)
         UserDefaults.standard.set(selectedDevice?.id, forKey: "dsh.family.device." + familyID)
-    }
-
-    private func watchSelectedDevice() {
-        controlWatch?.cancel(); controlWatch = nil
-        guard let selected = selectedDevice, let endpoint = selected.preferred,
-              selected.id != desktop?.id else { return }
-        controlWatch = Task { [weak self] in
-            let channel = PinnedTransport(fingerprint: selected.fingerprint)
-            defer { channel.invalidate() }
-            let link = LinkClient(transport: channel, base: endpoint.baseURL, token: selected.token)
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .seconds(4)) } catch { return }
-                guard let self, self.selectedDevice?.id == selected.id else { return }
-                if !self.isForeground { continue }
-                do { _ = try await link.checkSession() }
-                catch {
-                    guard !Task.isCancelled, self.selectedDevice?.id == selected.id else { return }
-                    // Drop the unreachable control connection. Do not submit, cancel, or replay a turn.
-                    self.selectedDevice = self.desktop; self.persistSelection()
-                    return
-                }
-            }
-        }
     }
 
     func use(_ selected: PairedDesktop) {
@@ -682,7 +703,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     }
 
     private func activate(_ selected: PairedDesktop, transport channel: PinnedTransport, ready: BrowserSession? = nil, sharedSessionID: String? = nil) {
-        controlWatch?.cancel(); grantTask?.cancel(); grantTask = nil
+        grantTask?.cancel(); grantTask = nil
         connectionTask?.cancel(); recoveryTask?.cancel(); generation = UUID(); frameGeneration = UUID()
         switchTask?.cancel(); switchID = UUID(); switchTargetID = nil
         probeTask?.cancel(); probeTask = nil; probingDevices = false; showDeviceMenu = false
@@ -695,7 +716,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         desktop = selected
         if !ephemeral { taskPush.bind(selected,channel) }
         currentSessionID = ephemeral ? nil : (sharedSessionID ?? UserDefaults.standard.string(forKey: "dsh.lastSession." + selected.id))
-        persistSelection(); watchSelectedDevice()
+        persistSelection()
         pageTheme = loadSavedTheme(for: selected.id)
         if !ephemeral, let data = try? Data(contentsOf: frameURL(selected.id)),
            let saved = try? JSONDecoder().decode(ResumeSnapshot.self, from: data),
@@ -1103,7 +1124,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             Task { await LinkClient(transport: channel, base: end.baseURL, token: primary.token).unpair(); channel.invalidate() }
         }
         discardFrame(owner); clearCachedRoute(for: owner)
-        grantTask?.cancel(); switchTask?.cancel(); probeTask?.cancel(); probeTask = nil; controlWatch?.cancel()
+        grantTask?.cancel(); switchTask?.cancel(); probeTask?.cancel(); probeTask = nil
         probingDevices = false; deviceStatuses.removeAll()
         switchID = UUID(); familyID = nil; cloudHost = nil; selectedDevice = nil; offerCloud = false
         let all = savedDesktops.filter { $0.id != owner }
