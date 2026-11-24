@@ -1,3 +1,4 @@
+import { eventSpec, placedReceipt } from './command-placement.mjs';
 // A DSH model/tool result is not an external system's acknowledgement. Expose log
 // references and statuses, not shell arguments, environment variables or raw output.
 import { plannedRelease } from './git-release-tool.mjs';
@@ -29,16 +30,18 @@ export function nativeAcceptance(events, inherited, requestId, minSeq = inherite
 export function handoffEvidence(events, inherited, sessionId, role) {
   const request = events.findLast(e => e.type === 'user/message' && human(e.data?.source));
   if (!request || request.seq < inherited || !/^[0-9a-f]{64}$/.test(request.data.source.rpcId ?? '')) return null;
-  const callIndex = events.findLastIndex(e => e.seq < request.seq && e.type === 'tool/call' && e.data.name === relayTool);
+  const callIndex = events.findLastIndex(e => e.seq < request.seq && e.type === 'tool/call' && [relayTool,'pwsh','bash'].includes(e.data.name));
   if (callIndex < inherited) return null;
   const call = events[callIndex];
   const endIndex = events.findIndex((e,i) => i > callIndex && e.type === 'turn/end');
   if (endIndex < 0 || endIndex >= request.seq || endIndex - callIndex > 16) return null;
   const tail = events.slice(callIndex + 1, endIndex + 1);
   const token = tail.find(e => e.type === 'tool/result')?.data?.message?.content?.[0]?.text;
-  const nonce = /^DSH-RELAY\/1 ([0-9a-f]{32})$/.exec(token)?.[1];
-  if (!nonce || receipt(nonce) !== token || claimID(sessionId,nonce) !== request.data.source.rpcId ||
-      !singleCall(events.slice(0,callIndex + 1),call) || !validTail({command:nonce},call,tail)) return null;
+  const shell = call.data.name !== relayTool;
+  const nonce = (shell ? /DSH-PLACEMENT\/1 ([0-9a-f]{32})/ : /^DSH-RELAY\/1 ([0-9a-f]{32})$/).exec(token)?.[1];
+  const boundary = shell ? 'before-shell' : undefined;
+  if (!nonce || (shell ? placedReceipt(nonce) : receipt(nonce)) !== token || claimID(sessionId,nonce) !== request.data.source.rpcId ||
+      !singleCall(events.slice(0,callIndex + 1),call,boundary) || !validTail({command:nonce,boundary},call,tail)) return null;
   const accepted = nativeAcceptance(events,inherited,request.data.source.rpcId,endIndex + 1);
   if (accepted?.messageId !== request.data.id) return null;
 
@@ -74,6 +77,7 @@ export function handoffEvidence(events, inherited, sessionId, role) {
     }
   }
   return {from:role === 'cloud' ? 'desktop' : 'cloud', to:role, originalRequestSeq:original?.seq ?? null,
+    ...(shell ? {deferredCall:{...eventSpec(call),callSeq:call.seq,sourceExecution:'not-started'}} : {}),
     sourceEndSeq:events[endIndex].seq, acceptanceSeq:accepted.seq, requestId:request.data.source.rpcId,
     gitReleases:releases.slice(-16), omittedGitReleases:Math.max(0,releases.length-16),
     priorCalls:steps.slice(-32), omittedCalls:Math.max(0,steps.length - 32),

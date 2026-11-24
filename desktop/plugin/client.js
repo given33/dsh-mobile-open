@@ -17,6 +17,8 @@ window.__ModuleLoader__.load({
     const API = '/dsh-mobile-link'
 
     const EN = {
+      '本会话终端执行位置':'Run terminal steps for this chat on', '工作区默认':'Workspace default', '本机':'This device',
+      '配对云服务器':'Paired cloud server', '配对电脑':'Paired computer', '重新读取执行位置':'Reload execution setting',
       '下载原文件':'Download original', '请先打开文件所在的会话':'Open the file’s session first', '文件读取不完整':'Incomplete file', '无法下载文件':'Unable to download the file', '文件已更改，请重试':'File changed; try again',
       '手机连接': 'Phone link',
       '用 DSH Mobile 扫码，在手机上实时同步查看和操作这台电脑上的 DSH。': 'Scan with DSH Mobile to mirror and control this computer’s DSH live on your phone.',
@@ -195,6 +197,31 @@ window.__ModuleLoader__.load({
       return now
     }
 
+    function ShellPlacement({sessionId}) {
+      const [choice, setChoice] = React.useState(null)
+      const [busy, setBusy] = React.useState(false)
+      const [error, setError] = React.useState(false)
+      const [reload, setReload] = React.useState(0)
+      React.useEffect(() => {
+        let live = true
+        call('/shell-placement', {sessionId}).then(result => {
+          if (live) { setChoice(result); setError(false) }
+        }).catch(() => { if (live) setError(true) })
+        return () => { live = false }
+      }, [sessionId, reload])
+      if ((!choice && !error) || choice?.available === false) return null
+      return h('div', {className:'dml-section'},
+        choice && h('label', {className:'dml-section-title'}, t('本会话终端执行位置'), ' ',
+          h('select', {value:choice.value, disabled:busy || error, onChange:async event => {
+            const value = event.target.value
+            setBusy(true)
+            try { setChoice(await call('/shell-placement', {sessionId, value})); setError(false) }
+            catch { setError(true) } finally { setBusy(false) }
+          }}, h('option',{value:'default'},t('工作区默认')), h('option',{value:'local'},t('本机')),
+          h('option',{value:'peer'},choice.role === 'desktop' ? t('配对云服务器') : t('配对电脑')))),
+        error && h('button', {className:'dml-remove', onClick:() => setReload(reload + 1)}, t('重新读取执行位置')))
+    }
+
     function Panel({ctx}) {
       const [cloudInput, setCloudInput] = React.useState('')
       const [cloudReply, setCloudReply] = React.useState('')
@@ -293,6 +320,7 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', role: 'switch', className: 'dml-switch', 'aria-checked': !!s.terminal,
               'aria-label': t('允许手机使用终端'), disabled: busy, onClick: () => act('/terminal', { enabled: !s.terminal }) })) : null,
           body,
+          s?.shellPlacement && current?.sessionId ? h(ShellPlacement,{key:current.sessionId,sessionId:current.sessionId}) : null,
           s?.cloudTurns && current?.sessionId ? h('form', {className:'dml-section', onSubmit: async e => {
             e.preventDefault()
             if (busy || !cloudInput.trim()) return

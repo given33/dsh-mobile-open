@@ -144,3 +144,13 @@ Linux 沙箱可能看不到插件安装目录。请将包里的 `tools/computati
 在收件主机上，用安装包内的 `result_delivery.py status <收件箱目录> desktop` 查看明细；冲突文件可用 `result_delivery.py recover <收件箱目录> desktop <请求 ID> <新的恢复目录>` 导出到一个**尚不存在**的目录，核对后自行合并。Windows 用 `py -3.11` 运行脚本，Linux 用 `python3`，云端角色写 `cloud`。收件箱目录为 `DSH_HOME/mobile-task-sync`。
 
 部署时先将 `result_delivery.py` 和 `project_inputs.py` 与云端 `task-transfer.py` 安装在同一只读程序目录，再更新 `task-transfer.py`；Windows 更新随包的独立收件程序。旧端不协商 `results-v1`，仍可同步原有会话，但不会交付新格式产物。
+
+### 0.7.19：决定下一条普通终端命令在哪里启动
+
+在原工作区的会话中打开「手机连接 → 本会话终端执行位置」，可以选「工作区默认」「本机」或「配对云服务器 / 配对电脑」。设置只属于这台主机的这个会话，重开 DSH 后仍有效，不会移走已运行的命令。无需给脚本加接力调用，也不需要预先列出每个命令名。若选择「工作区默认」，管理员仍可在工作区外的 `mobile-task-sync/relay-placement.json` 按原生工作区 ID 和命令全文指定位置，例如 `{"desktop:<工作区 ID>":{"pwsh":["npm run build"]}}`。默认不匹配时仍在本机执行；这不是安全沙箱。
+
+适用范围是原工作区根目录的单个普通前台 `pwsh` / `bash` 调用。后台任务、交互式终端、并行工具调用和带额外执行选项的命令不支持此接力。源端通过正常审批后，在调用原生 shell **之前**封存上下文并结束本轮，不把一次未启动的命令伪装成执行成功。接手端仍通过 `relay_environment` 读取本机平台、工具、文件和原命令；它在原会话按本机权限运行合适的步骤。配置不自动传出整个目录或凭据，输入和结果仍用该工作区的清单。配对端不可达时可以排队；并不表示已开跑。不能在缺少接收确认时回退到源端再执行一遍。
+
+接手端已开始构建时，源 DSH 退出不会杀掉配对端进程。回执只证明**这一条**被拦下的命令没有在源端启动，不证明更早的安装或部署没有生效。如果源端在接力包送达前突然掉电，或任意普通进程已经在掉电机器上运行，单靠此设置不能恢复该进程的内存、套接字或尚未落盘的数据。
+
+可选的 Linux x64 PowerShell 运行时：从 PowerShell 官方 GitHub 发布页获取 `v7.6.10` 的 `powershell-7.6.10-linux-x64.tar.gz`，管理员运行 `sudo sh install-project-pwsh.sh /path/to/powershell-7.6.10-linux-x64.tar.gz`。安装器核对固定 SHA-256，用 `dsh-cloud` 账户测试后只链接到 `/opt/dsh-cloud/bin/pwsh`，不替换系统 Shell。Windows 专用模块仍不能在 Linux 上工作。

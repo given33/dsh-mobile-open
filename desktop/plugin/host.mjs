@@ -13,7 +13,8 @@ import { registerScriptCheckpoint } from '../lib/task-sync/script-checkpoint-too
 import { registerGitReleasePlan } from '../lib/task-sync/git-release-tool.mjs';
 import { registerEnvironment, textOutput } from '../lib/task-sync/relay-environment.mjs';
 import { registerTurnRelay } from '../lib/task-sync/relay-turn.mjs';
-import { registerCloudRun } from '../lib/task-sync/cloud-turn.mjs';
+import { sessionPlacement } from '../lib/task-sync/command-placement.mjs';
+import { registerCloudRun, workspaceRoute } from '../lib/task-sync/cloud-turn.mjs';
 import { registerPortableSteps, registerStepReceipts } from '../lib/task-sync/portable-step.mjs';
 import { taskSync, syncModels } from '../lib/task-sync/host.mjs';
 import { createLinkService } from '../lib/link-service.mjs';
@@ -77,7 +78,7 @@ export function apply(ctx, rawConfig = {}) {
   if (rawConfig.modelRouting !== false) {
     ctx.inject?.(['llm'], child => installModelRouting(child, config.stateDir));
   }
-  let submitCloudTurn;
+  let submitCloudTurn, shellPlacement;
   if (rawConfig.taskSync?.role) {
     const root = join(config.stateDir,'..','mobile-task-sync');
     const role = rawConfig.taskSync.role;
@@ -85,9 +86,18 @@ export function apply(ctx, rawConfig = {}) {
       ctx.inject(['tools'],child => registerScriptCheckpoint(child,root,textOutput));
       ctx.inject(['tools'],child => registerGitReleasePlan(child,textOutput));
       ctx.inject(['tools','workingDirectory','sessions','sessionPersistence'], child => registerEnvironment(child,role,root));
-      ctx.inject(['tools','sessions','sessionPersistence','workspaceRegistry'], child => registerTurnRelay(child,role,root));
+      ctx.inject(['workspaceRegistry'], child => {
+        shellPlacement = async ({sessionId, value}) => {
+          const project = child.workspaceRegistry.list().find(p => p.sessionIds.includes(sessionId));
+          if (!project || child.workspaceRegistry.archivedSessionIds.includes(sessionId) ||
+              (await workspaceRoute(root, role, project)).owner !== role) return {available:false};
+          return {available:true, role, value:await sessionPlacement(root, role, project.id, sessionId, value)};
+        };
+        child.effect(() => () => { shellPlacement = undefined; });
+      });
+      ctx.inject(['tools','sessions','sessionPersistence','workspaceRegistry','workingDirectory'], child => registerTurnRelay(child,role,root));
       ctx.inject(['systemPrompt'], child => child.systemPrompt.section({name:'mobile-link:relay', order:850,
-        text:'This DSH has a paired execution host. Use relay_environment to check the actual OS, native shells and workspace manifests. When the owner wants work to survive this host going offline, proactively call relay_remaining_task alone at a completed step boundary BEFORE starting the next long operation, if the task can run there. On the peer, verify source files, dependencies, credentials and previous side effects; never translate a destructive command blindly or bypass required approvals. For an authorized release to an opted-in Git target, record relay_git_release_plan before any push. Use the helper returned by relay_environment through the native shell: node HELPER status|prepare|finish REMOTE BRANCH OPERATION IDENTITY BASE DESIRED. Keep the original operation; check target status before retries. Committed means the Git branch was updated, not that CI or deployment succeeded. Do not enable target policies yourself. For replay-safe computation in scripts you can adapt, use relay_environment.scriptProgress, bind the recipe to code and inputs, save explicit state and check paired acknowledgement. If native sandbox denies access, use relay_script_checkpoint(quiet or load), pass only explicit data into the approved project script, and save its checkpoint result using the same job and recipe. Never loosen the sandbox. A prestarted standby can resume a quiet checkpoint; quiet is not proof of source death and never authorizes installs, external writes or deployments. When relay_environment provides resultDelivery, stage the exact final bytes of its requested workspace outputs under the indicated directory before finishing. Never synthesize a missing result. A live process is not portable. Do not transfer again merely because of an automatic handoff.',
+        text:'This DSH has a paired execution host. Use relay_environment to check the actual OS, native shells and workspace manifests. When the owner wants work to survive this host going offline, proactively call relay_remaining_task alone at a completed step boundary BEFORE starting the next long operation, if the task can run there. On the peer, verify source files, dependencies, credentials and previous side effects; never translate a destructive command blindly or bypass required approvals. For an authorized release to an opted-in Git target, record relay_git_release_plan before any push. Use the helper returned by relay_environment through the native shell: node HELPER status|prepare|finish REMOTE BRANCH OPERATION IDENTITY BASE DESIRED. Keep the original operation; check target status before retries. Committed means the Git branch was updated, not that CI or deployment succeeded. Do not enable target policies yourself. For replay-safe computation in scripts you can adapt, use relay_environment.scriptProgress, bind the recipe to code and inputs, save explicit state and check paired acknowledgement. If native sandbox denies access, use relay_script_checkpoint(quiet or load), pass only explicit data into the approved project script, and save its checkpoint result using the same job and recipe. Never loosen the sandbox. A prestarted standby can resume a quiet checkpoint; quiet is not proof of source death and never authorizes installs, external writes or deployments. When relay_environment provides resultDelivery, stage the exact final bytes of its requested workspace outputs under the indicated directory before finishing. Never synthesize a missing result. If relay_environment.handoff.deferredCall says sourceExecution is not-started, the source shell body was never invoked for that specific call. Review its original purpose and timeout, choose the native target command and obtain its normal approvals. Never infer that any earlier call did not run. A live process is not portable. Do not transfer again merely because of an automatic handoff.',
         retirement:'The paired-host execution relay is unavailable.'}));
     }
     if (rawConfig.taskSync.portableSteps === true) {
@@ -184,10 +194,18 @@ export function apply(ctx, rawConfig = {}) {
         const beat=setInterval(()=>res.write(': ping\n\n'),20000); beat.unref?.();
         res.once('close',()=>{clearInterval(beat);off();}); return;
       }
-      if (req.method === 'GET' && path === '/status') return send(res, 200, {...await link.status(), cloudTurns:!!submitCloudTurn});
+      if (req.method === 'GET' && path === '/status') return send(res, 200, {...await link.status(), cloudTurns:!!submitCloudTurn, shellPlacement:!!shellPlacement});
       if (req.method !== 'POST') return send(res, 404, { error: 'not-found' });
       // A JSON body is required for every change: a cross-site form cannot send one.
       if (!String(req.headers['content-type'] ?? '').startsWith('application/json')) return send(res, 415, { error: 'json-required' });
+      if (path === '/shell-placement') {
+        if (!shellPlacement || peer?.principal?.kind !== 'owner' || peer.signal.aborted) return send(res,403,{error:'owner-required'});
+        const request = await readJsonBody(req);
+        if (typeof request?.sessionId !== 'string' || (request.value !== undefined && !['peer','local','default'].includes(request.value))) {
+          return send(res,400,{error:'invalid-placement'});
+        }
+        return send(res,200,await shellPlacement(request));
+      }
       if (path === '/cloud-run') {
         if (!submitCloudTurn || peer?.principal?.kind !== 'owner' || peer.signal?.aborted) return send(res,403,{error:'owner-required'});
         const {sessionId, text} = await readJsonBody(req, 96 * 1024);
