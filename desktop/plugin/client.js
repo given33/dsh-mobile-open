@@ -1841,8 +1841,12 @@ window.__ModuleLoader__.load({
         const [taskAlerts, setTaskAlerts] = React.useState(() => readPref('dml.pref.taskAlerts', 'true') !== 'false')
         const [dismissedDraftFor, setDismissedDraftFor] = React.useState('')
         const [showFloating, setShowFloating] = React.useState(true)
+        const [closing, setClosing] = React.useState(false)
         const openSwipeRow = React.useRef(null)
-        const dragStartY = React.useRef(null)
+        const dragRef = React.useRef(null)
+        const snapBackTimerRef = React.useRef(0)
+        const closeTimerRef = React.useRef(0)
+        const sheetRef = React.useRef(null)
         const rightFrameRef = React.useRef(null)
         const hubDialogRef = React.useRef(null)
         const hubBodyRef = React.useRef(null)
@@ -1950,9 +1954,34 @@ window.__ModuleLoader__.load({
           }
         }, [])
 
-        const dismissSheet = React.useCallback(() => setHubState({ open: false }), [])
+        const dismissSheet = React.useCallback(() => {
+          if (closeTimerRef.current) return
+          const reduce = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+          if (reduce || !hubDialogRef.current?.open) {
+            setClosing(false)
+            setHubState({ open: false })
+            return
+          }
+          setClosing(true)
+          closeTimerRef.current = setTimeout(() => {
+            closeTimerRef.current = 0
+            setClosing(false)
+            setHubState({ open: false })
+          }, 200)
+        }, [])
+        React.useEffect(() => () => {
+          clearTimeout(closeTimerRef.current)
+          clearTimeout(snapBackTimerRef.current)
+        }, [])
         React.useLayoutEffect(() => {
           if (!snap.open) return undefined
+          clearTimeout(closeTimerRef.current); closeTimerRef.current = 0
+          setClosing(false)
+          if (sheetRef.current) {
+            sheetRef.current.style.removeProperty('transform')
+            sheetRef.current.style.removeProperty('transition')
+            sheetRef.current.style.removeProperty('opacity')
+          }
           const dialog = hubDialogRef.current
           if (!dialog) return undefined
           if (!dialog.open) dialog.showModal()
@@ -2070,16 +2099,29 @@ window.__ModuleLoader__.load({
           ))
         }
 
+        const svgIcon = (d, size = 15) => h('svg', { width: size, height: size, viewBox: '0 0 20 20', fill: 'none', stroke: 'currentColor', strokeWidth: 1.7, strokeLinecap: 'round', strokeLinejoin: 'round', 'aria-hidden': true }, ...d)
+        const tabIcons = {
+          tasks: svgIcon([h('rect', { x: 3, y: 3, width: 6, height: 6, rx: 1.5 }), h('rect', { x: 11, y: 3, width: 6, height: 6, rx: 1.5 }), h('rect', { x: 3, y: 11, width: 6, height: 6, rx: 1.5 }), h('path', { d: 'M11 14h6M14 11v6' })], 14),
+          snippets: svgIcon([h('path', { d: 'M11 2.5 4.5 11h5l-1 6.5L15.5 9h-5l.5-6.5Z' })], 14),
+          git: svgIcon([h('circle', { cx: 6, cy: 5, r: 2 }), h('circle', { cx: 6, cy: 15, r: 2 }), h('circle', { cx: 14, cy: 10, r: 2 }), h('path', { d: 'M6 7v6M8 6.5c2.2 0 4 1.2 4 3.5' })], 14),
+          tools: svgIcon([h('path', { d: 'M3.5 6h13M3.5 14h13M7 4v4M13 12v4' })], 14),
+        }
+        const activeSessionsList = sessions.filter(s => !s.archived)
+        const archivedSessionsList = sessions.filter(s => !!s.archived)
+        const approvalCount = activeSessionsList.filter(s => s.pendingInteraction).length
+        const runningCount = activeSessionsList.filter(s => s.running).length
+        const taskDot = approvalCount > 0 ? 'approval' : runningCount > 0 ? 'running' : ''
         const tabs = [
           ['tasks', '任务'],
           ['snippets', '指令'],
           ['git', 'Git'],
           ['tools', '工具'],
         ]
+        const activeTabIdx = Math.max(0, tabs.findIndex(([k]) => k === snap.tab))
 
         let tabBody = null
         if (snap.tab === 'tasks') {
-          const candidates = sessions.filter(s => !!s.archived === archivedView)
+          const candidates = archivedView ? archivedSessionsList : activeSessionsList
           const groups = globalThis.__DSH_MOBILE_BRIDGE__?.groupMobileTasks?.(candidates, sessionFilter) || { history: candidates }
           const selectable = Object.values(groups).flat().filter(s => archivedView || !(s.running || s.pendingInteraction))
           const selectedIds = selectable.filter(s => selection?.has(s.id)).map(s => s.id)
@@ -2088,13 +2130,18 @@ window.__ModuleLoader__.load({
             if (!rows.length) return []
             const limit = taskLimits[key] ?? (key === 'history' ? 24 : 12)
             return [h('section', { key, className: 'dml-hub-task-group', 'aria-labelledby': 'dml-hub-tasks-' + key },
-              h('h3', { className: 'dml-hub-task-heading', id: 'dml-hub-tasks-' + key }, label, h('span', null, rows.length)),
+              h('h3', { className: 'dml-hub-task-heading', id: 'dml-hub-tasks-' + key },
+                h('span', { className: 'dml-hub-task-heading-left' },
+                  key !== 'history' && h('span', { className: 'dml-session-status', 'data-state': key, 'aria-hidden': true }),
+                  label),
+                h('span', { className: 'dml-hub-task-count' }, rows.length)),
               h('div', { className: 'dml-hub-list' },
                 ...rows.slice(0, limit).map(s => {
                   const enabled = canWrite && (archivedView || !(s.running || s.pendingInteraction))
                   const date = Number.isFinite(s.updatedAt) && s.updatedAt > 0 ? new Date(s.updatedAt) : null
                   const hasDate = date && Number.isFinite(date.getTime())
                   const swipe = enabled && selection === null
+                  const dotState = s.pendingInteraction ? 'approval' : s.running ? 'running' : s.isCurrent ? 'current' : 'idle'
                   return h('div', {
                     key: s.id, className: 'dml-session-row', 'data-swipe': swipe || undefined,
                     onScroll: swipe ? e => {
@@ -2122,13 +2169,18 @@ window.__ModuleLoader__.load({
                         else openListedSession(s.id)
                       },
                     },
+                    h('span', { className: 'dml-session-status', 'data-state': dotState, 'aria-hidden': true }),
                     h('div', { className: 'dml-hub-item-main' },
                       h('span', { className: 'dml-hub-item-title' }, s.title),
-                      s.workspaceName && h('span', { className: 'dml-hub-tag' }, s.workspaceName),
-                      hasDate && h('time', { className: 'dml-hub-tag', dateTime: date.toISOString() }, '更新于 ' + sessionTime.format(date)),
+                      (s.workspaceName || hasDate) && h('div', { className: 'dml-hub-item-meta-row' },
+                        s.workspaceName && h('span', { className: 'dml-hub-ws-pill' }, s.workspaceName),
+                        hasDate && h('time', { className: 'dml-hub-tag', dateTime: date.toISOString() }, '更新于 ' + sessionTime.format(date)),
+                      ),
                     ),
-                    s.isCurrent && h('span', { className: 'dml-hub-badge', 'data-kind': 'current' }, '当前'),
-                    h('span', { 'aria-hidden': 'true' }, '›')),
+                    h('div', { className: 'dml-hub-item-meta' },
+                      s.isCurrent && h('span', { className: 'dml-hub-badge', 'data-kind': 'current' }, '当前'),
+                      h('span', { className: 'dml-hub-chevron', 'aria-hidden': true }, svgIcon([h('path', { d: 'm8 5 5 5-5 5' })], 14)),
+                    )),
                     canWrite && (selection !== null
                       ? h('label', { className: 'dml-session-check' }, h('input', {
                         type: 'checkbox', 'aria-label': '选择会话：' + s.title,
@@ -2137,9 +2189,14 @@ window.__ModuleLoader__.load({
                       }))
                       : swipe && h('button', {
                         type: 'button', className: 'dml-swipe-action', disabled: archiveBusy,
+                        'data-restore': archivedView ? 'true' : undefined,
                         'aria-label': (archivedView ? '恢复会话：' : '归档会话：') + s.title,
                         onClick: () => changeArchived([s.id]),
-                      }, archivedView ? '恢复' : '归档')),
+                      },
+                      svgIcon(archivedView
+                        ? [h('path', { d: 'M3 10a7 7 0 1 0 2.1-5' }), h('path', { d: 'M3 3.5V8h4.5' })]
+                        : [h('rect', { x: 2.5, y: 3.5, width: 15, height: 3.5, rx: 1 }), h('path', { d: 'M4 7v8.5A1.5 1.5 0 0 0 5.5 17h9a1.5 1.5 0 0 0 1.5-1.5V7M8 10.5h4' })], 15),
+                      h('span', { 'aria-hidden': 'true' }, archivedView ? '恢复' : '归档'))),
                   )
                 })),
               rows.length > limit && h('button', {
@@ -2148,53 +2205,117 @@ window.__ModuleLoader__.load({
               }, '显示更多' + label + '（' + (rows.length - limit) + '）'),
             )]
           })
-          tabBody = h('div', { className: 'dml-hub-section' },
-            h('div', { className: 'dml-hub-actions' },
+          tabBody = h('div', { className: 'dml-hub-section', key: 'tasks-' + archivedView },
+            h('div', { className: 'dml-hub-quick-grid' },
               canWrite && h('button', {
-                type: 'button', className: 'dml-hub-pill-btn',
+                type: 'button', className: 'dml-hub-quick-btn', 'data-tone': 'blue',
                 onClick: () => { bridge?.newSession?.(); setHubState({ open: false }) },
-              }, '+ 新会话'),
+              }, h('span', { className: 'dml-hub-quick-ico', 'aria-hidden': true }, svgIcon([h('path', { d: 'M10 4v12M4 10h12' })], 16)), h('span', null, '新会话')),
               h('button', {
-                type: 'button', className: 'dml-hub-pill-btn',
+                type: 'button', className: 'dml-hub-quick-btn', 'data-tone': 'indigo',
                 onClick: () => { setHubState({ open: false }); bridge?.toggleRightPanel?.() },
-              }, '文件栏'),
+              }, h('span', { className: 'dml-hub-quick-ico', 'aria-hidden': true }, svgIcon([h('rect', { x: 3, y: 3.5, width: 14, height: 13, rx: 2 }), h('path', { d: 'M12 3.5v13' })], 16)), h('span', null, '文件栏')),
               h('button', {
-                type: 'button', className: 'dml-hub-pill-btn',
+                type: 'button', className: 'dml-hub-quick-btn', 'data-tone': 'green',
                 onClick: () => { globalThis.__DSH_MOBILE_BRIDGE__?.wakeCheck?.(); setHubState({ open: false }); globalThis.__DSH_MOBILE_BRIDGE__?.showToast?.('已触发重连校验') },
-              }, '↻ 重连'),
+              }, h('span', { className: 'dml-hub-quick-ico', 'aria-hidden': true }, svgIcon([h('path', { d: 'M16.5 10a6.5 6.5 0 1 1-1.9-4.6' }), h('path', { d: 'M16.5 3.5v3.5h-3.5' })], 16)), h('span', null, '重连')),
               h('button', {
-                type: 'button', className: 'dml-hub-pill-btn',
+                type: 'button', className: 'dml-hub-quick-btn', 'data-tone': 'slate',
                 onClick: () => { setHubState({ open: false }); globalThis.__DSH_MOBILE_BRIDGE__?.scrollToTop?.() },
-              }, '↑ 顶部'),
+              }, h('span', { className: 'dml-hub-quick-ico', 'aria-hidden': true }, svgIcon([h('path', { d: 'M10 15.5V4.5M5 9.5l5-5 5 5' })], 16)), h('span', null, '回顶部')),
             ),
-            h('input', {
-              type: 'search',
-              className: 'dml-hub-input',
-              value: sessionFilter,
-              'aria-label': '搜索会话标题或工作区',
-              placeholder: '搜索会话标题或工作区…',
-              onChange: (e) => { setSessionFilter(e.target.value); setTaskLimits({}); setSelection(previous => previous === null ? null : new Set()) },
-            }),
-            h('div', { className: 'dml-hub-actions', 'aria-label': '会话管理操作' },
-              h('button', { type: 'button', className: 'dml-hub-pill-btn', disabled: archiveBusy,
-                onClick: () => { taskScroll.current = 0; setArchivedView(!archivedView); setSelection(null); setArchiveNotice(''); setTaskLimits({}) },
-              }, archivedView ? '返回未归档' : '查看已归档'),
-              canWrite && h('button', { type: 'button', className: 'dml-hub-pill-btn', disabled: archiveBusy,
+            h('div', { className: 'dml-hub-search-wrap' },
+              h('span', { className: 'dml-hub-search-ico', 'aria-hidden': true }, svgIcon([h('circle', { cx: 9, cy: 9, r: 5.5 }), h('path', { d: 'm13.5 13.5 3.5 3.5' })], 15)),
+              h('input', {
+                type: 'search',
+                className: 'dml-hub-input',
+                value: sessionFilter,
+                'aria-label': '搜索会话标题或工作区',
+                placeholder: '搜索会话标题或工作区…',
+                onChange: (e) => { setSessionFilter(e.target.value); setTaskLimits({}); setSelection(previous => previous === null ? null : new Set()) },
+              }),
+              sessionFilter && h('button', {
+                type: 'button',
+                className: 'dml-hub-search-clear',
+                'aria-label': '清空搜索',
+                onClick: () => { setSessionFilter(''); setTaskLimits({}) },
+              }, '×'),
+            ),
+            h('div', { className: 'dml-hub-archive-bar', 'aria-label': '会话管理操作' },
+              h('div', { className: 'dml-hub-seg-switch', style: { '--dml-seg-idx': archivedView ? 1 : 0 } },
+                h('div', { className: 'dml-hub-seg-slider', 'aria-hidden': true }),
+                h('button', {
+                  type: 'button', className: 'dml-hub-seg-tab',
+                  'data-active': !archivedView ? 'true' : undefined,
+                  'aria-label': archivedView ? '返回未归档' : '活跃会话',
+                  disabled: archiveBusy,
+                  onClick: () => { if (archivedView) { taskScroll.current = 0; setArchivedView(false); setSelection(null); setArchiveNotice(''); setTaskLimits({}) } },
+                }, h('span', null, '活跃'), h('span', { className: 'dml-hub-seg-count', 'aria-hidden': true }, activeSessionsList.length)),
+                h('button', {
+                  type: 'button', className: 'dml-hub-seg-tab',
+                  'data-active': archivedView ? 'true' : undefined,
+                  'aria-label': '查看已归档',
+                  disabled: archiveBusy,
+                  onClick: () => { if (!archivedView) { taskScroll.current = 0; setArchivedView(true); setSelection(null); setArchiveNotice(''); setTaskLimits({}) } },
+                }, h('span', null, '已归档'), h('span', { className: 'dml-hub-seg-count', 'aria-hidden': true }, archivedSessionsList.length)),
+              ),
+              canWrite && h('button', {
+                type: 'button', className: 'dml-hub-multi-btn',
+                'data-active': selection !== null ? 'true' : undefined,
+                disabled: archiveBusy,
                 onClick: () => { setSelection(selection === null ? new Set() : null); setArchiveNotice('') },
-              }, selection !== null ? '取消多选' : '多选'),
-              canWrite && selection !== null && h('button', { type: 'button', className: 'dml-hub-pill-btn', disabled: archiveBusy || !selectable.length,
-                onClick: () => setSelection(new Set(selectedIds.length === selectable.length ? [] : selectable.map(s => s.id))),
-              }, selectable.length > 0 && selectedIds.length === selectable.length ? '取消全选' : '全选筛选结果'),
-              canWrite && selection !== null && h('button', { type: 'button', className: 'dml-hub-pill-btn', disabled: archiveBusy || !selectedIds.length,
-                onClick: () => changeArchived(selectedIds),
-              }, `${archivedView ? '恢复' : '归档'}所选 (${selectedIds.length})`),
+              }, svgIcon([h('path', { d: 'M4 6h12M4 10h8M4 14h6M13.5 14.5l1.5 1.5 3-3' })], 14), selection !== null ? '取消多选' : '多选'),
             ),
-            archiveNotice && h('div', { className: 'dml-hub-hint', role: 'status' }, archiveNotice),
-            ...(taskSections.length ? taskSections : [h('div', { key: 'empty', className: 'dml-hub-empty' }, '暂无匹配的会话')]),
+            archiveNotice && h('div', { className: 'dml-hub-hint dml-hub-notice', role: 'status' },
+              svgIcon([h('circle', { cx: 10, cy: 10, r: 7 }), h('path', { d: 'm7 10 2 2 4-4' })], 14),
+              archiveNotice),
+            ...(taskSections.length ? taskSections : [h('div', { key: 'empty', className: 'dml-hub-empty' }, archivedView ? '暂无已归档会话' : '暂无匹配的会话')]),
+            canWrite && selection !== null && h('div', { className: 'dml-hub-batch-bar' },
+              h('span', { className: 'dml-hub-hint' }, `已选 ${selectedIds.length} 项`),
+              h('div', { className: 'dml-hub-batch-actions' },
+                h('button', {
+                  type: 'button', className: 'dml-hub-pill-btn', disabled: archiveBusy || !selectable.length,
+                  onClick: () => setSelection(new Set(selectedIds.length === selectable.length ? [] : selectable.map(s => s.id))),
+                }, selectable.length > 0 && selectedIds.length === selectable.length ? '取消全选' : '全选筛选结果'),
+                h('button', {
+                  type: 'button', className: 'dml-hub-primary-btn', disabled: archiveBusy || !selectedIds.length,
+                  onClick: () => changeArchived(selectedIds),
+                }, `${archivedView ? '恢复' : '归档'}所选 (${selectedIds.length})`),
+              ),
+            ),
           )
         } else if (snap.tab === 'snippets') {
-          const allSnippets = [...snippets, ...BUILTIN_SNIPPETS]
-          tabBody = h('div', { className: 'dml-hub-section' },
+          const renderSnippetRow = (item) => h('div', { key: item.id, className: 'dml-hub-snippet-row' },
+            h('button', {
+              type: 'button',
+              className: 'dml-hub-snippet-btn',
+              onClick: async () => {
+                if (canWrite && bridge?.insertDraft?.(item.text)) {
+                  setHubState({ open: false })
+                  globalThis.__DSH_MOBILE_BRIDGE__?.showToast?.('已插入：「' + item.title + '」')
+                } else if (await copyMobileText(item.text)) {
+                  setHubState({ open: false })
+                  globalThis.__DSH_MOBILE_BRIDGE__?.showToast?.('已复制：「' + item.title + '」')
+                }
+              },
+            },
+            h('span', { className: 'dml-hub-snippet-ico', 'data-custom': item.custom ? 'true' : undefined, 'aria-hidden': true },
+              svgIcon([h('path', { d: 'M11 2.5 4.5 11h5l-1 6.5L15.5 9h-5l.5-6.5Z' })], 14)),
+            h('div', { className: 'dml-hub-item-main' },
+              h('div', { className: 'dml-hub-item-title' }, item.title),
+              h('div', { className: 'dml-hub-item-sub' }, item.text))),
+            item.custom && h('button', {
+              type: 'button',
+              className: 'dml-hub-del',
+              'aria-label': '删除模板',
+              onClick: () => {
+                const next = snippets.filter(s => s.id !== item.id)
+                setSnippets(next)
+                writeCustomSnippets(next)
+              },
+            }, svgIcon([h('path', { d: 'M4.5 6h11M8 6V4.5h4V6M6.5 6v10h7V6' })], 15)),
+          )
+          tabBody = h('div', { className: 'dml-hub-section', key: 'snippets' },
             h('div', { className: 'dml-hub-row-head' },
               h('span', { className: 'dml-hub-hint' }, canWrite ? '轻点直接插入对话输入框' : '只读模式：轻点复制到剪贴板'),
               h('button', {
@@ -2222,41 +2343,43 @@ window.__ModuleLoader__.load({
                 },
               }, '保存模板'),
             ),
-            h('div', { className: 'dml-hub-list' },
-              ...allSnippets.map(item => h('div', { key: item.id, className: 'dml-hub-snippet-row' },
-                h('button', {
-                  type: 'button',
-                  className: 'dml-hub-snippet-btn',
-                  onClick: async () => {
-                    if (canWrite && bridge?.insertDraft?.(item.text)) {
-                      setHubState({ open: false })
-                      globalThis.__DSH_MOBILE_BRIDGE__?.showToast?.('已插入：「' + item.title + '」')
-                    } else if (await copyMobileText(item.text)) {
-                      setHubState({ open: false })
-                      globalThis.__DSH_MOBILE_BRIDGE__?.showToast?.('已复制：「' + item.title + '」')
-                    }
-                  },
-                },
-                h('div', { className: 'dml-hub-item-title' }, item.title),
-                h('div', { className: 'dml-hub-item-sub' }, item.text)),
-                item.custom && h('button', {
-                  type: 'button',
-                  className: 'dml-hub-del',
-                  'aria-label': '删除模板',
-                  onClick: () => {
-                    const next = snippets.filter(s => s.id !== item.id)
-                    setSnippets(next)
-                    writeCustomSnippets(next)
-                  },
-                }, '删'),
-              )),
+            snippets.length > 0 && h('div', { className: 'dml-hub-task-group' },
+              h('h3', { className: 'dml-hub-task-heading' }, h('span', null, '我的模板'), h('span', { className: 'dml-hub-task-count' }, snippets.length)),
+              h('div', { className: 'dml-hub-list' }, ...snippets.map(renderSnippetRow)),
+            ),
+            h('div', { className: 'dml-hub-task-group' },
+              h('h3', { className: 'dml-hub-task-heading' }, h('span', null, '内置快捷指令'), h('span', { className: 'dml-hub-task-count' }, BUILTIN_SNIPPETS.length)),
+              h('div', { className: 'dml-hub-list' }, ...BUILTIN_SNIPPETS.map(renderSnippetRow)),
             ),
           )
         } else if (snap.tab === 'git') {
-          tabBody = h('div', { className: 'dml-hub-section' },
-            h('div', { className: 'dml-hub-row-head' },
-              h('span', { className: 'dml-hub-hint' }, curSession?.workspaceName ? '工作区：' + curSession.workspaceName : '当前会话工作区'),
-              h('button', { type: 'button', className: 'dml-hub-pill-btn', onClick: loadGit }, '刷新'),
+          const gitCounts = gitState.files.reduce((acc, f) => {
+            const c = (f.worktree && f.worktree !== ' ' ? f.worktree : f.index) || 'M'
+            if (c === 'A' || c === '?') acc.add++
+            else if (c === 'D') acc.del++
+            else acc.mod++
+            return acc
+          }, { add: 0, mod: 0, del: 0 })
+          tabBody = h('div', { className: 'dml-hub-section', key: 'git' },
+            h('div', { className: 'dml-hub-card' },
+              h('div', { className: 'dml-hub-row-head' },
+                h('div', { className: 'dml-hub-item-main' },
+                  h('span', { className: 'dml-hub-card-title' }, curSession?.workspaceName ? curSession.workspaceName : '当前会话工作区'),
+                  !gitState.loading && !gitState.error && h('div', { className: 'dml-git-pills', style: { marginTop: '4px' } },
+                    gitState.files.length === 0
+                      ? h('span', { className: 'dml-hub-hint' }, '工作区干净')
+                      : [
+                          gitCounts.mod > 0 && h('span', { key: 'm', className: 'dml-hub-badge' }, `修改 ${gitCounts.mod}`),
+                          gitCounts.add > 0 && h('span', { key: 'a', className: 'dml-hub-badge', 'data-kind': 'running' }, `新增 ${gitCounts.add}`),
+                          gitCounts.del > 0 && h('span', { key: 'd', className: 'dml-hub-badge', 'data-kind': 'approval' }, `删除 ${gitCounts.del}`),
+                        ],
+                  ),
+                ),
+                h('button', { type: 'button', className: 'dml-hub-pill-btn', onClick: loadGit },
+                  h('span', { className: gitState.loading ? 'dml-spin' : undefined, style: { display: 'inline-flex' }, 'aria-hidden': true },
+                    svgIcon([h('path', { d: 'M16.5 10a6.5 6.5 0 1 1-1.9-4.6' }), h('path', { d: 'M16.5 3.5v3.5h-3.5' })], 13)),
+                  '刷新'),
+              ),
             ),
             gitState.loading && h('div', { className: 'dml-hub-empty' }, '正在读取 Git 变更…'),
             gitState.error && h('div', { className: 'dml-hub-empty' }, gitState.error),
@@ -2266,6 +2389,9 @@ window.__ModuleLoader__.load({
                 : h('div', { className: 'dml-hub-list' },
                     ...gitState.files.map((f, idx) => {
                       const code = (f.worktree && f.worktree !== ' ' ? f.worktree : f.index) || 'M'
+                      const slash = f.path.lastIndexOf('/')
+                      const name = slash >= 0 ? f.path.slice(slash + 1) : f.path
+                      const dir = slash >= 0 ? f.path.slice(0, slash) : ''
                       return h('button', {
                         key: f.path + '-' + idx,
                         type: 'button',
@@ -2273,7 +2399,10 @@ window.__ModuleLoader__.load({
                         onClick: () => loadDiff(f),
                       },
                       h('span', { className: 'dml-git-code', 'data-code': code }, code),
-                      h('span', { className: 'dml-hub-item-title dml-git-path' }, f.path))
+                      h('div', { className: 'dml-git-file-wrap' },
+                        h('span', { className: 'dml-git-name' }, name),
+                        dir && h('span', { className: 'dml-git-dir' }, dir)),
+                      h('span', { className: 'dml-hub-chevron', 'aria-hidden': true }, svgIcon([h('path', { d: 'm8 5 5 5-5 5' })], 14)))
                     }),
                   )
             ),
@@ -2319,10 +2448,49 @@ window.__ModuleLoader__.load({
           const minPing = pingStats.samples.length ? Math.min(...pingStats.samples) : null
           const maxPing = pingStats.samples.length ? Math.max(...pingStats.samples) : null
           const avgPing = pingStats.samples.length ? Math.round(pingStats.samples.reduce((a, b) => a + b, 0) / pingStats.samples.length) : null
+          const pingTone = avgPing === null ? undefined : avgPing < 60 ? 'good' : avgPing < 160 ? 'warn' : 'bad'
           const hd = hostInfo.data
-          const memUsed = hd ? formatBytes((hd.memTotalBytes || 0) - (hd.memFreeBytes || 0)) : ''
-          const memTotal = hd ? formatBytes(hd.memTotalBytes || 0) : ''
-          tabBody = h('div', { className: 'dml-hub-section' },
+          const memTotalBytes = hd?.memTotalBytes || 0
+          const memUsedBytes = Math.max(0, memTotalBytes - (hd?.memFreeBytes || 0))
+          const memPct = memTotalBytes > 0 ? Math.min(100, Math.round((memUsedBytes / memTotalBytes) * 100)) : 0
+          const memUsed = hd ? formatBytes(memUsedBytes) : ''
+          const memTotal = hd ? formatBytes(memTotalBytes) : ''
+          tabBody = h('div', { className: 'dml-hub-section', key: 'tools' },
+            h('div', { className: 'dml-hub-card' },
+              h('div', { className: 'dml-hub-row-head' },
+                h('span', { className: 'dml-hub-card-title' }, '连接测速与电脑状态'),
+                h('button', {
+                  type: 'button', className: 'dml-hub-pill-btn',
+                  disabled: pingStats.running,
+                  onClick: runPingBenchmark,
+                }, pingStats.running ? '测速中…' : '立即测速'),
+              ),
+              (avgPing !== null || hd) && h('div', { className: 'dml-hub-metrics-grid' },
+                h('div', { className: 'dml-metric-tile' },
+                  h('span', { className: 'dml-metric-label' }, '连接延迟'),
+                  h('span', { className: 'dml-metric-val', 'data-tone': pingTone },
+                    avgPing !== null ? `${avgPing} ms (${minPing}–${maxPing})` : '点击右上测速')),
+                h('div', { className: 'dml-metric-tile' },
+                  h('span', { className: 'dml-metric-label' }, '实时通道'),
+                  h('span', { className: 'dml-metric-val', 'data-tone': pingStats.wsAlive === false ? 'warn' : 'good' },
+                    pingStats.wsAlive === null ? '已配对就绪' : (pingStats.wsAlive ? 'WebSocket 在线' : '重连中'))),
+                hd && h('div', { className: 'dml-metric-tile' },
+                  h('span', { className: 'dml-metric-label' }, '处理器 · 负载'),
+                  h('span', { className: 'dml-metric-val' }, `${hd.cpuCount} 核 · ${(hd.loadAvg || [])[0] ?? '-'}`)),
+                hd && h('div', { className: 'dml-metric-tile' },
+                  h('span', { className: 'dml-metric-label' }, '系统运行 · 活跃会话'),
+                  h('span', { className: 'dml-metric-val' }, `${formatDuration(hd.uptimeSec)} · ${hd.activeSessions ?? '-'}`)),
+              ),
+              hd && h('div', { className: 'dml-mem-wrap' },
+                h('div', { className: 'dml-mem-head' },
+                  h('span', null, `${hd.hostname} (${hd.platform}/${hd.arch})`),
+                  h('span', null, `内存 ${memUsed} / ${memTotal} (${memPct}%)`)),
+                h('div', { className: 'dml-mem-bar' }, h('div', { className: 'dml-mem-fill', style: { width: memPct + '%' } })),
+              ),
+              pingStats.error && h('div', { className: 'dml-hub-empty' }, pingStats.error),
+              hostInfo.loading && !hd && h('div', { className: 'dml-hub-empty' }, '正在读取电脑状态…'),
+              hostInfo.error && h('div', { className: 'dml-hub-empty' }, hostInfo.error),
+            ),
             h('div', { className: 'dml-hub-card' },
               h('div', { className: 'dml-hub-card-title' }, '阅读与显示偏好'),
               h('div', { className: 'dml-hub-pref-row' },
@@ -2338,7 +2506,7 @@ window.__ModuleLoader__.load({
               h('label', { className: 'dml-hub-toggle' },
                 h('span', null, '代码块自动换行（减少左右滑动）'),
                 h('input', {
-                  type: 'checkbox',
+                  type: 'checkbox', className: 'dml-ios-switch',
                   checked: codeWrap,
                   onChange: (e) => { setCodeWrap(e.target.checked); writePref('dml.pref.codeWrap', e.target.checked ? 'true' : 'false') },
                 }),
@@ -2346,14 +2514,14 @@ window.__ModuleLoader__.load({
               h('label', { className: 'dml-hub-toggle' },
                 h('span', null, '显示电脑所在地天气（Open-Meteo）'),
                 h('input', {
-                  type: 'checkbox', checked: desktopWeather,
+                  type: 'checkbox', className: 'dml-ios-switch', checked: desktopWeather,
                   onChange: (e) => { setDesktopWeather(e.target.checked); writePref('dml.weather.desktop.v1', e.target.checked) },
                 }),
               ),
               h('label', { className: 'dml-hub-toggle' },
                 h('span', null, 'AMOLED 纯黑模式（深色主题 OLED 省电）'),
                 h('input', {
-                  type: 'checkbox',
+                  type: 'checkbox', className: 'dml-ios-switch',
                   'data-dml-amoled-toggle': 'true',
                   checked: amoledMode,
                   onChange: (e) => { setAmoledMode(e.target.checked); writePref('dml.pref.amoled', e.target.checked ? 'true' : 'false') },
@@ -2362,33 +2530,10 @@ window.__ModuleLoader__.load({
               h('label', { className: 'dml-hub-toggle' },
                 h('span', null, '任务完成 / 待审批震动提醒'),
                 h('input', {
-                  type: 'checkbox',
+                  type: 'checkbox', className: 'dml-ios-switch',
                   checked: taskAlerts,
                   onChange: (e) => { setTaskAlerts(e.target.checked); writePref('dml.pref.taskAlerts', e.target.checked ? 'true' : 'false') },
                 }),
-              ),
-            ),
-            h('div', { className: 'dml-hub-card' },
-              h('div', { className: 'dml-hub-row-head' },
-                h('span', { className: 'dml-hub-card-title' }, '连接测速与电脑状态'),
-                h('button', {
-                  type: 'button', className: 'dml-hub-pill-btn',
-                  disabled: pingStats.running,
-                  onClick: runPingBenchmark,
-                }, pingStats.running ? '测速中…' : '立即测速'),
-              ),
-              avgPing !== null && h('div', { className: 'dml-hub-stat-grid' },
-                h('div', null, '平均延迟：', avgPing, ' ms（', minPing, '–', maxPing, ' ms）'),
-                h('div', null, '实时通道：', pingStats.wsAlive ? '在线 (WebSocket)' : '重连中'),
-              ),
-              pingStats.error && h('div', { className: 'dml-hub-empty' }, pingStats.error),
-              hostInfo.loading && !hd && h('div', { className: 'dml-hub-empty' }, '正在读取电脑状态…'),
-              hostInfo.error && h('div', { className: 'dml-hub-empty' }, hostInfo.error),
-              hd && h('div', { className: 'dml-hub-stat-grid' },
-                h('div', null, '电脑：', hd.hostname, '（', hd.platform, '/', hd.arch, '）'),
-                h('div', null, 'CPU：', hd.cpuCount, ' 核 · 负载 ', (hd.loadAvg || []).join(' / ')),
-                h('div', null, '内存：', memUsed, ' / ', memTotal),
-                h('div', null, '运行：系统 ', formatDuration(hd.uptimeSec), ' · 活跃会话 ', hd.activeSessions ?? '-'),
               ),
             ),
           )
@@ -2397,41 +2542,96 @@ window.__ModuleLoader__.load({
         return h('dialog', {
           ref: hubDialogRef,
           className: 'dml-hub-backdrop',
+          'data-closing': closing ? 'true' : undefined,
           'aria-label': '移动端工具箱',
           onCancel: (e) => { e.preventDefault(); dismissSheet() },
           onClick: (e) => { if (e.target === e.currentTarget) dismissSheet() },
         },
-        h('section', { className: 'dml-hub-sheet' },
+        h('section', { ref: sheetRef, className: 'dml-hub-sheet' },
           h('div', {
             className: 'dml-hub-head',
-            onTouchStart: (e) => { if (e.touches?.length === 1) dragStartY.current = e.touches[0].clientY },
+            onTouchStart: (e) => {
+              if (e.touches?.length !== 1 || closing) return
+              const y = e.touches[0].clientY
+              dragRef.current = { y, lastY: y, lastT: Date.now() }
+              clearTimeout(snapBackTimerRef.current)
+              if (sheetRef.current) sheetRef.current.style.transition = 'none'
+            },
+            onTouchMove: (e) => {
+              const d = dragRef.current
+              if (!d || e.touches?.length !== 1 || !sheetRef.current) return
+              const y = e.touches[0].clientY
+              const dy = y - d.y
+              d.lastY = y; d.lastT = Date.now()
+              const offset = dy >= 0 ? dy : Math.max(-18, dy * 0.14)
+              sheetRef.current.style.transform = `translate3d(0, ${Math.round(offset)}px, 0)`
+            },
             onTouchEnd: (e) => {
-              const startY = dragStartY.current
-              dragStartY.current = null
+              const d = dragRef.current
+              dragRef.current = null
               const endY = e.changedTouches?.[0]?.clientY
-              if (startY != null && endY != null && endY - startY > 55) dismissSheet()
+              if (d && endY != null) {
+                const dy = endY - d.y
+                const velocity = (endY - d.lastY) / Math.max(16, Date.now() - d.lastT)
+                if (dy > 80 || (dy > 24 && velocity > 0.45)) {
+                  if (sheetRef.current) {
+                    sheetRef.current.style.transition = 'transform 200ms cubic-bezier(0.4, 0, 1, 1), opacity 200ms ease'
+                    sheetRef.current.style.transform = 'translate3d(0, 100%, 0)'
+                    sheetRef.current.style.opacity = '0'
+                  }
+                  dismissSheet()
+                  return
+                }
+              }
+              if (sheetRef.current) {
+                sheetRef.current.style.transition = 'transform 260ms cubic-bezier(0.22, 1.12, 0.36, 1)'
+                sheetRef.current.style.transform = 'translate3d(0, 0, 0)'
+                snapBackTimerRef.current = setTimeout(() => {
+                  sheetRef.current?.style.removeProperty('transform')
+                  sheetRef.current?.style.removeProperty('transition')
+                }, 270)
+              }
             },
           },
           h('div', { className: 'dml-hub-handle' }),
-          h('div', { className: 'dml-hub-tabs', role: 'tablist' },
+          h('div', { className: 'dml-hub-titlebar' },
+            h('div', { className: 'dml-hub-title-left' },
+              h('span', { className: 'dml-hub-title' }, '移动端工具箱'),
+              approvalCount > 0
+                ? h('span', { className: 'dml-hub-status-pill', 'data-kind': 'approval' }, h('span', { className: 'dml-hub-status-dot' }), `${approvalCount} 待确认`)
+                : runningCount > 0
+                  ? h('span', { className: 'dml-hub-status-pill', 'data-kind': 'running' }, h('span', { className: 'dml-hub-status-dot' }), `${runningCount} 运行中`)
+                  : curSession?.workspaceName
+                    ? h('span', { className: 'dml-hub-status-pill' }, curSession.workspaceName)
+                    : null,
+            ),
+            h('button', {
+              type: 'button',
+              className: 'dml-hub-close',
+              'aria-label': '关闭工具箱',
+              onClick: dismissSheet,
+            }, svgIcon([h('path', { d: 'M5.5 5.5l9 9M14.5 5.5l-9 9' })], 14)),
+          ),
+          h('div', { className: 'dml-hub-tabs', role: 'tablist', style: { '--dml-tab-idx': activeTabIdx } },
+            h('div', { className: 'dml-hub-tab-slider', 'aria-hidden': true }),
             ...tabs.map(([key, label]) => h('button', {
               key,
               type: 'button',
               role: 'tab',
               className: 'dml-hub-tab',
+              'aria-label': label,
               'aria-selected': snap.tab === key ? 'true' : 'false',
               'data-active': snap.tab === key ? 'true' : undefined,
               onClick: () => {
                 if (snap.tab === 'tasks') taskScroll.current = hubBodyRef.current?.scrollTop ?? 0
                 setHubState({ tab: key })
               },
-            }, label)),
-            h('button', {
-              type: 'button',
-              className: 'dml-hub-close',
-              'aria-label': '关闭工具箱',
-              onClick: dismissSheet,
-            }, '×'),
+            },
+            h('span', { className: 'dml-hub-tab-ico', 'aria-hidden': true }, tabIcons[key]),
+            h('span', null, label),
+            key === 'tasks' && taskDot ? h('span', { className: 'dml-hub-tab-dot', 'data-kind': taskDot, 'aria-hidden': true }) : null,
+            key === 'git' && gitState.files.length > 0 ? h('span', { className: 'dml-hub-tab-count', 'aria-hidden': true }, gitState.files.length) : null,
+            )),
           )),
           h('div', { className: 'dml-hub-body', ref: hubBodyRef }, tabBody),
         ))

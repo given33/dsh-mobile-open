@@ -8,6 +8,8 @@ struct PrimaryButtonStyle: ButtonStyle {
             .foregroundStyle(Theme.primaryForeground)
             .background(Theme.primaryFill.opacity(configuration.isPressed ? 0.8 : 1),
                         in: RoundedRectangle(cornerRadius: 12))
+            .scaleEffect(configuration.isPressed ? 0.975 : 1)
+            .animation(.spring(response: 0.22, dampingFraction: 0.78), value: configuration.isPressed)
     }
 }
 
@@ -18,6 +20,8 @@ struct SecondaryButtonStyle: ButtonStyle {
             .foregroundStyle(Theme.labelPrimary)
             .background(Theme.grouped.opacity(configuration.isPressed ? 0.7 : 1),
                         in: RoundedRectangle(cornerRadius: 12))
+            .scaleEffect(configuration.isPressed ? 0.975 : 1)
+            .animation(.spring(response: 0.22, dampingFraction: 0.78), value: configuration.isPressed)
     }
 }
 

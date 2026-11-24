@@ -38,6 +38,7 @@ private struct DeviceButtonBounds: PreferenceKey {
 
 struct RootView: View {
     @EnvironmentObject private var model: AppModel
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var showForget = false
     @State private var showConnectionInfo = false
     @State private var showDictation = false
@@ -99,8 +100,10 @@ struct RootView: View {
                             .overlay(alignment: .bottom) {
                                 if showSnapshotCover && !model.documentRecoveryNeeded && model.problem != nil && model.recoveryFailures >= 2 {
                                     snapshotReconnectBanner
+                                        .transition(.move(edge: .bottom).combined(with: .opacity))
                                 }
                             }
+                            .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.86), value: showSnapshotCover)
                             .opacity(showSnapshotCover ? 1 : 0)
                             .allowsHitTesting(showSnapshotCover)
                         }
@@ -108,8 +111,10 @@ struct RootView: View {
                     .overlay(alignment: .bottom) {
                         if model.documentRecoveryNeeded && model.browser != nil && !model.revoked {
                             documentRecoveryBanner
+                                .transition(.move(edge: .bottom).combined(with: .opacity))
                         }
                     }
+                    .animation(reduceMotion ? nil : .spring(response: 0.3, dampingFraction: 0.86), value: model.documentRecoveryNeeded)
                     .ignoresSafeArea(.all, edges: .bottom)
                 }
                 .background(surfaceBackground.ignoresSafeArea())
@@ -117,46 +122,67 @@ struct RootView: View {
             }
         }
         .overlayPreferenceValue(DeviceButtonBounds.self) { anchor in
-            if model.showDeviceMenu, let anchor {
-                GeometryReader { proxy in
-                    let trigger = proxy[anchor]
-                    let width = max(0, min(304, proxy.size.width - 16))
-                    let left = max(8, min(trigger.minX, proxy.size.width - width - 8))
-                    let top = trigger.maxY + 6
-                    ZStack(alignment: .topLeading) {
-                        Color.clear.contentShape(Rectangle()).ignoresSafeArea()
-                            .onTapGesture { model.showDeviceMenu = false }
-                            .accessibilityHidden(true)
-                        ViewThatFits(in: .vertical) {
-                            deviceOptions
-                            ScrollView { deviceOptions }
+            ZStack(alignment: .topLeading) {
+                if model.showDeviceMenu, let anchor {
+                    GeometryReader { proxy in
+                        let trigger = proxy[anchor]
+                        let width = max(0, min(320, proxy.size.width - 16))
+                        let left = max(8, min(trigger.minX, proxy.size.width - width - 8))
+                        let top = trigger.maxY + 6
+                        ZStack(alignment: .topLeading) {
+                            Color.black.opacity(0.08).contentShape(Rectangle()).ignoresSafeArea()
+                                .onTapGesture { dismissDeviceMenu() }
+                                .accessibilityHidden(true)
+                                .transition(.opacity)
+                            ViewThatFits(in: .vertical) {
+                                deviceOptions
+                                ScrollView { deviceOptions }
+                            }
+                            .frame(width: width)
+                            .background(Theme.sheet, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                            .overlay { RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.borderL2, lineWidth: 0.5) }
+                            .shadow(color: .black.opacity(0.14), radius: 14, y: 6)
+                            .shadow(color: .black.opacity(0.05), radius: 3, y: 1)
+                            .frame(maxHeight: max(0, proxy.size.height - top - 8), alignment: .top)
+                            .offset(x: left, y: top)
+                            .accessibilityAction(.escape) { dismissDeviceMenu() }
+                            .transition(
+                                .asymmetric(
+                                    insertion: .scale(scale: 0.92, anchor: .topLeading).combined(with: .opacity),
+                                    removal: .scale(scale: 0.95, anchor: .topLeading).combined(with: .opacity)
+                                )
+                            )
                         }
-                        .frame(width: width)
-                        .background(Theme.sheet, in: RoundedRectangle(cornerRadius: 14))
-                        .overlay { RoundedRectangle(cornerRadius: 14).strokeBorder(Theme.borderL2, lineWidth: 0.5) }
-                        .shadow(color: .black.opacity(0.15), radius: 9, y: 3)
-                        .frame(maxHeight: max(0, proxy.size.height - top - 8), alignment: .top)
-                        .offset(x: left, y: top)
-                        .accessibilityAction(.escape) { model.showDeviceMenu = false }
                     }
                 }
             }
+            .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.84), value: model.showDeviceMenu)
         }
         .overlay {
-            if model.offerCloud {
-                ZStack {
+            ZStack {
+                if model.offerCloud {
                     Color.black.opacity(0.36).ignoresSafeArea()
+                        .transition(.opacity)
                     VStack(alignment: .leading, spacing: 14) {
                         Text("电脑暂时连不上").font(.headline)
                         Text("继续重连，或打开云端工作区。不会重新执行电脑上的指令。")
                             .font(.subheadline).foregroundStyle(Theme.labelSecondary)
-                        Button("切换到云端") { if let cloud = model.cloudHost { model.showDeviceMenu = true; model.chooseDevice(cloud, openWorkspace: true) } }
-                            .buttonStyle(PrimaryButtonStyle())
+                        Button("切换到云端") {
+                            if let cloud = model.cloudHost {
+                                withAnimation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.84)) {
+                                    model.setDeviceMenu(true)
+                                }
+                                model.chooseDevice(cloud, openWorkspace: true)
+                            }
+                        }
+                        .buttonStyle(PrimaryButtonStyle())
                         Button("继续重连") { model.dismissCloudOffer() }.buttonStyle(SecondaryButtonStyle())
-                    }.padding(20).frame(maxWidth: 340).background(Theme.sheet, in: RoundedRectangle(cornerRadius: 18))
+                    }.padding(20).frame(maxWidth: 340).background(Theme.sheet, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                         .padding(.horizontal, 16).accessibilityAddTraits(.isModal)
+                        .transition(.scale(scale: 0.96).combined(with: .opacity))
                 }
             }
+            .animation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.86), value: model.offerCloud)
         }
         .onOpenURL { url in
             guard url.scheme?.lowercased() == "dshmobile" else { return }
@@ -182,39 +208,231 @@ struct RootView: View {
         } message: { Text("之后需要用电脑「手机连接」里的新二维码重新配对。") }
     }
 
+    private func dismissDeviceMenu() {
+        withAnimation(reduceMotion ? nil : .spring(response: 0.24, dampingFraction: 0.88)) {
+            model.setDeviceMenu(false)
+        }
+    }
+
+    private var extraDesktops: [PairedDesktop] {
+        let familyIDs = Set([model.localHost?.id, model.cloudHost?.id].compactMap { $0 })
+        return model.savedDesktops.filter { !familyIDs.contains($0.id) }
+    }
+
+    private func resolvedDeviceStatus(for host: PairedDesktop) -> DeviceProbeStatus {
+        if let probed = model.deviceStatuses[host.id] {
+            return probed
+        }
+        if model.desktop?.id == host.id {
+            if model.switchTargetID == host.id || model.connecting || model.reconnecting || model.wsHealth == .connecting {
+                return .connecting
+            }
+            if !model.linkInterrupted && model.browser != nil && model.wsHealth == .connected {
+                let route = model.browser?.endpoint.kind.label ?? host.preferred?.kind.label
+                return .online(route: route, latencyMs: model.lastLatencyMs)
+            }
+            return .offline(nil)
+        }
+        if model.switchTargetID == host.id {
+            return .connecting
+        }
+        if let preferred = host.preferred {
+            return .online(route: preferred.kind.label, latencyMs: nil)
+        }
+        return .checking
+    }
+
+    private func deviceStatusColor(for status: DeviceProbeStatus) -> Color {
+        switch status {
+        case .online: return Theme.success
+        case .checking, .connecting: return Theme.warn
+        case .offline: return Theme.error
+        }
+    }
+
+    private func deviceStatusLabel(for status: DeviceProbeStatus, isCloud: Bool) -> String {
+        switch status {
+        case .online(let route, let latencyMs):
+            var parts = ["在线"]
+            if let route, !route.isEmpty { parts.append(route) }
+            if let latencyMs { parts.append("\(latencyMs) ms") }
+            return parts.joined(separator: " · ")
+        case .connecting:
+            return "正在连接…"
+        case .checking:
+            return "正在检测状态…"
+        case .offline(let reason):
+            if let reason, !reason.isEmpty { return reason }
+            return isCloud ? "云端暂不可达" : "当前离线"
+        }
+    }
+
+    private func deviceRowView(for host: PairedDesktop, isCloud: Bool, selected: Bool, action: @escaping () -> Void) -> some View {
+        let status = resolvedDeviceStatus(for: host)
+        let dotColor = deviceStatusColor(for: status)
+        let isSwitching = model.switchTargetID == host.id
+        return Button(action: action) {
+            HStack(spacing: 10) {
+                ZStack(alignment: .bottomTrailing) {
+                    Image(systemName: isCloud ? "cloud.fill" : "desktopcomputer")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(selected ? Theme.business : Theme.labelSecondary)
+                        .frame(width: 34, height: 34)
+                        .background(selected ? Theme.business.opacity(0.12) : Theme.hover.opacity(0.75),
+                                    in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    Circle()
+                        .fill(dotColor)
+                        .frame(width: 9, height: 9)
+                        .overlay(Circle().stroke(Theme.sheet, lineWidth: 1.5))
+                        .offset(x: 2, y: 2)
+                }
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(host.name)
+                            .font(.subheadline.weight(selected ? .semibold : .medium))
+                            .foregroundStyle(Theme.labelPrimary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                        Text(isCloud ? "云端" : "本机")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(isCloud ? Theme.business : Theme.meta)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(isCloud ? Theme.business.opacity(0.1) : Theme.hover, in: Capsule())
+                    }
+                    HStack(spacing: 4) {
+                        Text(deviceStatusLabel(for: status, isCloud: isCloud))
+                            .font(.caption2)
+                            .foregroundStyle(status.isHealthy ? Theme.meta : dotColor)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 4)
+                if isSwitching {
+                    ProgressView().controlSize(.small)
+                } else if selected {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundStyle(Theme.business)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+            .background(selected ? Theme.hover.opacity(0.65) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .contentShape(Rectangle())
+        }
+        .disabled(model.switchingDevice)
+        .buttonStyle(.plain)
+    }
+
     private var deviceOptions: some View {
-        VStack(alignment: .leading, spacing: 0) {
+        VStack(alignment: .leading, spacing: 4) {
             ForEach([model.localHost, model.cloudHost].compactMap { $0 }) { host in
                 let isCloud = host.id == model.cloudHost?.id
                 let selected = host.id == model.selectedDevice?.id
-                Button { model.chooseDevice(host) } label: {
-                    HStack(spacing: 10) {
-                        Image(systemName: isCloud ? "cloud" : "desktopcomputer").frame(width: 24)
-                        Text(host.name).lineLimit(2).multilineTextAlignment(.leading)
-                        Spacer(minLength: 4)
-                        if model.switchTargetID == host.id { ProgressView().controlSize(.small) }
-                        else if selected { Image(systemName: "checkmark").foregroundStyle(Theme.business) }
-                    }
-                    .padding(.horizontal, 12).padding(.vertical, 6)
-                    .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading).contentShape(Rectangle())
+                deviceRowView(for: host, isCloud: isCloud, selected: selected) {
+                    model.chooseDevice(host)
                 }
-                .disabled(model.switchingDevice).buttonStyle(.plain)
                 .accessibilityIdentifier(isCloud ? "choose-cloud-device" : "choose-local-device")
                 .accessibilityAddTraits(selected ? .isSelected : [])
             }
             if let issue = model.deviceIssue {
-                Text(issue).font(.footnote).foregroundStyle(Theme.warnText).padding(10)
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.caption2)
+                        .foregroundStyle(Theme.warnText)
+                    Text(issue)
+                        .font(.footnote)
+                        .foregroundStyle(Theme.warnText)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Theme.warnTertiary, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                .padding(.top, 2)
             }
             if let selected = model.selectedDevice, let owner = model.desktop, selected.id != owner.id {
-                Divider()
-                Text("当前会话仍由「" + owner.name + "」执行").font(.footnote)
-                    .foregroundStyle(Theme.labelSecondary).padding(.horizontal, 12).padding(.top, 8)
-                Button("进入「" + selected.name + "」工作区") { model.chooseDevice(selected, openWorkspace: true) }
-                    .padding(.horizontal, 12).frame(minHeight: 44).disabled(model.switchingDevice)
+                Divider().padding(.vertical, 2)
+                Text("当前会话仍由「" + owner.name + "」执行")
+                    .font(.footnote)
+                    .foregroundStyle(Theme.labelSecondary)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 4)
+                Button {
+                    model.chooseDevice(selected, openWorkspace: true)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.right.circle.fill")
+                        Text("进入「" + selected.name + "」工作区")
+                    }
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(Theme.business)
+                    .padding(.horizontal, 10)
+                    .frame(maxWidth: .infinity, minHeight: 40, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .disabled(model.switchingDevice)
             }
+            if !extraDesktops.isEmpty {
+                Divider().padding(.vertical, 2)
+                Text("其他已配对设备")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(Theme.meta)
+                    .padding(.horizontal, 10)
+                    .padding(.top, 2)
+                ForEach(extraDesktops) { other in
+                    deviceRowView(for: other, isCloud: false, selected: false) {
+                        dismissDeviceMenu()
+                        model.use(other)
+                    }
+                }
+            }
+            Divider().padding(.vertical, 2)
+            HStack(spacing: 8) {
+                Button {
+                    model.probeDeviceStatuses(force: true)
+                } label: {
+                    HStack(spacing: 5) {
+                        if model.probingDevices {
+                            ProgressView().controlSize(.mini)
+                        } else {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.caption.weight(.semibold))
+                        }
+                        Text(model.probingDevices ? "正在检测…" : "刷新状态")
+                    }
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Theme.business)
+                    .padding(.horizontal, 10)
+                    .frame(minHeight: 32)
+                    .background(Theme.hover.opacity(0.65), in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .disabled(model.probingDevices)
+
+                Spacer(minLength: 4)
+
+                Button {
+                    dismissDeviceMenu()
+                    showConnectionInfo = true
+                } label: {
+                    Text("连接详情")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Theme.labelSecondary)
+                        .padding(.horizontal, 10)
+                        .frame(minHeight: 32)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 4)
         }
-        .font(.subheadline).padding(4)
-        .accessibilityElement(children: .contain).accessibilityAddTraits(.isModal)
+        .font(.subheadline)
+        .padding(4)
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isModal)
     }
 
     private var statusColor: Color {
@@ -240,12 +458,17 @@ struct RootView: View {
                 .accessibilityValue(model.drawerOpen ? "展开" : "收起")
             }
 
-            Button { model.showDeviceMenu.toggle() } label: {
+            Button {
+                withAnimation(reduceMotion ? nil : .spring(response: 0.28, dampingFraction: 0.84)) {
+                    model.toggleDeviceMenu()
+                }
+            } label: {
                 HStack(spacing: 5) {
                     Circle()
                         .fill(statusColor)
                         .frame(width: 7, height: 7)
                         .fixedSize()
+                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: statusColor)
                     Text(model.selectedDevice?.name ?? model.desktop?.name ?? "DSH")
                         .font(.caption.weight(.medium))
                         .foregroundStyle(Theme.labelPrimary)
@@ -262,8 +485,11 @@ struct RootView: View {
                             .lineLimit(1)
                             .fixedSize()
                     }
-                    Image(systemName: model.showDeviceMenu ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 9, weight: .semibold)).foregroundStyle(Theme.meta)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(Theme.meta)
+                        .rotationEffect(.degrees(model.showDeviceMenu ? 180 : 0))
+                        .animation(reduceMotion ? nil : .spring(response: 0.26, dampingFraction: 0.82), value: model.showDeviceMenu)
                         .accessibilityHidden(true)
                     if model.browser != nil && !model.actionsEnabled {
                         Text("只读")
@@ -277,14 +503,17 @@ struct RootView: View {
                             .accessibilityIdentifier("readonly-badge")
                     }
                 }
-                .frame(minWidth: 0, alignment: .leading)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(model.showDeviceMenu ? Theme.active : Theme.hover.opacity(0.65), in: Capsule())
                 .contentShape(Rectangle())
+                .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: model.showDeviceMenu)
             }
             .buttonStyle(.plain)
+            .frame(minWidth: 0, minHeight: 36, alignment: .leading)
             .accessibilityIdentifier("connection-status-pill")
             .accessibilityValue(model.fixtureObservation ?? syncAccessibilityStatus)
             .accessibilityHint("展开或收起设备列表")
-            .frame(minHeight: 36)
             .anchorPreference(key: DeviceButtonBounds.self, value: .bounds) { $0 }
 
             if model.pendingApprovalsCount > 0 {
@@ -299,6 +528,7 @@ struct RootView: View {
                         .fixedSize()
                 }
                 .buttonStyle(.plain)
+                .transition(.scale(scale: 0.86).combined(with: .opacity))
                 .accessibilityIdentifier("pending-approval-badge")
             }
 
@@ -321,6 +551,7 @@ struct RootView: View {
                 .foregroundStyle(Theme.labelPrimary)
                 .fixedSize()
                 .layoutPriority(2)
+                .transition(.scale(scale: 0.88).combined(with: .opacity))
                 .accessibilityLabel("移动端工具箱")
                 .accessibilityIdentifier("secondary-hub-button")
             }
@@ -412,6 +643,8 @@ struct RootView: View {
         }
         .padding(.horizontal, 8)
         .frame(maxWidth: .infinity, minHeight: 38, maxHeight: 38)
+        .animation(reduceMotion ? nil : .spring(response: 0.26, dampingFraction: 0.84), value: model.pendingApprovalsCount)
+        .animation(reduceMotion ? nil : .spring(response: 0.26, dampingFraction: 0.84), value: model.secondaryHubBadge)
         .background { surfaceBackground.ignoresSafeArea(.container, edges: .top) }
         .overlay(alignment: .bottom) { Hairline() }
     }

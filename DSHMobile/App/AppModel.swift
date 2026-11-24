@@ -104,6 +104,25 @@ struct PageTheme: Equatable, Codable {
     }
 }
 
+enum DeviceProbeStatus: Equatable, Sendable {
+    case checking
+    case online(route: String?, latencyMs: Int?)
+    case connecting
+    case offline(String?)
+
+    var isHealthy: Bool {
+        if case .online = self { return true }
+        return false
+    }
+
+    var isPending: Bool {
+        switch self {
+        case .checking, .connecting: return true
+        default: return false
+        }
+    }
+}
+
 enum WebViewCommand: Equatable {
     case toggleSidebar(UUID)
     case openSession(UUID, String)
@@ -434,6 +453,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     @Published private(set) var cloudHost: PairedDesktop?
     @Published private(set) var selectedDevice: PairedDesktop?
     @Published var showDeviceMenu = false
+    @Published private(set) var deviceStatuses: [String: DeviceProbeStatus] = [:]
+    @Published private(set) var probingDevices = false
     @Published private(set) var deviceIssue: String?
     @Published private(set) var switchTargetID: String?
     var switchingDevice: Bool { switchTargetID != nil }
@@ -442,6 +463,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     private var offlineAttempts = 0
     private var familyID: String?
     private var switchTask: Task<Void, Never>?
+    private var probeTask: Task<Void, Never>?
     private var controlWatch: Task<Void, Never>?
     private var grantTask: Task<Void, Never>?
     private var switchID = UUID()
@@ -469,6 +491,110 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
 
     func dismissCloudOffer() { offerCloud = false }
 
+    func toggleDeviceMenu() {
+        setDeviceMenu(!showDeviceMenu)
+    }
+
+    func setDeviceMenu(_ open: Bool) {
+        if showDeviceMenu != open {
+            performHaptic("selection")
+        }
+        showDeviceMenu = open
+        if open {
+            probeDeviceStatuses(force: false)
+        } else {
+            probeTask?.cancel()
+            probeTask = nil
+            probingDevices = false
+        }
+    }
+
+    func probeDeviceStatuses(force: Bool = false) {
+        probeTask?.cancel()
+        probeTask = nil
+        var seen = Set<String>()
+        var candidates: [PairedDesktop] = []
+        for host in ([localHost, cloudHost].compactMap { $0 } + savedDesktops) {
+            if seen.insert(host.id).inserted {
+                candidates.append(host)
+            }
+        }
+        guard !candidates.isEmpty else {
+            probingDevices = false
+            return
+        }
+
+        var nextStatuses = deviceStatuses
+        var toProbe: [PairedDesktop] = []
+        for host in candidates {
+            if desktop?.id == host.id {
+                if switchTargetID == host.id || connecting || reconnecting || wsHealth == .connecting {
+                    nextStatuses[host.id] = .connecting
+                } else if !linkInterrupted && browser != nil && wsHealth == .connected {
+                    let route = browser?.endpoint.kind.label ?? host.preferred?.kind.label
+                    nextStatuses[host.id] = .online(route: route, latencyMs: lastLatencyMs)
+                    if force { toProbe.append(host) }
+                } else {
+                    nextStatuses[host.id] = force ? .checking : .offline(problem)
+                    toProbe.append(host)
+                }
+            } else {
+                if force || nextStatuses[host.id] == nil || nextStatuses[host.id]?.isHealthy != true {
+                    nextStatuses[host.id] = .checking
+                }
+                toProbe.append(host)
+            }
+        }
+        deviceStatuses = nextStatuses
+
+        guard !toProbe.isEmpty else {
+            probingDevices = false
+            return
+        }
+
+        probingDevices = true
+        let hostsToProbe = toProbe
+        probeTask = Task { [weak self] in
+            await withTaskGroup(of: (String, DeviceProbeStatus).self) { group in
+                for host in hostsToProbe {
+                    group.addTask {
+                        let status = await Self.probeHost(host)
+                        return (host.id, status)
+                    }
+                }
+                for await (id, status) in group {
+                    guard !Task.isCancelled, let self else { continue }
+                    if self.switchTargetID == id {
+                        self.deviceStatuses[id] = .connecting
+                    } else {
+                        self.deviceStatuses[id] = status
+                    }
+                }
+            }
+            guard !Task.isCancelled, let self else { return }
+            self.probingDevices = false
+            self.probeTask = nil
+        }
+    }
+
+    private nonisolated static func probeHost(_ host: PairedDesktop) async -> DeviceProbeStatus {
+        let channel = PinnedTransport(fingerprint: host.fingerprint)
+        defer { channel.invalidate() }
+        let started = Date()
+        guard let endpoint = await EndpointRace.first(host.candidates, desktopID: host.id, transport: channel) else {
+            return .offline("当前离线")
+        }
+        do {
+            _ = try await LinkClient(transport: channel, base: endpoint.baseURL, token: host.token).checkSession()
+            let ms = max(1, Int((Date().timeIntervalSince(started) * 1000).rounded()))
+            return .online(route: endpoint.kind.label, latencyMs: ms)
+        } catch LinkError.unpaired {
+            return .offline("配对已失效")
+        } catch {
+            return .offline("暂不可用")
+        }
+    }
+
     // Route selection is independent from the conversation's executor. In particular
     // a cloud-backed turn must not lose its WKWebView, socket, approvals or scroll position.
     func chooseDevice(_ target: PairedDesktop, openWorkspace: Bool = false) {
@@ -476,12 +602,16 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         switchTask?.cancel()
         let ticket = UUID(); switchID = ticket
         offerCloud = false; deviceIssue = nil
+        performHaptic("selection")
         if desktop?.id == target.id, !linkInterrupted, wsHealth == .connected {
+            let route = browser?.endpoint.kind.label ?? target.preferred?.kind.label
+            deviceStatuses[target.id] = .online(route: route, latencyMs: lastLatencyMs)
             selectedDevice = target; persistSelection(); watchSelectedDevice()
-            switchTargetID = nil; showDeviceMenu = false
+            switchTargetID = nil; setDeviceMenu(false)
             return
         }
         switchTargetID = target.id
+        deviceStatuses[target.id] = .connecting
         switchTask = Task { [weak self] in
             let channel = PinnedTransport(fingerprint: target.fingerprint)
             var adopted = false
@@ -489,9 +619,13 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             do {
                 let ready = try await BrowserConnector.connect(target, keeping: nil, transport: channel)
                 guard let self, !Task.isCancelled, self.switchID == ticket, self.familyID == owner else { return }
-                self.switchTargetID = nil; self.showDeviceMenu = false
+                self.switchTargetID = nil
+                self.probeTask?.cancel(); self.probeTask = nil; self.probingDevices = false
+                self.showDeviceMenu = false
                 var chosen = target; chosen.preferred = ready.endpoint
                 self.selectedDevice = chosen
+                self.deviceStatuses[chosen.id] = .online(route: ready.endpoint.kind.label, latencyMs: self.lastLatencyMs)
+                self.performHaptic("success")
                 if self.taskRunning && self.wsHealth == .connected && !openWorkspace {
                     self.persistSelection(); self.watchSelectedDevice()
                     return
@@ -501,6 +635,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             } catch {
                 guard let self, !Task.isCancelled, self.switchID == ticket else { return }
                 self.switchTargetID = nil
+                self.deviceStatuses[target.id] = .offline("连接失败")
+                self.performHaptic("error")
                 self.deviceIssue = "仍保留当前连接。" + error.localizedDescription
             }
         }
@@ -548,7 +684,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     private func activate(_ selected: PairedDesktop, transport channel: PinnedTransport, ready: BrowserSession? = nil, sharedSessionID: String? = nil) {
         controlWatch?.cancel(); grantTask?.cancel(); grantTask = nil
         connectionTask?.cancel(); recoveryTask?.cancel(); generation = UUID(); frameGeneration = UUID()
-        switchTask?.cancel(); switchID = UUID(); switchTargetID = nil; showDeviceMenu = false
+        switchTask?.cancel(); switchID = UUID(); switchTargetID = nil
+        probeTask?.cancel(); probeTask = nil; probingDevices = false; showDeviceMenu = false
         offlineAttempts = 0; offeredThisOutage = false; offerCloud = false; deviceIssue = nil
         pendingCommand = nil
         transport?.invalidate()
@@ -966,7 +1103,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             Task { await LinkClient(transport: channel, base: end.baseURL, token: primary.token).unpair(); channel.invalidate() }
         }
         discardFrame(owner); clearCachedRoute(for: owner)
-        grantTask?.cancel(); switchTask?.cancel(); controlWatch?.cancel()
+        grantTask?.cancel(); switchTask?.cancel(); probeTask?.cancel(); probeTask = nil; controlWatch?.cancel()
+        probingDevices = false; deviceStatuses.removeAll()
         switchID = UUID(); familyID = nil; cloudHost = nil; selectedDevice = nil; offerCloud = false
         let all = savedDesktops.filter { $0.id != owner }
         do {
@@ -977,7 +1115,12 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     }
 
     func sceneChanged(_ phase: ScenePhase) {
-        if phase == .background { showDeviceMenu = false }
+        if phase == .background {
+            showDeviceMenu = false
+            probeTask?.cancel()
+            probeTask = nil
+            probingDevices = false
+        }
         isForeground = (phase == .active)
         if !ephemeral {taskPush.scene(isForeground)}
         syncIdleTimer()

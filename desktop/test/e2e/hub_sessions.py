@@ -62,24 +62,20 @@ with sync_playwright() as pw:
     expect(m.get_by_role('button', name='管理会话', exact=True)).to_have_count(0)
     m.evaluate('__DSH_MOBILE_BRIDGE__.toggleSidebar()')
     trigger = m.get_by_role('button', name='移动端工具箱', exact=True)
-    # Sample before Playwright's visibility/stability waits could mask a slide-in.
-    frames = trigger.evaluate("""async button => {
+    # Verify smooth spring slide-in animation with normal motion, and instant display with reduced motion.
+    anim_name = trigger.evaluate("""async button => {
         button.click();
-        const frames = [];
-        for (let i = 0; i < 6; i++) {
-            await new Promise(requestAnimationFrame);
-            const dialog = document.querySelector('.dml-hub-backdrop:modal');
-            const sheet = dialog.querySelector('.dml-hub-sheet');
-            frames.push([sheet.getBoundingClientRect().top, getComputedStyle(sheet).animationName,
-                         getComputedStyle(dialog, '::backdrop').backgroundColor]);
-        }
-        return frames;
+        await new Promise(requestAnimationFrame);
+        const dialog = document.querySelector('.dml-hub-backdrop:modal');
+        const sheet = dialog.querySelector('.dml-hub-sheet');
+        return getComputedStyle(sheet).animationName;
     }""")
-    assert all(frame == frames[0] for frame in frames) and frames[0][1] == 'none', frames
+    assert anim_name and anim_name != 'none', anim_name
     hub = m.get_by_role('dialog', name='移动端工具箱')
     expect(hub).to_be_visible()
     m.emulate_media(reduced_motion='reduce')
     sheet = hub.locator('.dml-hub-sheet')
+    assert sheet.evaluate('e => getComputedStyle(e).animationName') == 'none'
     for width, height in [(320, 640), (393, 745), (820, 900)]:
         m.set_viewport_size({'width': width, 'height': height})
         rects = []

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDesktopWeather } from '../lib/desktop-weather.mjs';
-import { weatherScene } from '../lib/mobile-weather.mjs';
+import { installWeather, weatherScene, WEATHER_CSS } from '../lib/mobile-weather.mjs';
 
 const now = 1_800_000_000_000;
 test('clock requests never acquire location; a denied desktop fix never contacts a provider', async () => {
@@ -39,4 +39,12 @@ test('known WMO groups have distinct scenes, including night and hazardous preci
   }
   assert.equal(weatherScene(0,false),'moon'); assert.equal(weatherScene(2,false),'partlyNight');
   assert.equal(weatherScene(999,false),null);
+});
+
+test('weather widget renders multi-layer gradient SVGs, temperature slot, and reduced-motion rules', () => {
+  assert.match(WEATHER_CSS, /#dml-weather\[data-has-temp="true"\]/);
+  assert.match(WEATHER_CSS, /header:has\(nav\)\s+#dml-weather\s+\.dml-w-temp\s*\{\s*display:\s*none\s*!important/);
+  assert.match(WEATHER_CSS, /prefers-reduced-motion:\s*reduce[\s\S]*animation:\s*none\s*!important/);
+  assert.match(installWeather.toString(), /dmlw-sun-aura/);
+  assert.match(installWeather.toString(), /dmlw-bolt/);
 });
