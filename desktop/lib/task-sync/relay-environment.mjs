@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { deploymentWatch } from './deployment-watch.mjs';
 import { deploymentHelper, savedDeployments } from './deployment-ref.mjs';
@@ -108,6 +109,14 @@ export function registerEnvironment(ctx,role,root) {
       info.scriptProgress = {nodeModule:new URL('../../tools/script-progress.mjs',import.meta.url).href,
         session:session.id, nativeTool:'relay_script_checkpoint', modelStateLimit:32*1024,
         maxStateBytes:256*1024, scope:'cooperative-replay-safe-compute'};
+      info.pythonCheckpoints = {
+        checker: fileURLToPath(new URL('./python_state.py', import.meta.url)),
+        runner: fileURLToPath(new URL('./paired_python.py', import.meta.url)),
+        ledgerRoot: root, session: session.id, interpreter: 'CPython 3.11',
+        scope: 'opt-in deterministic Python; run check before execution; no OS process or external effects',
+        modes: {primary:'peer ACK before each batch', standby:'pre-authorized pure compute after a quiet paired checkpoint'},
+        sandboxFallback: 'Use an authorized project copy of the checker in slice mode with relay_script_checkpoint; never grant access to the host ledger to bypass sandbox policy.'
+      };
       await ctx.sessions.flush(session);
       const reader = await ctx.sessionPersistence.open(session.id,'read',{signal:exec.signal});
       try {
