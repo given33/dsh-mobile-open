@@ -12,7 +12,7 @@ settings:
     TARGETED_DEVICE_FAMILY: '1,2'
     IPHONEOS_DEPLOYMENT_TARGET: '17.0'
     MARKETING_VERSION: '0.7.3'
-    CURRENT_PROJECT_VERSION: '36'
+    CURRENT_PROJECT_VERSION: '37'
 targets:
   DSHMobile:
     type: application
@@ -79,6 +79,8 @@ targets:
       path: TaskIsland/Info.plist
       properties:
         CFBundleDisplayName: DSH 实时活动
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         NSExtension:
           NSExtensionPointIdentifier: com.apple.widgetkit-extension
   DSHMobileUITests:

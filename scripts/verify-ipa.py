@@ -26,6 +26,9 @@ def verify(ipa, catalog_info=None):
         extension = APP + "PlugIns/TaskIsland.appex/"
         widget = plistlib.loads(archive.read(extension + "Info.plist"))
         require(info.get("NSSupportsLiveActivities") is True and widget["NSExtension"]["NSExtensionPointIdentifier"] == "com.apple.widgetkit-extension", "Missing Live Activity support")
+        for version_key in ("CFBundleShortVersionString", "CFBundleVersion"):
+            require(bool(info.get(version_key)) and widget.get(version_key) == info[version_key],
+                    f"TaskIsland {version_key} differs from the containing app")
         require(extension + widget["CFBundleExecutable"] in names, "Missing widget executable")
         with archive.open(APP + info["CFBundleExecutable"]) as executable:
             require(executable.read(8) == bytes.fromhex("cffaedfe0c000001"), "Expected the arm64 device executable")
