@@ -215,7 +215,6 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     private var pathMonitor: NWPathMonitor?
     private var lastNetworkSignature: String?
     private var currentOnWifi: Bool?
-    private var networkChangedWhileBackgrounded = false
     private var isForeground = true
     private var bgKeepAliveTask: UIBackgroundTaskIdentifier = .invalid
     // Fixture-only observation and a deterministic expiry, without waiting out a token TTL.
@@ -399,14 +398,13 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         return route
     }
 
-    private static let autoFailoverKey = "dsh.mobile.autoFailover"
     private static let followKey = "dsh.mobile.followDesktop"
     private static let notificationsKey = "dsh.mobile.taskNotifications"
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         let fixture = environment["DSH_DEMO_LINK"] ?? ""
         ephemeral = !fixture.isEmpty || environment["DSH_UI_TEST"] == "1"
-        autoFailoverEnabled = !ephemeral && (UserDefaults.standard.object(forKey: Self.autoFailoverKey) as? Bool ?? true)
+        autoFailoverEnabled = !ephemeral
         followDesktop = ephemeral ? false : UserDefaults.standard.bool(forKey: Self.followKey)
         notificationsEnabled = ephemeral ? false : UserDefaults.standard.bool(forKey: Self.notificationsKey)
         savedDesktops = ephemeral ? [] : SecureStore.desktops()
@@ -482,15 +480,6 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         if id == localHost?.id { return cloudHost }
         if id == cloudHost?.id { return localHost }
         return nil
-    }
-
-    func setAutoFailoverEnabled(_ enabled: Bool) {
-        guard enabled != autoFailoverEnabled else { return }
-        cancelFailoverProbe()
-        autoFailoverEnabled = enabled
-        if !ephemeral { UserDefaults.standard.set(enabled, forKey: Self.autoFailoverKey) }
-        offeredThisOutage = false
-        offerCloud = false
     }
 
     private func cancelFailoverProbe() {
@@ -849,7 +838,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 guard let self, !Task.isCancelled, self.switchID == ticket else { return }
                 self.switchTargetID = nil
                 if self.wsHealth != .connected {
-                    self.scheduleRecoveryCheck(delaySeconds: self.wsHealth == .connecting ? 10 : 0.2)
+                    self.scheduleRecoveryCheck(delaySeconds: self.wsHealth == .connecting ? 3.5 : 0.05)
                 }
                 self.performHaptic("error")
                 self.probeDeviceStatuses(force: true)
@@ -1130,7 +1119,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         cancelDocumentDeadline()
         if !needsLaunchSelection { needsLaunchSelection = true }
         // The page may never emit an initial socket event. Give the handshake a full grace period.
-        if wsHealth == .connecting { scheduleRecoveryCheck(delaySeconds: 10) }
+        if wsHealth == .connecting { scheduleRecoveryCheck(delaySeconds: 5.0) }
         // HTTP and the socket can be ready before the target conversation paints.
         // Keep its snapshot, but never leave the user stuck behind the cover.
         var delay = 12.0
@@ -1217,11 +1206,11 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 if wsHealth == .disconnected { recoveryTask?.cancel(); recoveryTask = nil }
                 if wsHealth == .connected { linkInterrupted = true }
                 wsHealth = .connecting
-                scheduleRecoveryCheck(delaySeconds: 10, fresh: false)
+                scheduleRecoveryCheck(delaySeconds: 3.5, fresh: false)
             case "disconnected":
                 if !linkInterrupted { linkInterrupted = true }
                 wsHealth = .disconnected
-                scheduleRecoveryCheck(delaySeconds: 0.2)
+                scheduleRecoveryCheck(delaySeconds: 0.05)
             default: break
             }
         case "secondary-hub":
@@ -1351,35 +1340,24 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             return
         }
         endBackgroundKeepAlive()
-        let roamed = networkChangedWhileBackgrounded
-        networkChangedWhileBackgrounded = false
         guard desktop != nil, !switchingDevice, !revoked, pathAvailable else { return }
         if browser == nil {
             if !connecting { beginConnection(preservePage: false) }
             return
         }
-        if wsHealth == .disconnected { pendingCommand = .wakeCheck(UUID()) }
         if browser?.endpoint.kind == .lan && currentOnWifi == false {
             linkInterrupted = true
             wsHealth = .connecting
             scheduleRecoveryCheck(delaySeconds: 0, fresh: true)
             return
         }
-        if wsHealth == .connecting {
-            scheduleRecoveryCheck(delaySeconds: 10)
-            return
+        pendingCommand = .wakeCheck(UUID())
+        if wsHealth != .connected {
+            scheduleRecoveryCheck(delaySeconds: wsHealth == .disconnected ? 0 : 2.5)
         }
         if testRenewOnResume || (browser?.expiresAt.timeIntervalSinceNow ?? 0) < 120 {
             testRenewOnResume = false
             if connectionTask == nil { beginConnection(preservePage: true) }
-            return
-        }
-        // Immediately wake-check the browser bridge (cancels WS backoff + triggers 1-RTT sync?poke=1)
-        // when returning to foreground or after offscreen roaming so half-open NAT sockets recover at t=0.
-        if wsHealth == .disconnected {
-            scheduleRecoveryCheck(delaySeconds: 0)
-        } else if roamed || !ephemeral {
-            pendingCommand = .wakeCheck(UUID())
         }
     }
 
@@ -1401,10 +1379,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                     self.linkInterrupted = true
                     self.wsHealth = .disconnected
                 }
-                if !self.isForeground {
-                    self.networkChangedWhileBackgrounded = true
-                    return
-                }
+                guard self.isForeground else { return }
                 guard !self.switchingDevice, !self.revoked, available else { return }
                 // Instant Wi-Fi <-> 5G roaming failover:
                 // If currently pinned to a private LAN endpoint while off Wi-Fi (e.g. cellular),
@@ -1416,12 +1391,10 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                     self.scheduleRecoveryCheck(delaySeconds: 0, fresh: true)
                     return
                 }
-                if self.browser != nil, self.wsHealth == .connecting {
-                    self.scheduleRecoveryCheck(delaySeconds: 10)
-                    return
+                if self.browser != nil { self.pendingCommand = .wakeCheck(UUID()) }
+                if self.wsHealth != .connected {
+                    self.scheduleRecoveryCheck(delaySeconds: self.browser != nil && self.wsHealth == .connecting ? 2.5 : 0.05)
                 }
-                self.pendingCommand = .wakeCheck(UUID())
-                if self.wsHealth != .connected { self.scheduleRecoveryCheck(delaySeconds: 0.05) }
             }
         }
         monitor.start(queue: DispatchQueue(label: "app.dshmobile.netpath"))
@@ -1511,7 +1484,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 self.reconnecting = false
                 self.problem = nil
                 if self.wsHealth != .connected {
-                    self.scheduleRecoveryCheck(delaySeconds: active?.id == ready.id ? 6 : min(20, 10 + 3 * Double(self.recoveryFailures)), fresh: false)
+                    self.scheduleRecoveryCheck(delaySeconds: active?.id == ready.id ? 2.0 : min(15, 4 + 2 * Double(self.recoveryFailures)), fresh: false)
                     self.recoveryFailures = min(8, self.recoveryFailures + 1)
                 }
             } catch {

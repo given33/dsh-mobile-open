@@ -678,14 +678,16 @@ export function createLinkServer({
         : official
           ? officialReadStreamPolicy
           : policy;
-      const verdict = msg?.endpoint?.startsWith('terminal/') && !allowTerminal() ? 'endpoint-forbidden'
-        : checkClientFrame(msg, open, streamPolicy, allowTerminal(), officialWritable, official ? 64 : MAX_STREAMS);
+      const terminalAllowed = allowTerminal();
+      // Terminal subscriptions are optional, even in a writable official session.
+      // Refuse just that stream; closing the carrier would restart every subscriber.
+      if (msg?.type === 'open' && typeof msg.endpoint === 'string' && msg.endpoint.startsWith('terminal/') && !terminalAllowed) {
+        client.send(JSON.stringify({ type: 'error', streamId: msg.streamId, error: { code: 'terminal-disabled', message: '请在电脑上允许手机使用终端。' } }));
+        return;
+      }
+      const verdict = checkClientFrame(msg, open, streamPolicy, terminalAllowed, officialWritable, official ? 64 : MAX_STREAMS);
       if (verdict === 'unknown-stream') return;
       if (verdict !== 'ok') {
-        if (msg?.type === 'open' && msg.endpoint === 'terminal/attach' && !allowTerminal()) {
-          client.send(JSON.stringify({ type: 'error', streamId: msg.streamId, error: { code: 'terminal-disabled', message: '请在电脑上允许手机使用终端。' } }));
-          return;
-        }
         if (official && !officialWritable && msg?.type === 'open' && verdict === 'endpoint-forbidden') {
           client.send(JSON.stringify({ type: 'error', streamId: msg.streamId, error: { code: 'actions-disabled', message: '电脑端未开启「允许手机操作」，当前仅可实时查看。' } }));
           return;

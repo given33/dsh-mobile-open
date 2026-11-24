@@ -364,8 +364,9 @@ aside[data-session-panel="overlay"]::after {
 }
 aside[data-session-panel="overlay"][data-dml-anchored] {
   position: fixed !important; z-index: 1100 !important;
+  margin: 0 !important; inset: auto !important; border: 0; overflow-y: auto;
   top: var(--dml-panel-top) !important; left: var(--dml-panel-left) !important;
-  bottom: auto !important; right: auto !important; transform-origin: top right !important;
+  bottom: auto !important; right: auto !important; transform-origin: var(--dml-panel-origin) 0 !important;
   max-width: var(--dml-panel-width) !important; max-height: var(--dml-panel-height) !important;
   box-sizing: border-box;
 }
@@ -3413,11 +3414,33 @@ export const MOBILE_SHELL_JS = `(() => {
   const panelSelector = 'aside[data-session-panel="overlay"]';
   const toggleSelector = 'button[data-session-panel-toggle]';
   const panels = new Map();
+  // Top layer escapes sticky/scroll clipping without reparenting React-owned nodes.
+  const shellPopovers = new WeakSet();
+  function setTopLayer(el, on) {
+    if (typeof el.showPopover !== 'function') return;
+    if (on) {
+      if (el.hasAttribute('popover') && !shellPopovers.has(el)) return;
+      try {
+        if (!shellPopovers.has(el)) { el.setAttribute('popover', 'manual'); shellPopovers.add(el); }
+        if (!el.matches(':popover-open')) el.showPopover();
+        return;
+      } catch {} // Unsupported/inactive document: fall back to ordinary fixed positioning.
+    }
+    if (!shellPopovers.delete(el)) return;
+    try { if (el.matches(':popover-open')) el.hidePopover(); } catch {}
+    el.removeAttribute('popover');
+  }
+  function panelLayerOpen() {
+    for (const panel of panels.keys()) if (shellPopovers.has(panel) && panel.matches(':popover-open')) return true;
+    return false;
+  }
   function releasePanel(panel) {
     panels.get(panel)?.disconnect();
-    panels.delete(panel);
+    const tracked = panels.delete(panel);
+    setTopLayer(panel, false);
+    if (tracked && !panelLayerOpen()) for (const popup of activePopups) setTopLayer(popup, false);
     panel.removeAttribute('data-dml-anchored');
-    for (const name of ['top', 'left', 'width', 'height']) panel.style.removeProperty('--dml-panel-' + name);
+    for (const name of ['top', 'left', 'width', 'height', 'origin']) panel.style.removeProperty('--dml-panel-' + name);
   }
   function positionPanel(panel) {
     if (!panel.isConnected || !panel.matches(panelSelector)) { releasePanel(panel); return; }
@@ -3433,6 +3456,7 @@ export const MOBILE_SHELL_JS = `(() => {
       panels.get(panel)?.disconnect();
       const mode = new MutationObserver(() => positionPanel(panel));
       mode.observe(panel, {attributes:true, attributeFilter:['data-session-panel']});
+      mode.observe(toggle, {attributes:true, attributeFilter:['aria-expanded']});
       if (panel.parentElement) mode.observe(panel.parentElement, {childList:true});
       const size = typeof ResizeObserver === 'function' ? new ResizeObserver(() => positionPanel(panel)) : null;
       size?.observe(panel); size?.observe(toggle);
@@ -3445,8 +3469,11 @@ export const MOBILE_SHELL_JS = `(() => {
     const top = Math.round(rect.bottom + 6);
     panel.setAttribute('data-dml-anchored', '');
     panel.style.setProperty('--dml-panel-width', Math.max(0, vw - 20) + 'px');
-    const width = panel.getBoundingClientRect().width;
-    const left = Math.max(10, Math.min(Math.round(rect.right - width), vw - 10 - width));
+    setTopLayer(panel, true);
+    const width = panel.offsetWidth || panel.getBoundingClientRect().width;
+    const center = rect.left + rect.width / 2;
+    const left = Math.max(10, Math.min(Math.round(center - width / 2), Math.round(vw - 10 - width)));
+    panel.style.setProperty('--dml-panel-origin', Math.max(12, Math.min(width - 12, Math.round(center - left))) + 'px');
     panel.style.setProperty('--dml-panel-top', top + 'px');
     panel.style.setProperty('--dml-panel-left', left + 'px');
     panel.style.setProperty('--dml-panel-height', Math.max(0, Math.floor(bottom - top - 10)) + 'px');
@@ -3458,16 +3485,19 @@ export const MOBILE_SHELL_JS = `(() => {
     if (e.animationName === 'dml-session-panel-mount' && e.target.matches?.(panelSelector)) positionPanel(e.target);
   });
   document.addEventListener('click', e => {
-    if (e.target.closest?.(toggleSelector)) requestAnimationFrame(discoverPanels);
+    if (e.target.closest?.(toggleSelector)) {
+      requestAnimationFrame(discoverPanels);
+      setTimeout(discoverPanels, 60);
+    }
   }, true);
   const activePopups = new Set();
   const popupResizeObserver = typeof ResizeObserver === 'function'
     ? new ResizeObserver((entries) => {
         for (const entry of entries) {
-          if (entry.target instanceof HTMLElement && entry.target.isConnected) {
-            positionPopup(entry.target);
-          }
+          if (!entry.target.isConnected) unregisterPopup(entry.target);
+          else if (entry.target instanceof HTMLElement) positionPopup(entry.target);
         }
+        syncPopupOpenAttr();
       })
     : null;
 
@@ -3515,7 +3545,7 @@ export const MOBILE_SHELL_JS = `(() => {
       const trigger = findTriggerInSet(anchorApi.varAnchors, modelAttr, popup);
       return { kind: 'model', anchorName: modelAttr, trigger };
     }
-    if (popup.hasAttribute('data-anchor-side') || popup.hasAttribute('data-context-menu') || popup.hasAttribute('data-subagent-panel') || popup.hasAttribute('data-install-registry')) {
+    if (popup.getAttribute('role') === 'menu' || popup.hasAttribute('data-anchor-side') || popup.hasAttribute('data-context-menu') || popup.hasAttribute('data-subagent-panel') || popup.hasAttribute('data-install-registry')) {
       return { kind: 'positionAnchor', anchorName: '--dsh-fallback', trigger: lastPointerTarget };
     }
     return null;
@@ -3526,7 +3556,7 @@ export const MOBILE_SHELL_JS = `(() => {
     if (el.hasAttribute('data-dsh-position-anchor') || el.hasAttribute('data-dsh-submenu-parent') || el.hasAttribute('data-dsh-model-anchor')) return true;
     if (el.hasAttribute('data-anchor-side') || el.hasAttribute('data-submenu-layout') || el.hasAttribute('data-context-menu')) return true;
     if (el.hasAttribute('data-subagent-panel') || el.hasAttribute('data-install-registry')) return true;
-    return anchorApi.popups.has(el);
+    return anchorApi.popups.has(el) || (el.parentElement === document.body && el.getAttribute('role') === 'menu' && panelLayerOpen());
   }
 
   function inferPlacementPolicy(popup, binding) {
@@ -3590,6 +3620,12 @@ export const MOBILE_SHELL_JS = `(() => {
     return { left: x, top: y, right: x, bottom: y, width: 0, height: 0 };
   }
 
+  function popupVisible(popup) {
+    if (!popup.isConnected || popup.hidden || popup.getAttribute('aria-hidden') === 'true') return false;
+    const style = getComputedStyle(popup);
+    return style.display !== 'none' && style.visibility !== 'hidden' && popup.getClientRects?.().length !== 0;
+  }
+
   function positionPopup(popup) {
     if (!(popup instanceof HTMLElement) || !popup.isConnected) return;
     // Never treat inside-#root triggers as popups unless they are fixed overlays.
@@ -3598,6 +3634,11 @@ export const MOBILE_SHELL_JS = `(() => {
 
     const binding = resolvePopupBinding(popup);
     if (!binding) return;
+    if (!rootEl?.contains(popup) && (panelLayerOpen() || shellPopovers.has(popup))) {
+      const visible = popupVisible(popup);
+      setTopLayer(popup, visible && panelLayerOpen());
+      if (!visible) return;
+    }
 
     const vv = globalThis.visualViewport;
     const vw = Math.round(vv ? vv.width : (globalThis.innerWidth || 390));
@@ -3723,10 +3764,20 @@ export const MOBILE_SHELL_JS = `(() => {
   function syncPopupOpenAttr() {
     const html = document.documentElement;
     if (!html) return;
-    if (activePopups.size > 0) html.setAttribute('data-dml-popup-open', 'true');
+    if ([...activePopups].some(popupVisible)) html.setAttribute('data-dml-popup-open', 'true');
     else html.removeAttribute('data-dml-popup-open');
   }
 
+  // A portal can stay mounted while React hides and reuses it. Watch only
+  // the portal itself, never the conversation subtree. ResizeObserver covers display:none.
+  const popupVisibility = new WeakMap();
+  function unregisterPopup(popup) {
+    if (!activePopups.delete(popup)) return;
+    popupVisibility.get(popup)?.disconnect();
+    popupVisibility.delete(popup);
+    popupResizeObserver?.unobserve(popup);
+    setTopLayer(popup, false);
+  }
   function registerPopupNode(node) {
     if (!(node instanceof HTMLElement)) return;
     const candidates = [];
@@ -3740,6 +3791,19 @@ export const MOBILE_SHELL_JS = `(() => {
       }
     }
     for (const popup of candidates) {
+      if (!activePopups.has(popup)) {
+        let display = popup.style.display, visibility = popup.style.visibility;
+        const observer = new MutationObserver(records => {
+          // Ignore our own left/top writes. Only presentation changes can close a mounted menu.
+          if (display === popup.style.display && visibility === popup.style.visibility &&
+              records.every(record => record.attributeName === 'style')) return;
+          display = popup.style.display; visibility = popup.style.visibility;
+          positionPopup(popup);
+          syncPopupOpenAttr();
+        });
+        observer.observe(popup, {attributes: true, attributeFilter: ['class', 'hidden', 'aria-hidden', 'style']});
+        popupVisibility.set(popup, observer);
+      }
       activePopups.add(popup);
       popupResizeObserver?.observe(popup);
       positionPopup(popup);
@@ -3763,8 +3827,7 @@ export const MOBILE_SHELL_JS = `(() => {
     for (const panel of panels.keys()) positionPanel(panel);
     for (const popup of activePopups) {
       if (!popup.isConnected) {
-        activePopups.delete(popup);
-        popupResizeObserver?.unobserve(popup);
+        unregisterPopup(popup);
         continue;
       }
       positionPopup(popup);
@@ -4225,7 +4288,7 @@ export const MOBILE_SHELL_JS = `(() => {
     const cordis = globalThis.__DSH_MOBILE_CORDIS__;
     if (typeof cordis?.reconnect === 'function') {
       if (!force && Date.now() < reconnectUntil) return true;
-      reconnectUntil = Date.now() + 800;
+      reconnectUntil = Date.now() + 400;
       if (cordis.reconnect() === false) { reconnectUntil = 0; return false; }
       return true;
     }
@@ -4265,7 +4328,7 @@ export const MOBILE_SHELL_JS = `(() => {
       if (syncRequest !== controller) return;
       // Instant half-open zombie socket detection: if the desktop has zero live mux sockets
       // for this device while our browser socket still claims OPEN, reconnect immediately.
-      if (shouldPoke && data.wsAlive === false && latestMux?.readyState === 1 && Date.now() - latestMuxCreatedAt > 2500) {
+      if (shouldPoke && data.wsAlive === false && latestMux?.readyState === 1 && Date.now() - latestMuxCreatedAt >= 1000) {
         reconnect(true);
       }
       const cursor = typeof data.cursor === 'string' ? data.cursor : '';
@@ -4297,15 +4360,14 @@ export const MOBILE_SHELL_JS = `(() => {
     if (poke) pendingPoke = true;
     void pollSync();
   }
-  function muxStarting() {
-    return (latestMux?.readyState === 0 || latestMux?.readyState === 1) && Date.now() - latestMuxCreatedAt < 10_000;
-  }
+  let lastWakeRetry = -Infinity, wakeRetryMux, wakeRetryState;
   function wakeForeground() {
-    // pageshow, network and native wake can describe the same transition. An
-    // uncertain socket gets a debounced retry; a confirmed close bypasses it.
-    if (!muxStarting() && !(activePoke && syncRequest && Date.now() - lastSyncReset < 500)) {
-      if (latestMux?.readyState >= 2) reconnect(true);
-      else if (wsState !== 'connected') reconnect();
+    const mux = latestMux, ready = mux?.readyState, now = Date.now();
+    const handshake = ready === 0 && now - latestMuxCreatedAt < 1000;
+    // Coalesce repeated signals for the *same* transport state, never a new close.
+    const duplicate = wakeRetryMux === mux && wakeRetryState === ready && now - lastWakeRetry < 400;
+    if (!duplicate && (ready >= 2 || (wsState !== 'connected' && !handshake))) {
+      if (reconnect(true)) { lastWakeRetry = now; wakeRetryMux = mux; wakeRetryState = ready; }
     }
     resetSync(true);
     syncViewport();
@@ -4352,7 +4414,8 @@ export const MOBILE_SHELL_JS = `(() => {
     },
     credentialsChanged() {
       resetSync();
-      if (muxStarting() || (latestMux?.readyState === 1 && wsState === 'connected')) return;
+      const ready = latestMux?.readyState;
+      if ((ready === 1 && wsState === 'connected') || (ready <= 1 && Date.now() - latestMuxCreatedAt < 3000)) return;
       reconnectUntil = 0;
       reconnect();
     },
@@ -4439,11 +4502,8 @@ export const MOBILE_SHELL_JS = `(() => {
               registerPopupNode(node);
             }
           }
-          for (const node of m.removedNodes) {
-            if (node instanceof HTMLElement) {
-              activePopups.delete(node);
-              popupResizeObserver?.unobserve(node);
-            }
+          if (m.removedNodes.length) {
+            for (const popup of activePopups) if (!popup.isConnected) unregisterPopup(popup);
           }
         }
         syncPopupOpenAttr();
@@ -4459,23 +4519,22 @@ export const MOBILE_SHELL_JS = `(() => {
     const titleEl = document.querySelector('title');
     if (titleEl) new MutationObserver(scheduleReportUi).observe(titleEl, { childList: true });
 
-    // Lazily attach drawer observer once React mounts [data-sidebar-drawer].
+    // React may mount the drawer after the shell. Probe briefly during boot rather
+    // than delivering every mutation of the streaming #root to a subtree observer.
     if (!ensureDrawerObserver() && document.getElementById('root')) {
-      const bootObserver = new MutationObserver(() => {
-        scheduleViewport();
+      const deadline = Date.now() + 8000;
+      const probeDrawer = delay => {
         ensureComposerExpandButton();
-        if (ensureDrawerObserver()) {
-          bootObserver.disconnect();
-          scheduleReportUi();
-        }
-      });
-      bootObserver.observe(document.getElementById('root'), { childList: true, subtree: true });
-      setTimeout(() => bootObserver.disconnect(), 8000);
+        if (ensureDrawerObserver()) { scheduleViewport(); scheduleReportUi(); }
+        else if (Date.now() < deadline) setTimeout(() => probeDrawer(Math.min(delay * 2, 500)), delay);
+      };
+      setTimeout(() => probeDrawer(60), 60);
     }
 
     lifecycle = (${createWebRemoteControlLifecycleRecovery.toString()})({
       documentTarget: document, windowTarget: globalThis,
       onSuspend() {
+        lastWakeRetry = -Infinity;
         captureVisualSnapshot(true);
         clearTimeout(syncTimer);
         lastSyncReset = 0;

@@ -149,9 +149,8 @@ struct RootView: View {
                 if model.showDeviceMenu, let anchor {
                     GeometryReader { proxy in
                         let trigger = proxy[anchor]
-                        let paired = model.localHost != nil && model.cloudHost != nil
-                        let width = max(0, min(paired ? max(280, trigger.width) : trigger.width, proxy.size.width - 16))
-                        let left = max(8, min(trigger.minX, proxy.size.width - width - 8))
+                        let width = max(0, min(trigger.width, proxy.size.width - 16))
+                        let left = max(8, min(trigger.maxX - width, proxy.size.width - width - 8))
                         let top = trigger.maxY + 6
                         ZStack(alignment: .topLeading) {
                             Color.black.opacity(0.08).contentShape(Rectangle()).ignoresSafeArea()
@@ -321,10 +320,11 @@ struct RootView: View {
                         Text(deviceStatusLabel(for: status, isCloud: isCloud))
                             .foregroundStyle(status.isHealthy ? Theme.meta : dotColor)
                             .lineLimit(1)
+                            .truncationMode(.tail)
                     }
                     .font(.caption2)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(minWidth: 0, maxWidth: .infinity, alignment: .leading)
                 if isSwitching {
                     ProgressView().controlSize(.mini).fixedSize()
                 } else if selected {
@@ -355,17 +355,6 @@ struct RootView: View {
                 }
                 .accessibilityIdentifier(isCloud ? "choose-cloud-device" : "choose-local-device")
                 .accessibilityAddTraits(selected ? .isSelected : [])
-            }
-            if model.localHost != nil && model.cloudHost != nil {
-                Divider()
-                Toggle(isOn: Binding(get: { model.autoFailoverEnabled }, set: { model.setAutoFailoverEnabled($0) })) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("断线无感自动接力").font(.subheadline.weight(.medium))
-                        Text("当前设备离线时自动切到另一端继续").font(.caption).foregroundStyle(Theme.meta)
-                    }
-                }
-                .padding(.horizontal, 10).padding(.vertical, 6)
-                .accessibilityIdentifier("auto-failover-toggle")
             }
             if let issue = model.deviceIssue {
                 HStack(spacing: 6) {

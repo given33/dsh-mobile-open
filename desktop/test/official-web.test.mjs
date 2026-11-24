@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import https from 'node:https';
-import { once } from 'node:events';
+import { on, once } from 'node:events';
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -15,7 +15,7 @@ import { createMobileFocusTracker } from '../lib/mobile-focus.mjs';
 import { mobileHostActions } from '../lib/mobile-host-actions.mjs';
 import { injectMobileShell, MOBILE_ANCHOR_PREBOOT_JS, MOBILE_SHELL_CSS, MOBILE_SHELL_JS } from '../lib/mobile-shell.mjs';
 
-async function fixture(t, { mode = 'legacy', actions = true, history, officeBody, rpcBody, extraFetch, streamValue } = {}) {
+async function fixture(t, { mode = 'legacy', actions = true, terminal = false, history, officeBody, rpcBody, extraFetch, streamValue } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-official-web-'));
   const distRoot = join(dir, 'dist');
   await mkdir(join(distRoot, 'assets'), { recursive: true });
@@ -126,7 +126,7 @@ async function fixture(t, { mode = 'legacy', actions = true, history, officeBody
     host: '127.0.0.1',
     port: 0,
     enabled: true,
-    actions,
+    actions, terminal,
   });
   t.after(async () => { await link.close(); await rm(dir, { recursive: true, force: true, maxRetries: 5 }); });
   const status = await link.status();
@@ -153,7 +153,7 @@ async function fixture(t, { mode = 'legacy', actions = true, history, officeBody
   }
   const paired = await request('/mobile/v1/pair', { method: 'POST', body: { code: new URL(status.pairing.link).searchParams.get('c'), device: { id: 'phone-official-123', name: 'test' } } });
   const token = JSON.parse(paired.body).token;
-  return { link, request, token, origin, seen, officialWeb, focus };
+  return { link, request, token, origin, seen, officialWeb, focus, emitFrame: frame => listeners.get('message')(JSON.stringify(frame)) };
 }
 
 test('official browser session uses a separate host-only cookie, mobile shell assets, gzip cache, and revokes with the phone', async t => {
@@ -482,7 +482,7 @@ test('anchor pre-boot interceptor and popup positioning engine accurately positi
   const panel = new FakeHTMLElement('aside', {width:200, height:250});
   panel.id = 'dsh-session-panel-chat'; panel.setAttribute('data-session-panel', 'overlay');
   panel.matches = () => panel.getAttribute('data-session-panel') === 'overlay';
-  const button = new FakeHTMLElement('button', {right:300, bottom:40, width:24, height:24});
+  const button = new FakeHTMLElement('button', {left:188, right:212, bottom:40, width:24, height:24});
   button.setAttribute('aria-controls', panel.id); button.setAttribute('aria-expanded','true');
   const decoy = new FakeHTMLElement('button'); decoy.setAttribute('aria-expanded','true');
   ctx.document.querySelectorAll = sel => sel === 'button[data-session-panel-toggle]' ? [decoy,button] : panel.matches() ? [panel] : [];
@@ -490,10 +490,11 @@ test('anchor pre-boot interceptor and popup positioning engine accurately positi
   bridge.repositionPopups();
   assert.equal(panel.style.getPropertyValue('--dml-panel-top'), '46px');
   assert.equal(panel.style.getPropertyValue('--dml-panel-left'), '100px');
-  button._rect.right = 470; bridge.setKeyboard(300,0); flush();
+  assert.equal(panel.style.getPropertyValue('--dml-panel-origin'), '100px');
+  Object.assign(button._rect, {left:446,right:470}); bridge.setKeyboard(300,0); flush();
   assert.equal(panel.style.getPropertyValue('--dml-panel-height'), '424px');
   assert.equal(panel.style.getPropertyValue('--dml-panel-left'), '183px');
-  button._rect.right = 120; bridge.repositionPopups();
+  Object.assign(button._rect, {left:4,right:28}); bridge.repositionPopups();
   assert.equal(panel.style.getPropertyValue('--dml-panel-left'), '10px');
   panel.setAttribute('data-session-panel','docked'); bridge.repositionPopups();
   assert.equal(panel.hasAttribute('data-dml-anchored'), false);
@@ -1325,8 +1326,107 @@ test('credential refresh preserves pending mux; forced reconnect bypasses deboun
   assert.equal(bridge.setLogicalConnection('disconnected'),false);
   assert.equal(calls.some(m=>m.state==='disconnected'),false);
   bridge.credentialsChanged(); bridge.wakeCheck(); await new Promise(r=>setImmediate(r)); assert.equal(count,0);
-  now += 2600; bridge.wakeCheck(); await new Promise(r=>setImmediate(r)); assert.equal(count,1);
-  ws.readyState=3; ws.dispatchEvent(new Event('close')); now+=801;
+  now += 1001; bridge.wakeCheck(); await new Promise(r=>setImmediate(r)); assert.equal(count,1);
+  ws.readyState=3; ws.dispatchEvent(new Event('close')); now+=401;
   bridge.reconnect(); bridge.reconnect(); assert.equal(count,2);
   bridge.reconnect(true); assert.equal(count,3);
+});
+
+async function officialMux(t) {
+  const server = await fixture(t, { actions: true, terminal: false });
+  const session = await server.request('/mobile/v1/web-session', { method: 'POST', token: server.token });
+  assert.equal(session.status, 200);
+  const cookie = session.headers['set-cookie'][0].split(';')[0];
+  const options = { rejectUnauthorized: false, headers: { Cookie: cookie, Origin: server.origin } };
+  const url = server.origin.replace('https:', 'wss:') + '/api/remote.mux';
+  return { ...server, cookie, options, url };
+}
+
+test('writable cloud denies optional terminal streams and RPCs without closing event or follow streams', async t => {
+  const { url, options, cookie, request, seen, emitFrame } = await officialMux(t);
+  const ws = new WebSocket(url, options);
+  try {
+    await once(ws, 'open');
+    let closed;
+    ws.once('close', (code, reason) => { closed = `${code} ${reason}`; });
+    const incoming = on(ws, 'message', { close: ['close'], signal: AbortSignal.timeout(5000) });
+    const next = async () => {
+      const result = await incoming.next();
+      assert.ok(!result.done, `optional subscription closed the carrier: ${closed}`);
+      return JSON.parse(result.value[0]);
+    };
+    const endpoints = ['$events', 'session/follow', 'terminal/watch', 'terminal/retain', 'terminal/attach'];
+    for (const endpoint of endpoints) ws.send(JSON.stringify({ type: 'open', endpoint, streamId: endpoint,
+      payload: { args: endpoint === 'session/follow' ? { request: { sessionId: 'fixture', activate: true } } : {} } }));
+    for (const endpoint of endpoints) {
+      const frame = await next();
+      assert.equal(frame.streamId, endpoint);
+      if (endpoint.startsWith('terminal/')) {
+        assert.equal(frame.type, 'error'); assert.equal(frame.error.code, 'terminal-disabled');
+        ws.send(JSON.stringify({type:'cancel', streamId:endpoint}));
+      } else assert.equal(frame.type, 'item');
+    }
+    for (const method of ['terminal/list','terminal/shells','terminal/environment']) {
+      const result = await request('/api/' + method, { method:'POST', cookie,
+        body:{type:'client-request',rpcId:method,method,payload:{args:{}}} });
+      assert.equal(result.status, 403); assert.equal(JSON.parse(result.body).error, 'terminal-disabled');
+    }
+    for (const streamId of endpoints.slice(0, 2)) {
+      const frame = {type:'item', streamId, value: streamId === '$events' ? {type:'ready',clientId:'c'} : {type:'delta',seq:2}};
+      emitFrame(frame); assert.deepEqual(await next(), frame);
+      ws.send(JSON.stringify({type:'cancel',streamId}));
+    }
+    ws.send(JSON.stringify({type:'open', endpoint:'session/follow', streamId:'follow-again',payload:{args:{}}}));
+    assert.equal((await next()).streamId, 'follow-again');
+    assert.deepEqual(seen.streams.map(s=>s.frame.streamId), ['$events','session/follow','$events','session/follow','follow-again']);
+    assert.equal(ws.readyState, WebSocket.OPEN);
+    await incoming.return();
+  } finally { ws.terminate(); }
+});
+
+test('foreground wake restores a closed loopback TLS mux through its first subscribed frame in <150ms', async t => {
+  const { url, options } = await officialMux(t);
+  const {ctx} = launchFixture('light');
+  ctx.document.visibilityState = 'visible';
+  ctx.WebSocket = class extends WebSocket { constructor() { super(url, options); } };
+  ctx.fetch = () => new Promise(()=>{});
+  vm.runInContext(MOBILE_SHELL_JS, ctx);
+  const bridge = ctx.__DSH_MOBILE_BRIDGE__;
+  let ws, received, connections = 0;
+  function connect() {
+    connections++; ws = new ctx.WebSocket(url);
+    received = once(ws,'message', {signal:AbortSignal.timeout(3000)});
+    ws.once('open',()=>ws.send(JSON.stringify({type:'open',endpoint:'$events',streamId:'events',payload:{args:{}}})));
+  }
+  ctx.__DSH_MOBILE_CORDIS__ = { reconnect: connect };
+  try {
+    connect(); await received; assert.ok(bridge.setLogicalConnection('connected'));
+    bridge.credentialsChanged(); bridge.wakeCheck(); assert.equal(connections, 1);
+    ws.close(); await once(ws,'close');
+    const start = performance.now();
+    bridge.wakeCheck(); bridge.wakeCheck();
+    assert.equal(connections, 2);
+    assert.equal(JSON.parse((await received)[0]).streamId, 'events');
+    const elapsed = performance.now()-start;
+    t.diagnostic(`wake to subscribed loopback WSS frame: ${elapsed.toFixed(1)} ms`);
+    assert.ok(elapsed < 150, `${elapsed} ms`);
+  } finally { ws?.terminate(); }
+});
+
+test('foreground retries an unconfirmed open mux immediately but protects the first second of a handshake', () => {
+  const {ctx} = launchFixture('light'); let now=5000, count=0;
+  ctx.Date = class extends Date {static now(){return now;}};
+  ctx.document.visibilityState='visible'; ctx.fetch=()=>new Promise(()=>{});
+  ctx.WebSocket=class extends EventTarget {readyState=0;};
+  ctx.__DSH_MOBILE_CORDIS__={reconnect(){count++;}};
+  vm.runInContext(MOBILE_SHELL_JS,ctx); const bridge=ctx.__DSH_MOBILE_BRIDGE__;
+  const ws=new ctx.WebSocket('/api/remote.mux');
+  now+=999; bridge.wakeCheck(); assert.equal(count,0);
+  now++; bridge.wakeCheck(); assert.equal(count,1);
+  ws.readyState=1; bridge.credentialsChanged(); assert.equal(count,1);
+  bridge.wakeCheck(); assert.equal(count,2);
+  now+=1999; bridge.credentialsChanged(); assert.equal(count,2);
+  now++; bridge.credentialsChanged(); assert.equal(count,3);
+  assert.ok(bridge.setLogicalConnection('connected')); now+=10000;
+  bridge.credentialsChanged(); bridge.wakeCheck(); assert.equal(count,3);
 });
