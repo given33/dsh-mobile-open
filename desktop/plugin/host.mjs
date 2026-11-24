@@ -5,6 +5,7 @@
 // and official frontend resources in-process, and gives the desktop panel
 // (plugin/client.js) a small API on the host's own web server, behind the
 // host's own login check.
+import { registerSourceCommands, registerSourceSteps } from '../lib/task-sync/source-state.mjs';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -115,6 +116,8 @@ export function apply(ctx, rawConfig = {}) {
         child.effect(() => () => { submitCloudTurn = undefined; });
       });
     }
+    ctx.inject(['tools','workspaceRegistry'], child => registerSourceSteps(child,role,root,workspaceRoute));
+    ctx.inject(['commands','workspaceRegistry'], child => registerSourceCommands(child,role,root,workspaceRoute));
     ctx.inject(['settings'], child => syncModels(child,rawConfig.taskSync.role,root));
     ctx.inject(['workspaceRegistry','sessionPersistence'], child => {
       taskSync(child, rawConfig.taskSync, root);

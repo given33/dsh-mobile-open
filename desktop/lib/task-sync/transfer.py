@@ -350,6 +350,9 @@ def main():
     outbox,inbox = root/'outbox',root/'inbox'
     for d in (outbox,inbox):d.mkdir(mode=0o700,parents=True,exist_ok=True)
     out_cache, in_cache = {}, {}
+    sources_available = Path(__file__).with_name('source_exchange.py').is_file()
+    if sources_available:
+        import source_exchange as source
     results_available = result_support()
     if results_available:
         result_op(root,'deliver','cloud' if mode=='--peer' else 'desktop')
@@ -365,9 +368,11 @@ def main():
         receipts = 'receipts-v1' in sys.argv[3:] and Path(__file__).with_name('portable_worker.py').is_file()
         def inventory():
             return [manifest(outbox, out_cache, catalogs), manifest(inbox, in_cache, catalogs, models)]
+        sources = sources_available and 'sources-v1' in sys.argv[3:]
+        source_spaces = set()
         offered_progress = set()
         previous = inventory()
-        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []) + (['catalog-v1'] if catalogs else []) + (['models-v1'] if models else []) + (['turns-v1'] if turns else []) + (['receipts-v1'] if receipts else []) + (['relay-v1'] if relay else []) + (['progress-v1'] if progress else []) + (['results-v1'] if results else []))
+        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []) + (['catalog-v1'] if catalogs else []) + (['models-v1'] if models else []) + (['turns-v1'] if turns else []) + (['receipts-v1'] if receipts else []) + (['relay-v1'] if relay else []) + (['progress-v1'] if progress else []) + (['results-v1'] if results else []) + (['sources-v1'] if sources else []))
         while True:
             cmd=receive(sys.stdin.buffer)
             if cmd==['end']:break
@@ -375,6 +380,14 @@ def main():
                 current = inventory()
                 send(sys.stdout.buffer, None if current == previous else current)
                 previous = current
+            elif sources and len(cmd)==2 and cmd[0]=='source-list':
+                source.support(root,'cloud',cmd[1]); available=source.inventory(root)
+                source_spaces={k for k in available if available[k]==cmd[1].get(k)}
+                send(sys.stdout.buffer,available)
+            elif sources and cmd[0] in ('source-get','source-put'):
+                try: answer=source.respond(root,cmd,source_spaces)
+                except (OSError,ValueError,source.sqlite3.Error,subprocess.SubprocessError): answer=None
+                send(sys.stdout.buffer,answer)
             elif results and len(cmd)==2 and cmd[0]=='results-list':
                 state=result_op(root,'inventory','cloud')
                 state['receipts']=result_op(root,'receipts','cloud',cmd[1])
@@ -404,7 +417,7 @@ def main():
             elif cmd[0]=='receipts' and receipts:
                 send(sys.stdout.buffer, receipt_page(root,cmd[1]))
             elif cmd == ['relay-list'] and relay:
-                send(sys.stdout.buffer, sorted(manifest(root/'relay-outgoing'))[:64])
+                send(sys.stdout.buffer, [n for n in sorted(manifest(root/'relay-outgoing')) if sources or 'sourceFence' not in json.loads(regular(root/'relay-outgoing',n).read_bytes())][:64])
             elif cmd[0] == 'relay-get' and relay:
                 send(sys.stdout.buffer, read_packet(root/'relay-outgoing', cmd[1]) if NAME.fullmatch(cmd[1]) else None)
             elif cmd[0] == 'relay-ack' and relay and NAME.fullmatch(cmd[1]):
@@ -433,6 +446,7 @@ def exchange(mode, root, host):
     if mode == '--watch':
         command += ' watch-v1'
     if Path(__file__).with_name('script_progress.py').is_file():command += ' progress-v1'
+    if Path(__file__).with_name('source_exchange.py').is_file():command += ' sources-v1'
     if result_support():command += ' results-v1'
     command += ' catalog-v1 models-v1 turns-v1 receipts-v1 relay-v1'
     with subprocess.Popen(['ssh','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=8','-o','ServerAliveInterval=10','-o','ServerAliveCountMax=2',host, command], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -475,11 +489,13 @@ def exchange(mode, root, host):
                         if receive(p.stdout) is not True: raise ValueError('Relay acknowledgement failed')
                     if mode != '--receive':
                         for job in sorted((root/'relay-outgoing').glob('*.json'))[:64]:
+                            if 'sources-v1' not in initial[2:] and 'sourceFence' in json.loads(job.read_bytes()): continue
                             send(p.stdin, ['relay-put',job.name,read_packet(job.parent,job.name)])
                             if receive(p.stdout) is not True: raise ValueError('Relay delivery failed')
                             job.unlink()
                 if mode != '--receive' and 'turns-v1' in initial[2:]:
                     for job in sorted((root/'cloud-outgoing').glob('*.json')):
+                        if 'sources-v1' not in initial[2:] and 'sourceFence' in json.loads(job.read_bytes()): continue
                         send(p.stdin, ['turn', job.name, read_packet(job.parent, job.name)])
                         if receive(p.stdout) is not True:
                             raise ValueError('Cloud did not acknowledge turn')
@@ -494,6 +510,9 @@ def exchange(mode, root, host):
                 # mailbox must not starve ordinary task progress on every retry.
                 if 'results-v1' in initial[2:] and result_support():
                     exchange_results(root,p.stdout,p.stdin,mode!='--receive')
+                if 'sources-v1' in initial[2:] and mode!='--receive':
+                    from source_exchange import exchange as exchange_sources
+                    exchange_sources(root,p.stdout,p.stdin,send,receive)
                 if not watching or time.monotonic() >= deadline:
                     break
                 time.sleep(1.5)

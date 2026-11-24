@@ -188,7 +188,7 @@ def publish_name(parent, temporary, filename):
         raise OSError(code, os.strerror(code))
 
 
-def publish(root, name, data):
+def publish(root, name, data, mode=0o600):
     with leaf(root, name, create=True) as (parent, filename):
         temporary = parent.child(".dsh-relay-" + secrets.token_hex(16))
         fd = os.open(
@@ -200,6 +200,8 @@ def publish(root, name, data):
         try:
             with os.fdopen(fd, "wb") as out:
                 out.write(data)
+                if os.name == "posix":
+                    os.fchmod(out.fileno(), mode & 0o777)
                 out.flush()
                 os.fsync(out.fileno())
             publish_name(parent, temporary, filename)

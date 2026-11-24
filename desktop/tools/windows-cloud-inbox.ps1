@@ -23,7 +23,7 @@ if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $python -PathType Leaf)) { 
 $pythonw = Join-Path (Split-Path $python) 'pythonw.exe'
 if (!(Test-Path -LiteralPath $pythonw -PathType Leaf)) { throw 'Python windowless runtime missing.' }
 # Keep the helper independent of an unpacked plugin directory or a future plugin upgrade.
-$modules = @('transfer.py','script_progress.py','result_delivery.py','project_inputs.py')
+$modules = @('transfer.py','script_progress.py','result_delivery.py','project_inputs.py','source_sync.py','source_exchange.py')
 $hashes = foreach ($module in $modules) {
     (Get-FileHash -LiteralPath (Join-Path (Split-Path $source) $module)).Hash.Substring(0,16)
 }

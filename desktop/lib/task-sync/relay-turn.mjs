@@ -1,3 +1,4 @@
+import { sealSource } from './source-state.mjs';
 import { commandSpec, eventSpec, placedOnPeer, placedReceipt, stoppedValue } from './command-placement.mjs';
 import { isDeepStrictEqual } from 'node:util';
 import { authorizeResults } from './relay-results.mjs';
@@ -68,6 +69,7 @@ export function registerTurnRelay(ctx,role,root) {
       if (rendered?.length !== 1 || rendered[0].type !== 'text' || rendered[0].text !== placedReceipt(intent.command)) throw Error('当前终端版本不支持接力回执；本机没有启动命令。');
     }
     const key = claimID(session.id,intent.command);
+    await sealSource(root,packet);
     packet.relayOutputs = await authorizeResults(root,role,project,packet.workspace,sandbox,session.id,key);
     const prefix = JSON.stringify({...packet,cloudIntent:intent}).slice(0,-1)+',"relayEnd":';
     if (Buffer.byteLength(prefix)+8192 > maxPacket) throw Error('会话超过接力包大小上限。');

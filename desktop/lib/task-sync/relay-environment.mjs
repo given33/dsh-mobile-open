@@ -8,7 +8,8 @@ import { constants } from 'node:fs';
 import { delimiter, isAbsolute, join, resolve } from 'node:path';
 
 import { gitReleaseHelper } from './git-release-tool.mjs';
-import { dispatchState } from './cloud-turn.mjs';
+import { dispatchState, workspaceRoute } from './cloud-turn.mjs';
+import { sourceState } from './source-state.mjs';
 import { handoffEvidence } from './relay-evidence.mjs';
 
 const programs = ['node', 'npm', 'npx', 'pnpm', 'yarn', 'python3.11', 'python3', 'python', 'py', 'git', 'bash', 'pwsh', 'powershell',
@@ -106,6 +107,8 @@ export function registerEnvironment(ctx,role,root) {
       const shells = ['bash','pwsh'].filter(n => !!ctx.tools.get(n,exec.agent,exec.toolSet));
       const info = await environment(cwd,role,shells);
       const session = exec.agent.session;
+      const project = ctx.get?.('workspaceRegistry')?.list().find(p => p.sessionIds.includes(session.id));
+      if (project) info.sourceSync = await sourceState(root, await workspaceRoute(root, role, project));
       info.scriptProgress = {nodeModule:new URL('../../tools/script-progress.mjs',import.meta.url).href,
         session:session.id, nativeTool:'relay_script_checkpoint', modelStateLimit:32*1024,
         maxStateBytes:256*1024, scope:'cooperative-replay-safe-compute'};

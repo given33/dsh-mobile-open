@@ -1,5 +1,6 @@
 // This is an explicit, single-destination command, NOT a trigger inferred from imported history.
 // A normal sync packet (even one containing /cloud-run in its log) cannot enqueue work.
+import { sealSource } from './source-state.mjs';
 import { link, mkdir, open, readFile, unlink, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, renameSync } from 'node:fs';
@@ -75,6 +76,7 @@ export function registerCloudRun(ctx, root) {
       await mkdir(dirQueue, {recursive:true,mode:0o700});
       const ready = join(dirQueue, claimID(sid,commandId) + '.json');
       const staging = join(dirQueue, hash(sid+':'+commandId) + '.tmp');
+      await sealSource(root,packet);
       packet.cloudIntent = intent;
       const prefix = JSON.stringify(packet).slice(0,-1) + ',"commandEnd":';
       if (Buffer.byteLength(prefix) + 4096 > 32*1024*1024) return {kind:'error',text:'会话太大，未提交云端任务。'};

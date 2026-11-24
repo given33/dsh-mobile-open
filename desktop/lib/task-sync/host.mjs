@@ -1,3 +1,4 @@
+import { sourceReady, watchSource } from './source-state.mjs';
 import { finishResultPlans, rememberResultPlan } from './relay-results.mjs';
 import { mkdir, readFile, writeFile, readdir, rename, stat, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -225,6 +226,7 @@ export function taskSync(ctx, config, root) {
       if ((packet.membership.state === 'archived') !== packet.archived) throw Error('Inconsistent task membership');
     }
     if (isRetired(packet.workspace)) { seen.set(name,mark); return; }
+    if (job && !await sourceReady(root,packet)) return; // Retry after durable source delivery and merge.
     const length = events ? committedLength(events) : 0;
     // A first turn is still in flight, not an empty finished session.
     if (!length && events?.length) { seen.set(name,mark); return; }
@@ -346,12 +348,12 @@ export function taskSync(ctx, config, root) {
     const first = setTimeout(() => tick(),400), interval = setInterval(() => tick(),12000);
     // Imported packets can arrive between full registry scans on either host.
     const polling = setInterval(() => tick(false),1500);
+    watchSource(root,signal);
     if (role === 'desktop') void watchPeer();
     return () => { clearTimeout(first); clearInterval(interval); clearInterval(polling); clearTimeout(timer); ctrl.abort(); };
   });
-  const boundaries = new Set(['agent/inbox/spliced','turn/start','user/message','step/end','tool/call','tool/result','turn/end','command/done']);
-  ctx.on('session/event', (session,event) => {
-    if (!boundaries.has(event.type)) return;
+  // Coalesce notifications, not events: each packet includes the complete native log prefix.
+  ctx.on('session/event', session => {
     dirty.add(session.id);
     schedule();
   });
