@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { admitCloudTurn, claimID } from '../lib/task-sync/cloud-turn.mjs';
 import { pack, packetName, unpack, hash } from '../lib/task-sync/log.mjs';
-import { autoFailoverContinuation, verifiedRelay } from '../lib/task-sync/relay-boundary.mjs';
+import { autoFailoverContinuation, isDisposedTurnEnd, verifiedRelay } from '../lib/task-sync/relay-boundary.mjs';
 import { registerDeviceSwitch } from '../lib/task-sync/device-switch.mjs';
 import { taskSync } from '../lib/task-sync/host.mjs';
 import { execFile } from 'node:child_process';
@@ -38,6 +38,18 @@ test('repair preserves durable tool results and closes only outstanding calls in
     {type:'step/end',seq:8,time:time+5,data:{turn,step}},
     {type:'turn/end',seq:9,time:time+5,data:{turn,reason:{kind:'interrupted'}}}]);
   assert.deepEqual(closeInterruptedTurn([...events,...closers]).closers, []);
+});
+
+test('v4 interrupted calls use native tool messages instead of v3 user wrappers', () => {
+  const events = log(['turn/start',{turn}], ['step/start',{step}], ['assistant/message',calls('pending')],
+    ['tool/call',{callId:'pending'}]);
+  const [result] = closeInterruptedTurn(events,4).closers;
+  const old = closeInterruptedTurn(events,3).closers[0].data.message;
+  assert.equal(old.role,'user');
+  assert.deepEqual(result.data.message, {id:'interrupted-tool-result-pending-4',role:'tool',toolCallId:'pending',
+    source:{kind:'tool',callId:'pending'},isError:true,content:old.content[0].content});
+  assert.equal(result.data.error.code,'TOOL_OUTCOME_UNKNOWN');
+  assert.deepEqual(result.sourceEventSeqs,[3]);
 });
 
 test('balanced logs stay unchanged and closed steps do not leak pending calls into later steps', () => {
@@ -117,7 +129,7 @@ async function pair(t, origin) {
     const json=async name=>JSON.parse(await readFile(join(root,'failover',name+'.json'),'utf8'));
     async function observe(obj) {await mkdir(join(root,'failover'),{recursive:true});await writeFile(join(root,'failover','peer-observed.json'),JSON.stringify(obj));}
     function preStep() {return listeners.get('agent/pre-step')[0]({agent:agents.get(sid),turn,step},async()=>({kind:'enter'}));}
-    return {root,role,registry,agents,rows,prompts,config,ctx,controller,tick,json,observe,preStep};
+    return {root,role,registry,agents,rows,prompts,config,ctx,controller,tick,json,observe,preStep,emit:event=>listeners.get('session/event')[0](agents.get(sid).session,event)};
   }
   const a=host(origin), b=host(origin==='desktop'?'cloud':'desktop');
   const project=await a.registry.create(join(dir,'src'),'Project');await project.attachSession(sid);
@@ -169,6 +181,54 @@ for (const origin of ['desktop','cloud']) {
     assert.deepEqual(b.rows.get(sid).events,[...events,...closeInterruptedTurn(events).closers]);
   });
 }
+const aborted = kind => ({kind:'aborted', ...(kind && {reason:{kind}})});
+function endSource(a, events, reason) {
+  const end = {seq:events.length,time:Date.now(),type:'turn/end',data:{turn,reason}};
+  events.push(end); a.emit(end);
+  a.agents.get(sid).status = 'idle';
+  return end;
+}
+
+test('native disposed shutdown uses the exact history for sealed and checkpoint-based takeover',async t=>{
+  const {a,b,events,name,observation}=await pair(t,'desktop');
+  const end=endSource(a,events,aborted('disposed'));
+  events.push({seq:events.length,time:Date.now(),type:'session-log-deepseek/delivery-accepted',data:{}});
+  assert.equal((await a.json('local-state')).active[sid].disposed,true);
+  await a.tick(); await copyFile(join(a.root,'outbox',name),join(b.root,'inbox',name));
+  await a.controller.prepareShutdown();
+  const {surrenders}=await a.json('local-state'), command=failoverCommand(sid,turn,events.length);
+  assert.equal(surrenders[sid].command,command);
+  const packet=JSON.parse(await readFile(join(a.root,'relay-outgoing',claimID(sid,command)+'.json')));
+  assert.deepEqual(packet.failoverClosers,[]);
+  assert.deepEqual(await unpack(packet,'desktop',name),events);
+  assert.equal(verifiedRelay(packet,events),true);
+  const timeout={...packet,cloudIntent:{...packet.cloudIntent,trigger:'timeout'}};
+  await assert.rejects(unpack(timeout,'desktop',name),/suffix/);
+  assert.equal(verifiedRelay(timeout,events),false);
+  assert.equal(verifiedRelay({...packet,inherited:1},events),false);
+  for (const patch of [{time:Date.now()-86401_000},{type:'other'}, {data:{turn:turn+1,reason:aborted('disposed')}}]) {
+    assert.equal(verifiedRelay(packet,events.map(e=>e===end?{...end,...patch}:e)),false);
+  }
+  const seen=observation(Date.now()-30000,true);
+  await b.observe(seen);await b.tick();assert.equal(b.prompts.length,0);
+  await b.observe({...seen,surrenders});await b.tick();await b.tick(false);
+  assert.deepEqual(b.rows.get(sid).events,events);assert.equal(b.prompts.length,1);
+});
+
+for (const reason of [aborted('user'),aborted('hook'),aborted('parent'),aborted(),
+  {kind:'aborted',cause:{kind:'disposed'}},{kind:'completed'}]) {
+  test(`shutdown cannot surrender or verify ${JSON.stringify(reason)}`,async t=>{
+    const {a,events}=await pair(t,'desktop');
+    const end=endSource(a,events,reason);
+    assert.equal(isDisposedTurnEnd(end,turn),false);
+    await a.controller.prepareShutdown();
+    const state=await a.json('local-state');assert.equal(state.active[sid],undefined);assert.equal(state.surrenders[sid],undefined);
+    const packet={source:sid,origin:'desktop',meta:{version:4},inherited:0,failoverClosers:[],cloudIntent:{v:2,
+      from:'desktop',session:sid,turn,baseSeq:events.length,trigger:'shutdown',boundary:'auto-failover',
+      created:Date.now(),command:failoverCommand(sid,turn,events.length)}};
+    assert.equal(verifiedRelay(packet,events),false);
+  });
+}
 test('archived, busy, incompatible policy, and divergent native histories cannot be overwritten or dispatched',async t=>{
   const {b,events,observation}=await pair(t,'desktop'),seen=observation(Date.now()-30000,true);
   await b.observe(seen);b.registry.archivedSessionIds.push(sid);await b.tick();b.registry.archivedSessionIds.pop();
@@ -184,6 +244,26 @@ test('archived, busy, incompatible policy, and divergent native histories cannot
 const run = promisify(execFile);
 const helper = fileURLToPath(new URL('../lib/task-sync/source_sync.py',import.meta.url));
 const python = (...args) => process.platform === 'win32' ? run('py',['-3.11','-B',...args]) : run('python3',['-B',...args]);
+test('Case D cuts only after the peer has the complete native cut including asynchronous metadata', async () => {
+  const fixtures = fileURLToPath(new URL('./e2e/', import.meta.url));
+  await python('-c', `import sys
+sys.path.insert(0,sys.argv[1])
+from auto_failover import conversation_cut_ready
+start = {'type':'step/start','seq':0,'data':{}}
+receipt = {'type':'session-log-deepseek/delivery-accepted','seq':1,'data':{}}
+title = {'type':'session/title','seq':2,'data':{'source':{'kind':'provider'}}}
+full = [start, receipt, title]
+def page(events):
+    return {'cursor':len(events)-1,'hasMore':False,'records':[{'type':'event','event':e} for e in events]}
+for n in (1,2):
+    assert not conversation_cut_ready(full[:n],page(full[:n]))  # same cut, metadata still in flight
+    assert not conversation_cut_ready(full[:n],page(full))      # source advanced, peer lagged
+assert not conversation_cut_ready([start,dict(title,seq=1)],page([start,dict(title,seq=1)]))
+assert not conversation_cut_ready(full,dict(page(full),hasMore=True))
+assert not conversation_cut_ready([start,dict(receipt,time=0),title],page(full))
+assert conversation_cut_ready(full,page(full))`, fixtures);
+});
+
 test('bound automatic takeover waits for latest revision and conflict resolution; cloud archives Git before prompt',async t=>{
   const {a,b,project,dir,observation}=await pair(t,'desktop');
   const key=hash('desktop:project'), target=join(b.root,'workspaces',key), seen=observation(Date.now()-21000,true);

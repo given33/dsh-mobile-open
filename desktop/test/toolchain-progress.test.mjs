@@ -64,6 +64,22 @@ test('real interrupted closers preserve resultSeq and distinguish reads, writes,
   assert.equal(taskProgress(events).interrupted,null);
 });
 
+test('only native disposal reports interrupted progress and a shutdown handoff', () => {
+  for (const kind of ['disposed','user','parent','hook',undefined]) {
+    const events=[];
+    append(events,'turn/start',{turn:1}); append(events,'step/start',p);
+    proposal(events,p,['read','bash']); start(events,p,'read'); result(events,p,'read',false); start(events,p,'bash');
+    append(events,'turn/end',{turn:1,reason:{kind:'aborted',...(kind && {reason:{kind}})}});
+    accept(events);
+    const progress=taskProgress(events), evidence=handoffEvidence(events,0,'chat','cloud');
+    if (kind === 'disposed') {
+      assert.deepEqual(progress.interrupted,{turn:1,step:null,reason:'aborted',pendingNotStarted:0,pendingUnknown:1});
+      assert.equal(progress.completedCount,1); assert.equal(progress.unverifiedCount,1);
+      assert.equal(evidence.boundary,'auto-failover'); assert.equal(evidence.missingResults,1);
+    } else { assert.equal(progress.interrupted,null); assert.equal(evidence,null); }
+  }
+});
+
 test('synthetic receipts must match native append, source, block id, error flag and known code', () => {
   for (const corrupt of [e=>e.surfaceOp='replace',e=>e.data.message.source.kind='user',e=>e.data.message.content[0].toolCallId='other',
     e=>e.data.message.content[0].isError=false,e=>e.data.error.code='OTHER',e=>e.data.message.role='assistant',e=>e.data.step++]) {

@@ -8,7 +8,7 @@ import { claimID, dispatchState, workspaceRoute } from './cloud-turn.mjs';
 import { packetName, maxPacket, pack, unpack, validID } from './log.mjs';
 import { sealSource, sourceState } from './source-state.mjs';
 import { nativeAcceptance } from './relay-evidence.mjs';
-import { isContinuation, compatiblePolicy } from './relay-boundary.mjs';
+import { isContinuation, compatiblePolicy, isDisposedTurnEnd, passiveDelivery } from './relay-boundary.mjs';
 
 
 export function failoverCommand(sessionId, turn, baseSeq) {
@@ -20,7 +20,7 @@ const unknown = 'The tool call was interrupted after it was recorded, but no res
 
 // Keep the serialized suffix identical to DSH interruptedTurnClosers. In particular,
 // a proposed tool call is not evidence that the tool started or that it failed.
-export function closeInterruptedTurn(events) {
+export function closeInterruptedTurn(events, version) {
   let openTurn = null, openStep = null;
   const pendingCalls = new Map();
   for (const {type, data, seq} of events) {
@@ -56,10 +56,10 @@ export function closeInterruptedTurn(events) {
     let seq = lastSeq + 1;
     for (const [callId, {step, callSeq}] of pendingCalls) {
       const started = callSeq !== undefined;
-      const message = {
-        id:`interrupted-tool-result-${callId}-${seq}`, role:'user', source:{kind:'tool', callId},
-        content:[{type:'tool-result', toolCallId:callId, isError:true, content:[{type:'text', text:started ? unknown : notStarted}]}],
-      };
+      const id = `interrupted-tool-result-${callId}-${seq}`, source = {kind:'tool', callId};
+      const content = [{type:'text', text:started ? unknown : notStarted}];
+      const message = version >= 4 ? {id, role:'tool', toolCallId:callId, isError:true, source, content} :
+        {id, role:'user', source, content:[{type:'tool-result', toolCallId:callId, isError:true, content}]};
       const error = started ? {name:'ToolOutcomeUnknownError', code:'TOOL_OUTCOME_UNKNOWN'} :
         {name:'ToolNotStartedError', code:'TOOL_NOT_STARTED'};
       closers.push({type:'tool/result', seq:seq++, time, data:{turn:openTurn, step, message, error}, surfaceOp:'append',
@@ -90,8 +90,8 @@ function durableJson(path, value) {
 }
 
 const matches = (row, epoch, turn) => !!epoch && row?.epoch === epoch && row.turn === turn;
-function sealIntent(packet, events, turn, epoch, trigger, security) {
-  packet.failoverClosers = closeInterruptedTurn(events).closers;
+function sealIntent(packet, events, turn, epoch, trigger, security, closers) {
+  packet.failoverClosers = closers;
   const baseSeq = events.length, session = packet.source;
   packet.cloudIntent = {v:2, boundary:'auto-failover', from:packet.origin, epoch, session, turn, baseSeq, trigger, security,
     command:failoverCommand(session, turn, baseSeq), created:Date.now()};
@@ -203,7 +203,9 @@ export function registerAutoFailover(ctx, role, root, config = {}) {
     if (stopping || !validID(session.id)) return;
     const row = active[session.id];
     if (event.type === 'turn/end' && row?.turn === event.data.turn && !row.fenced) {
-      delete active[session.id]; save();
+      if (isDisposedTurnEnd(event, row.turn)) { row.disposed = true; row.seq = event.seq + 1; }
+      else delete active[session.id];
+      save();
     } else if (event.type === 'turn/start' && holds[session.id] === undefined && !surrenders[session.id] && ctx.agents.get(session.id)?.status === 'running') {
       track(session,event.data.turn,null); save();
     } else if (row) { row.seq = event.seq + 1; if (event.type === 'step/start') row.step = event.data.step; }
@@ -215,7 +217,8 @@ export function registerAutoFailover(ctx, role, root, config = {}) {
     // A blocked native turn/end from our own fence must not replace the last
     // runnable open checkpoint on the standby when the network comes back.
     if (row?.fenced && events.findLast(e => e.type === 'turn/end')?.data?.turn === row.turn) return false;
-    if (!row || closeInterruptedTurn(events).openTurn !== row.turn) return;
+    if (!row || (closeInterruptedTurn(events).openTurn !== row.turn &&
+        !isDisposedTurnEnd(events.findLast(e => !passiveDelivery(e)), row.turn))) return;
     try { await sealSource(root,packet); }
     catch (error) { row.sourceBlocked = true; save(); throw error; }
     row.sourceBlocked = false;
@@ -233,12 +236,13 @@ export function registerAutoFailover(ctx, role, root, config = {}) {
     const reader = await ctx.sessionPersistence.open(sid,'read',{});
     try {
       const {events} = await reader.read();
-      if (closeInterruptedTurn(events).openTurn !== row.turn) return;
+      const {openTurn, closers} = closeInterruptedTurn(events, reader.header.version);
+      if (openTurn !== row.turn && !isDisposedTurnEnd(events.findLast(e => !passiveDelivery(e)), row.turn)) return;
       const packet = await pack(role,await workspaceRoute(root,role,project),reader.header,reader.inheritedEventCount,false,events);
       await sealSource(root,packet);
       renew(sid,row,observed());
       if (row.fenced) return;
-      sealIntent(packet,events,row.turn,epoch,'shutdown',row.security);
+      sealIntent(packet,events,row.turn,epoch,'shutdown',row.security,closers);
       const key = claimID(sid,packet.cloudIntent.command);
       if (Buffer.byteLength(JSON.stringify(packet)) > maxPacket) throw Error('Oversized shutdown relay');
       surrenders[sid] = {...row,sourceBlocked:false,sourceFence:packet.sourceFence,command:packet.cloudIntent.command,baseSeq:events.length}; save();
@@ -297,10 +301,12 @@ export function registerAutoFailover(ctx, role, root, config = {}) {
     if (packet.archived || packet.failoverEpoch !== seen.peerEpoch || packet.cloudIntent || packet.failoverClosers) return;
     const events = await unpack(packet,peer,name);
     if (!events) return;
-    const turn = closeInterruptedTurn(events).openTurn;
+    const {openTurn, closers} = closeInterruptedTurn(events, packet.meta.version);
+    const turn = openTurn ?? seen.surrenders?.[sid]?.turn;
+    if (openTurn === null && !isDisposedTurnEnd(events.findLast(e => !passiveDelivery(e)), turn)) return;
     if (!Number.isSafeInteger(turn)) return;
     const trigger = triggerFor(seen,sid,turn,packet);
-    if (!trigger) return;
+    if (!trigger || (openTurn === null && trigger !== 'shutdown')) return;
     const evidence = trigger === 'timeout' ? seen.active[sid] : seen.surrenders[sid];
     if (evidence.sourceBlocked) return;
     if (trigger === 'shutdown' && evidence.baseSeq !== undefined && evidence.baseSeq !== events.length) return;
@@ -311,7 +317,7 @@ export function registerAutoFailover(ctx, role, root, config = {}) {
       if (packet.sourceFence && packet.sourceFence.epoch !== evidence.sourceFence.epoch) return;
       if (!packet.sourceFence || evidence.sourceFence.seq > packet.sourceFence.seq) packet.sourceFence = evidence.sourceFence;
     }
-    sealIntent(packet,events,turn,seen.peerEpoch,trigger,security);
+    sealIntent(packet,events,turn,seen.peerEpoch,trigger,security,closers);
     if (!await canReceive(packet)) return;
     await receiveRelayFn(packet, () => {
       if (stopping || unavailable(sid)) return false;

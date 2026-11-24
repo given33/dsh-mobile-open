@@ -3,6 +3,8 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -52,6 +54,72 @@ class WatchTest(unittest.TestCase):
             self.assertEqual(list((cloud/'inbox').iterdir()), [])
             self.assertFalse((desktop/'failover').exists())
             self.assertFalse((cloud/'failover').exists())
+
+    def test_windows_mailbox_bundle_exchanges_without_the_plugin_tree(self):
+        installer = SCRIPT.parents[2] / 'tools' / 'windows-cloud-inbox.ps1'
+        manifest = re.search(r"(?m)^\$modules\s*=\s*@\(([^)]*)\)", installer.read_text(encoding='utf-8'))
+        self.assertIsNotNone(manifest, 'missing Windows receiver module list')
+        # The two 64-character IDs in the staging path can exhaust MAX_PATH under a nested TEMP.
+        parent = Path.home() if sys.platform == 'win32' else None
+        with tempfile.TemporaryDirectory(dir=parent) as tmp:
+            bundle, desktop, cloud = [Path(tmp) / part for part in ('receiver', 'desktop', 'cloud')]
+            bundle.mkdir()
+            for item in manifest[1].split(','):
+                module = item.strip()
+                self.assertRegex(module, r"^'[a-z_]+\.py'$")
+                shutil.copyfile(SCRIPT.with_name(module[1:-1]), bundle / module[1:-1])
+
+            # Both interpreters ignore PYTHONPATH and site packages; cwd is the installed bundle.
+            python = [sys.executable, '-E', '-S', '-B']
+            def run(*args, data=None):
+                proc = subprocess.run([*python, *args], cwd=bundle, capture_output=True, timeout=30,
+                                      input=json.dumps(data).encode() if data is not None else None)
+                self.assertEqual(proc.returncode, 0, proc.stderr.decode(errors='replace'))
+
+            route, sid, epoch = 'desktop:fixture', 'fixture-turn', 'd' * 32
+            key = hashlib.sha256(route.encode()).hexdigest()
+            for node in (desktop, cloud):
+                project = node / 'project'
+                project.mkdir(parents=True)
+                run('source_sync.py', 'bind', node, key, project, 'sample.py')
+            (cloud / 'project/sample.py').write_bytes(b'print(42)\n')
+            surrendered = {sid: dict(turn=1, epoch=epoch)}
+            (desktop / 'failover').mkdir()
+            (desktop / 'failover/local-state.json').write_text(json.dumps(
+                dict(v=1, role='desktop', epoch=epoch, surrenders=surrendered)))
+
+            request, name = '1' * 64, 'reports/answer.txt'
+            grant = dict(owner='desktop', route=route, names=[name])
+            (desktop / 'relay-outputs.json').write_text(json.dumps({route: [name]}))
+            run('result_delivery.py', 'grant', desktop, request,
+                data=dict(grant, session='2' * 64, folder=str(desktop / 'project')))
+            staged = cloud / 'workspaces' / key / 'dsh-returns' / request
+            (staged / name).parent.mkdir(parents=True)
+            (staged / name).write_bytes(b'42')
+            run('result_delivery.py', 'capture', cloud, request, data=grant)
+
+            # Substitute only the SSH hop. Forward the actual client's capability list to --peer.
+            loopback = """\
+import runpy, subprocess, sys
+peer_root = sys.argv.pop(1)
+sys.argv.pop(0)
+spawn = subprocess.Popen
+def connect(args, **kwargs):
+    if args[0] != 'ssh':
+        return spawn(args, **kwargs)
+    remote = args[-1].split()
+    assert args[-2] == 'fixture'
+    flags = remote[remote.index('--peer') + 2:]
+    return spawn([sys.executable, '-E', '-S', '-B', 'transfer.py', '--peer', peer_root, *flags], **kwargs)
+subprocess.Popen = connect
+runpy.run_path(sys.argv[0], run_name='__main__')
+"""
+            run('-c', loopback, cloud, 'transfer.py', '--mailbox', desktop, 'fixture')
+            observed = json.loads((cloud / 'failover/peer-observed.json').read_bytes())
+            self.assertEqual(observed['surrenders'], surrendered)
+            self.assertEqual(observed['lastSeenAt'], 0)  # The mailbox is not a live desktop host.
+            self.assertEqual((desktop / 'project/sample.py').read_bytes(), b'print(42)\n')
+            self.assertEqual((desktop / 'project' / name).read_bytes(), b'42')
 
     def test_failover_mailbox_and_cloud_liveness_over_real_peer(self):
         with tempfile.TemporaryDirectory() as tmp:

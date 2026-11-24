@@ -5,7 +5,7 @@ import { link, mkdir, open, readFile, unlink, writeFile } from 'node:fs/promises
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, renameSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
-import { committedLength, pack, validID } from './log.mjs';
+import { committedLength, hash, pack, validID } from './log.mjs';
 
 import { verifiedRelay, continuation, autoFailoverContinuation } from './relay-boundary.mjs';
 

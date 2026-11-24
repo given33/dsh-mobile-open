@@ -71,7 +71,7 @@ def test(root,cli,tgz):
             h=Host(root/role,cli,tgz,'http://127.0.0.1:'+str(server.server_port)+'/'+role); hosts.append(h)
             cfg=h.root/'profiles/web/cordis.patch.yml'; cfg.write_text(cfg.read_text().replace('enabled: false','enabled: true\n    host: 127.0.0.1\n    actions: true').replace('cloudTurns: true','cloudTurns: true, turnRelay: true'),encoding='utf8'); h.start()
         source,target=hosts; a,b=map(phone,hosts)
-        assert b('status',{})=={'role':'cloud','protocol':1}
+        assert b('status',{})=={'role':'cloud','protocol':1,'autoFailover':True,'failoverProtocol':1}
         workspace=source.root/'project'; workspace.mkdir(); wid=source.rpc('workspace/create',{'path':str(workspace)})['workspace']['workspaceId']; sid=source.rpc('session/create',{'workspaceId':wid})['sessionId']
         key=hashlib.sha256(('desktop:'+wid).encode()).hexdigest(); authorize(source.sync,key,workspace,['step.txt'])
         def replicated_scope():

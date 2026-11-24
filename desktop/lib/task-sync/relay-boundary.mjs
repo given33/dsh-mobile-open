@@ -17,6 +17,11 @@ export function singleCall(events,call,boundary) {
 }
 // Native provider delivery receipts neither steer the model nor start a tool or a turn.
 export const passiveDelivery = e => e?.type === 'session-log-deepseek/delivery-accepted';
+// DSH persists the loop cancellation cause inside reason.reason (not reason.cause).
+export function isDisposedTurnEnd(event, turn) {
+  return event?.type === 'turn/end' && (turn === undefined || event.data?.turn === turn) &&
+    event.data?.reason?.kind === 'aborted' && isDeepStrictEqual(event.data.reason.reason, {kind:'disposed'});
+}
 export function validTail(intent,call,tail) {
   if (intent?.boundary !== undefined && intent.boundary !== 'before-shell') return false;
   if (!Array.isArray(tail) || tail.length > 16 || call?.type !== 'tool/call' || tail.at(-1)?.type !== 'turn/end') return false;
@@ -52,13 +57,19 @@ export function verifiedRelay(packet,events) {
   if (intent.boundary === 'auto-failover') {
     const {turn, baseSeq, trigger} = intent, tail = packet.failoverClosers;
     if (!['shutdown','timeout'].includes(trigger) || packet.archived || !Number.isSafeInteger(turn) || turn < 0 ||
-        !Number.isSafeInteger(baseSeq) || baseSeq <= packet.inherited || !Array.isArray(tail) || !tail.length || tail.length > 1024 ||
+        !Number.isSafeInteger(baseSeq) || baseSeq <= packet.inherited || !Array.isArray(tail) || tail.length > 1024 ||
         events.length !== baseSeq + tail.length || packet.commandEnd !== undefined || packet.relayEnd !== undefined ||
         intent.command !== failoverCommand(packet.source, turn, baseSeq)) return false;
     const prefix = events.slice(0, baseSeq), start = prefix.findLast(e => e.type === 'turn/start');
     if (!start || start.seq < packet.inherited || !Number.isSafeInteger(prefix.at(-1)?.time) ||
         prefix.at(-1).time < Date.now() - 86400_000 || prefix.at(-1).time > Date.now() + 60000) return false;
-    const {openTurn, closers} = closeInterruptedTurn(prefix);
+    if (!tail.length) {
+      const end = prefix.findLast(e => !passiveDelivery(e));
+      return trigger === 'shutdown' && isDisposedTurnEnd(end, turn) && start.data?.turn === turn &&
+        start.seq < end.seq && !prefix.slice(start.seq + 1, end.seq).some(e => e.type === 'turn/end') &&
+        Number.isSafeInteger(end.time) && end.time >= Date.now() - 86400_000 && end.time <= Date.now() + 60000;
+    }
+    const {openTurn, closers} = closeInterruptedTurn(prefix, packet.meta.version);
     return turn === openTurn && isDeepStrictEqual(closers, tail) && isDeepStrictEqual(closers, events.slice(baseSeq));
   }
   const tail = packet.relayEnd;

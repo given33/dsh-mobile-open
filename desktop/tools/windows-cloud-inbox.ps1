@@ -1,4 +1,6 @@
-# Transports results and explicitly submitted cloud turns. Never starts DSH or executes a prompt locally.
+# While desktop DSH is closed, deliver queued turns, graceful handoffs, checkpoints and source revisions;
+# collect cloud results over SSH. With failover-v1, --mailbox reports hostAlive: false: it never renews
+# the closed desktop host's lease, starts DSH, or executes prompts locally.
 [CmdletBinding(DefaultParameterSetName='Enable')]
 param(
     [Parameter(Mandatory,ParameterSetName='Enable')][ValidatePattern('^[A-Za-z0-9][A-Za-z0-9_.-]*$')][string]$SshHost,

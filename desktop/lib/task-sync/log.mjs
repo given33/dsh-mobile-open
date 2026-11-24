@@ -58,7 +58,8 @@ export async function unpack(packet, peer, name) {
   if (!Array.isArray(events) || inherited > events.length || events.some((e,i) => !e || e.seq !== i || typeof e.type !== 'string')) throw Error('Invalid task log');
   if (packet.failoverClosers !== undefined) {
     const tail = packet.failoverClosers;
-    if (!Array.isArray(tail) || !tail.length || tail.length > 1024 || tail.at(-1)?.type !== 'turn/end' ||
+    if (!Array.isArray(tail) || tail.length > 1024 ||
+        (tail.length ? tail.at(-1)?.type !== 'turn/end' : packet.cloudIntent.trigger !== 'shutdown') ||
         tail.some((e,i) => e?.seq !== events.length + i || !Number.isSafeInteger(e.time))) throw Error('Invalid failover suffix');
     events.push(...tail);
   }

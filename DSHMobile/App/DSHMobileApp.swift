@@ -124,12 +124,33 @@ struct RootView: View {
                 .ignoresSafeArea(.all, edges: .bottom)
             }
         }
+        .overlay(alignment: .top) {
+            if let notice = model.failoverNotice {
+                Button(action: model.dismissFailoverNotice) {
+                    HStack(spacing: 7) {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                        Text(notice).font(.footnote.weight(.medium))
+                        Image(systemName: "xmark").font(.caption2)
+                    }
+                    .padding(.horizontal, 14).padding(.vertical, 9)
+                    .background(.regularMaterial, in: Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(notice))
+                .accessibilityHint("轻点关闭提示")
+                .accessibilityIdentifier("failover-notice")
+                .padding(.top, 48)
+                .transition(.opacity)
+            }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: model.failoverNotice)
         .overlayPreferenceValue(DeviceButtonBounds.self) { anchor in
             ZStack(alignment: .topLeading) {
                 if model.showDeviceMenu, let anchor {
                     GeometryReader { proxy in
                         let trigger = proxy[anchor]
-                        let width = max(0, min(trigger.width, proxy.size.width - 16))
+                        let paired = model.localHost != nil && model.cloudHost != nil
+                        let width = max(0, min(paired ? max(280, trigger.width) : trigger.width, proxy.size.width - 16))
                         let left = max(8, min(trigger.minX, proxy.size.width - width - 8))
                         let top = trigger.maxY + 6
                         ZStack(alignment: .topLeading) {
@@ -334,6 +355,17 @@ struct RootView: View {
                 }
                 .accessibilityIdentifier(isCloud ? "choose-cloud-device" : "choose-local-device")
                 .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+            if model.localHost != nil && model.cloudHost != nil {
+                Divider()
+                Toggle(isOn: Binding(get: { model.autoFailoverEnabled }, set: { model.setAutoFailoverEnabled($0) })) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("断线无感自动接力").font(.subheadline.weight(.medium))
+                        Text("当前设备离线时自动切到另一端继续").font(.caption).foregroundStyle(Theme.meta)
+                    }
+                }
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .accessibilityIdentifier("auto-failover-toggle")
             }
             if let issue = model.deviceIssue {
                 HStack(spacing: 6) {

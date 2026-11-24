@@ -1,9 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { claimID, submittedText, admitCloudTurn, dispatchState, reconcileDispatch } from '../lib/task-sync/cloud-turn.mjs';
+import { claimID, registerCloudRun, submittedText, admitCloudTurn, dispatchState, reconcileDispatch } from '../lib/task-sync/cloud-turn.mjs';
 
 const sid = 'active-session';
 const intent = {v:1, session:sid, command:'cmd-1', created:Date.now()};
@@ -19,6 +19,32 @@ test('a passive history, expired ticket, cancellation, and subsequent local work
   }
   assert.equal(submittedText(intent,sid,[...history,{type:'turn/start'}]),undefined);
   assert.equal(submittedText(intent,sid,[history[0],{...history[1],data:{commandId:'cmd-1',kind:'error'}}]),undefined);
+});
+
+test('owner command stages a prefix and publishes only after the matching native completion', async t => {
+  const root = await mkdtemp(join(tmpdir(),'dsh-stage-'));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  let handler, onEvent;
+  const signal = new AbortController().signal, commandId = intent.command;
+  const session = {id:sid,seq:1}, project = {id:'ws',title:'Work',path:root,sessionIds:[sid]};
+  registerCloudRun({invocation:{peer:{principal:{kind:'owner'}}},
+    on:(_,fn)=>{onEvent=fn;}, commands:{register:def=>{handler=def.handler;}},
+    workspaceRegistry:{list:()=>[project],archivedSessionIds:[]}, sessions:{flush:async()=>{}},
+    sessionPersistence:{open:async()=>({header:{id:sid},inheritedEventCount:0,
+      read:async()=>({events:[{seq:0,...history[0]}]}),close:async()=>{}})},
+  },root);
+  const result = await handler({agent:{session,status:'idle',inbox:{nextStep:[],nextTurn:[]}},
+    rawInput:'summarize',commandId,signal});
+  assert.equal(result.kind,'success');
+  const dir = join(root,'cloud-outgoing'), staged = await readdir(dir);
+  assert.equal(staged.length,1); assert.match(staged[0],/^[a-f0-9]{64}\.tmp$/);
+  const done = {seq:1,...history[1]};
+  onEvent(session,{...done,data:{...done.data,commandId:'other'}});
+  assert.deepEqual(await readdir(dir),staged);
+  onEvent(session,done);
+  const ready = claimID(sid,commandId)+'.json';
+  assert.deepEqual(await readdir(dir),[ready]);
+  assert.deepEqual(JSON.parse(await readFile(join(dir,ready),'utf8')).commandEnd,done);
 });
 
 test('simultaneous deliveries and a lost acceptance reply cannot execute the same native turn twice', async t => {

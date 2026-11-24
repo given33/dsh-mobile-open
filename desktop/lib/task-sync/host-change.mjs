@@ -1,7 +1,7 @@
 // Native runtime context is evidence about where a model step ran, not a grant to run another one.
 import { randomUUID } from 'node:crypto';
 import { callLedger } from './relay-evidence.mjs';
-import { isContinuation } from './relay-boundary.mjs';
+import { isContinuation, isDisposedTurnEnd } from './relay-boundary.mjs';
 
 const hostSection = 'mobile-link:execution-host';
 const observationTools = new Set(['read', 'read_image', 'glob', 'grep', 'relay_environment', 'relay_wait_deployment']);
@@ -37,7 +37,7 @@ export function taskProgress(events, inherited = 0) {
     if (!d) continue;
     if (Number.isInteger(d.step) && Number.isInteger(d.turn)) stepAt(d.turn,d.step);
     if (type === 'step/end' || type === 'turn/end') boundary = {seq, type, turn:d.turn, step:d.step, reason:d.reason?.kind};
-    if (type === 'turn/end') interrupted = ['interrupted','blocked'].includes(d.reason?.kind) ?
+    if (type === 'turn/end') interrupted = (['interrupted','blocked'].includes(d.reason?.kind) || isDisposedTurnEnd(events[i])) ?
       {turn:d.turn, step:d.step ?? null, reason:d.reason.kind, pendingNotStarted:0, pendingUnknown:0} : null;
   }
   const counts = {}, attention = [], recent = [];

@@ -399,12 +399,14 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         return route
     }
 
+    private static let autoFailoverKey = "dsh.mobile.autoFailover"
     private static let followKey = "dsh.mobile.followDesktop"
     private static let notificationsKey = "dsh.mobile.taskNotifications"
 
     init(environment: [String: String] = ProcessInfo.processInfo.environment) {
         let fixture = environment["DSH_DEMO_LINK"] ?? ""
         ephemeral = !fixture.isEmpty || environment["DSH_UI_TEST"] == "1"
+        autoFailoverEnabled = !ephemeral && (UserDefaults.standard.object(forKey: Self.autoFailoverKey) as? Bool ?? true)
         followDesktop = ephemeral ? false : UserDefaults.standard.bool(forKey: Self.followKey)
         notificationsEnabled = ephemeral ? false : UserDefaults.standard.bool(forKey: Self.notificationsKey)
         savedDesktops = ephemeral ? [] : SecureStore.desktops()
@@ -429,6 +431,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     }
 
     deinit {
+        failoverTask?.cancel()
+        failoverNoticeTask?.cancel()
         transport?.invalidate()
         pathMonitor?.cancel()
         if !ephemeral {
@@ -460,6 +464,10 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     @Published private(set) var switchTargetID: String?
     var switchingDevice: Bool { switchTargetID != nil }
     @Published private(set) var offerCloud = false
+    @Published private(set) var autoFailoverEnabled: Bool
+    @Published private(set) var failoverNotice: String?
+    private var failoverTask: Task<Void, Never>?
+    private var failoverNoticeTask: Task<Void, Never>?
     private var offeredThisOutage = false
     private var offlineAttempts = 0
     private var familyID: String?
@@ -468,6 +476,42 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     private var grantTask: Task<Void, Never>?
     private var switchID = UUID()
     var localHost: PairedDesktop? { savedDesktops.first { $0.id == familyID } }
+
+    var pairedPeerHost: PairedDesktop? {
+        guard let id = desktop?.id else { return nil }
+        if id == localHost?.id { return cloudHost }
+        if id == cloudHost?.id { return localHost }
+        return nil
+    }
+
+    func setAutoFailoverEnabled(_ enabled: Bool) {
+        guard enabled != autoFailoverEnabled else { return }
+        cancelFailoverProbe()
+        autoFailoverEnabled = enabled
+        if !ephemeral { UserDefaults.standard.set(enabled, forKey: Self.autoFailoverKey) }
+        offeredThisOutage = false
+        offerCloud = false
+    }
+
+    private func cancelFailoverProbe() {
+        failoverTask?.cancel()
+        failoverTask = nil
+    }
+
+    func dismissFailoverNotice() {
+        failoverNoticeTask?.cancel()
+        failoverNoticeTask = nil
+        failoverNotice = nil
+    }
+
+    private func showFailoverNotice(_ text: String) {
+        dismissFailoverNotice()
+        failoverNotice = text
+        failoverNoticeTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(4500)) } catch { return }
+            self?.dismissFailoverNotice()
+        }
+    }
 
     private func loadFamily(_ primary: PairedDesktop) {
         familyID = primary.id
@@ -618,9 +662,84 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         }
     }
 
+    // Only the empty status request advertises capabilities (command status does not).
+    private static func relayCapability(_ destination: LinkClient, role: String) async throws -> JSON {
+        let status = try await destination.rpc("mobileRelay/status", args: .object([:]))
+        guard status["role"] == .string(role), status["protocol"] == .number(1) else { throw LinkError.badResponse }
+        return status
+    }
+
+    private static func followableState(_ destination: LinkClient, session: String, role: String) async throws -> String {
+        try Task.checkCancellation()
+        let status = try await destination.rpc("mobileRelay/status", args: .object(["sessionId": .string(session)]))
+        guard status["role"] == .string(role), status["protocol"] == .number(1) else { throw LinkError.badResponse }
+        let state = status["state"].string
+        guard ["running", "accepted", "auto-taking-over", "idle"].contains(state) else {
+            throw ClientError.message("目标设备尚未接管此会话。没有重跑任务。")
+        }
+        return state
+    }
+
+    private func canFollowPeer(_ target: PairedDesktop, from source: PairedDesktop) -> Bool {
+        !Task.isCancelled && autoFailoverEnabled && isForeground && !revoked && !switchingDevice &&
+            desktop?.id == source.id && pairedPeerHost?.id == target.id && wsHealth != .connected
+    }
+
+    private func attemptSeamlessFailover(to target: PairedDesktop, from source: PairedDesktop) {
+        cancelFailoverProbe()
+        let role = target.id == familyID ? "desktop" : "cloud"
+        failoverTask = Task { [weak self] in
+            let channel = PinnedTransport(fingerprint: target.fingerprint)
+            var adopted = false
+            defer {
+                if !adopted { channel.invalidate() }
+                if !Task.isCancelled { self?.failoverTask = nil }
+            }
+            do {
+                let ready = try await BrowserConnector.connect(target, keeping: nil, transport: channel, timeout: 5)
+                guard self?.canFollowPeer(target, from: source) == true else { return }
+                let session = self?.currentSessionID
+                var legacy = false
+                if let session {
+                    let destination = LinkClient(transport: channel, base: ready.endpoint.baseURL, token: target.token)
+                    let capability = try await Self.relayCapability(destination, role: role)
+                    if capability["autoFailover"].bool {
+                        _ = try await Self.followableState(destination, session: session, role: role)
+                    } else { legacy = true }
+                }
+                guard let self, self.canFollowPeer(target, from: source), self.currentSessionID == session else { return }
+                if legacy && self.taskRunning {
+                    self.offerCloud = target.id == self.cloudHost?.id
+                    return
+                }
+                var chosen = target; chosen.preferred = ready.endpoint
+                adopted = true
+                self.selectedDevice = chosen
+                self.deviceStatuses[chosen.id] = .online(route: ready.endpoint.kind.label, latencyMs: ready.latencyMs)
+                self.activate(chosen, transport: channel, ready: ready, sharedSessionID: session)
+                self.showFailoverNotice(role == "cloud" ? "电脑已离线，已自动切至云端" : "云端已离线，已自动切至电脑")
+                self.performHaptic("success")
+            } catch {
+                // The independent source reconnect loop remains active; never request a turn here.
+            }
+        }
+    }
+
+    private static func isOfflineError(_ error: Error) -> Bool {
+        if (error as? LinkError) == .unreachable { return true }
+        guard let error = error as? URLError else { return false }
+        switch error.code {
+        case .timedOut, .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed, .networkConnectionLost, .notConnectedToInternet:
+            return true
+        default: return false
+        }
+    }
+
     // The browser stays on the source until the target confirms native admission.
     func chooseDevice(_ target: PairedDesktop) {
         guard let owner = familyID, [localHost?.id, cloudHost?.id].contains(target.id), !switchingDevice else { return }
+        cancelFailoverProbe()
+        dismissFailoverNotice()
         let ticket = UUID(); switchID = ticket
         offerCloud = false; deviceIssue = nil
         performHaptic("selection")
@@ -644,6 +763,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             do {
                 let ready = try await BrowserConnector.connect(target, keeping: nil, transport: channel)
                 guard let self, !Task.isCancelled, self.switchID == ticket, self.familyID == owner else { return }
+                var notice: String?
                 if let session, let source, source.id != target.id {
                     let destination = LinkClient(transport: channel, base: ready.endpoint.baseURL, token: target.token)
                     let targetRole = target.id == owner ? "desktop" : "cloud"
@@ -652,33 +772,44 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                     let existingCommand = defaults.string(forKey: key).flatMap { $0.isEmpty ? nil : $0 }
                     var command = existingCommand ?? UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
                     let statusArgs: () -> JSON = { .object(["sessionId": .string(session), "command": .string(command)]) }
+                    let capability = try await Self.relayCapability(destination, role: targetRole)
                     // If the reply was lost after the old host yielded, reconnect to the SAME claim.
                     let previous: JSON
-                    if existingCommand != nil {
+                    if existingCommand != nil, sourceLink != nil || !capability["autoFailover"].bool {
                         previous = try await destination.rpc("mobileRelay/status", args: statusArgs())
+                        guard previous["role"] == .string(targetRole), previous["protocol"] == .number(1) else { throw LinkError.badResponse }
                     } else {
                         previous = .null
                     }
-                    var capability = previous
-                    if capability["role"] == .null || capability["protocol"] == .null {
-                        capability = try await destination.rpc("mobileRelay/status", args: .object([:]))
-                    }
-                    guard capability["role"] == .string(targetRole), capability["protocol"] == .number(1) else { throw LinkError.badResponse }
                     // Even expectedRunning:false can stage a yield if the source started a turn since its last UI event.
                     guard !Task.isCancelled, self.switchID == ticket, self.currentSessionID == session else { throw CancellationError() }
                     if previous["state"].string != "accepted" {
-                        let result: JSON
+                        let result: JSON?
                         if ["received", "uncertain"].contains(previous["state"].string) {
                             // Delivery survived a source power loss. Poll the target; never re-submit.
                             result = .object(["state": .string("yielded"), "command": .string(command)])
-                        } else {
-                            guard let sourceLink else { throw ClientError.message("原设备离线，目标设备还没有交接记录。没有重跑任务。") }
+                        } else if let sourceLink {
                             defaults.set(command, forKey: key)
-                            result = try await sourceLink.rpc("mobileRelay/request", args: .object([
-                                "sessionId": .string(session), "target": .string(targetRole), "command": .string(command), "expectedRunning": .bool(self.taskRunning)
-                            ]))
-                        }
-                        if result["state"].string != "idle" && result["state"].string != "finished" {
+                            do {
+                                result = try await sourceLink.rpc("mobileRelay/request", args: .object([
+                                    "sessionId": .string(session), "target": .string(targetRole), "command": .string(command), "expectedRunning": .bool(self.taskRunning)
+                                ]))
+                            } catch where Self.isOfflineError(error) {
+                                result = nil // The request may have arrived. Never send it a second time.
+                            }
+                        } else { result = nil }
+                        if result == nil {
+                            guard capability["autoFailover"].bool else {
+                                throw ClientError.message("原设备离线，目标设备还没有交接记录。没有重跑任务。")
+                            }
+                            let state = try await Self.followableState(destination, session: session, role: targetRole)
+                            let name = targetRole == "cloud" ? "云端" : "电脑"
+                            switch state {
+                            case "auto-taking-over": notice = "已切至\(name)，正在自动接力续跑"
+                            case "accepted", "running": notice = "已切至\(name)继续当前任务"
+                            default: notice = "已切至\(name)，已打开同一会话"
+                            }
+                        } else if let result, !["idle", "finished"].contains(result["state"].string) {
                             guard ["requested", "sealing", "yielded"].contains(result["state"].string) else {
                                 defaults.removeObject(forKey: key)
                                 throw ClientError.message(result["message"].string.isEmpty ? "原设备未能交接任务。" : result["message"].string)
@@ -713,6 +844,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 self.performHaptic("success")
                 adopted = true; self.selectedDevice = chosen
                 self.activate(chosen, transport: channel, ready: ready, sharedSessionID: session)
+                if let notice { self.showFailoverNotice(notice) }
             } catch {
                 guard let self, !Task.isCancelled, self.switchID == ticket else { return }
                 self.switchTargetID = nil
@@ -743,6 +875,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     }
 
     private func activate(_ selected: PairedDesktop, transport channel: PinnedTransport, ready: BrowserSession? = nil, sharedSessionID: String? = nil) {
+        cancelFailoverProbe()
+        dismissFailoverNotice()
         grantTask?.cancel(); grantTask = nil
         connectionTask?.cancel(); recoveryTask?.cancel(); generation = UUID(); frameGeneration = UUID()
         switchTask?.cancel(); switchID = UUID(); switchTargetID = nil
@@ -756,7 +890,9 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         if pageTheme.dark == nil { pageTheme = loadSavedTheme(for: desktop?.id ?? selected.id) }
         desktop = selected
         if !ephemeral { taskPush.bind(selected,channel) }
-        currentSessionID = ephemeral ? nil : (sharedSessionID ?? UserDefaults.standard.string(forKey: "dsh.lastSession." + selected.id))
+        let sessionKey = "dsh.lastSession." + selected.id
+        currentSessionID = sharedSessionID ?? (ephemeral ? nil : UserDefaults.standard.string(forKey: sessionKey))
+        if !ephemeral, let sharedSessionID { UserDefaults.standard.set(sharedSessionID, forKey: sessionKey) }
         persistSelection()
         if !ephemeral, let data = try? Data(contentsOf: frameURL(selected.id)),
            let saved = try? JSONDecoder().decode(ResumeSnapshot.self, from: data),
@@ -1072,6 +1208,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             case "connected":
                 if linkInterrupted { linkInterrupted = false }
                 wsHealth = .connected
+                cancelFailoverProbe()
+                offlineAttempts = 0; offeredThisOutage = false; offerCloud = false
                 problem = nil
                 reconnecting = false
                 recoveryTask?.cancel(); recoveryTask = nil; recoveryFailures = 0
@@ -1126,6 +1264,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     }
 
     func removeCurrent() {
+        cancelFailoverProbe()
+        dismissFailoverNotice()
         guard let current = desktop else { return }
         if !ephemeral, let endpoint=browser?.endpoint ?? current.preferred ?? current.endpoints.first {
             let channel=PinnedTransport(fingerprint:current.fingerprint)
@@ -1184,6 +1324,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
 
     func sceneChanged(_ phase: ScenePhase) {
         if phase == .background {
+            if failoverTask != nil { offeredThisOutage = false }
+            cancelFailoverProbe()
             showDeviceMenu = false
             probeTask?.cancel()
             probeTask = nil
@@ -1360,6 +1502,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 if let latency = ready.latencyMs { self.lastLatencyMs = latency }
                 if self.ephemeral, let previous = self.browser, previous.id != ready.id { self.testRenewals += 1 }
                 if !self.ephemeral { self.taskPush.connected(ready.endpoint) }
+                self.cancelFailoverProbe()
                 self.offlineAttempts = 0; self.offeredThisOutage = false; self.offerCloud = false
                 self.refreshGrant(current, endpoint: ready.endpoint, using: transport)
                 self.browser = ready
@@ -1378,8 +1521,13 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 self.linkInterrupted = true
                 self.wsHealth = .disconnected
                 self.offlineAttempts = (error as? LinkError) == .unreachable ? self.offlineAttempts + 1 : 0
-                if self.offlineAttempts >= 2, current.id == self.familyID, self.cloudHost != nil, !self.offeredThisOutage {
-                    self.offeredThisOutage = true; self.offerCloud = true
+                if self.offlineAttempts >= 2, !self.offeredThisOutage, !self.switchingDevice, let peer = self.pairedPeerHost {
+                    if self.autoFailoverEnabled, self.isForeground {
+                        self.offeredThisOutage = true
+                        self.attemptSeamlessFailover(to: peer, from: current)
+                    } else if !self.autoFailoverEnabled, current.id == self.familyID {
+                        self.offeredThisOutage = true; self.offerCloud = true
+                    }
                 }
                 if (error as? LinkError) == .unpaired {
                     if let owner = self.familyID { try? SecureStore.write("cloud." + owner, nil); self.cloudHost = nil }

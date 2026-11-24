@@ -4,7 +4,7 @@ import { eventSpec, placedReceipt } from './command-placement.mjs';
 import { plannedRelease } from './git-release-tool.mjs';
 import { releaseTool } from './git-release.mjs';
 import { hash } from './log.mjs';
-import { isContinuation, receipt, relayTool, singleCall, validTail } from './relay-boundary.mjs';
+import { isContinuation, isDisposedTurnEnd, receipt, relayTool, singleCall, validTail } from './relay-boundary.mjs';
 
 export const claimID = (sid, command) => hash('dsh-cloud-run/v1:' + sid + ':' + command);
 const human = source => source?.kind === 'user' || source?.kind === 'retry';
@@ -95,7 +95,7 @@ export function handoffEvidence(events, inherited, sessionId, role) {
     const endIndex = events.findLastIndex(e => e.seq < request.seq && e.type === 'turn/end');
     if (endIndex < inherited) return null;
     const reason = events[endIndex].data.reason?.kind;
-    if (reason !== 'blocked' && reason !== 'interrupted') return null;
+    if (reason !== 'blocked' && reason !== 'interrupted' && !isDisposedTurnEnd(events[endIndex])) return null;
     if (events.slice(endIndex+1,request.seq).some(e => e.type === 'user/message' && human(e.data?.source))) return null;
     handoff = {endIndex, stop:endIndex, boundary:reason === 'blocked' ? 'device-switch' : 'auto-failover'};
   }
