@@ -624,7 +624,7 @@ export function createLinkServer({
   });
 
   server.on('connection', socket => {
-    try { socket.setNoDelay(true); socket.setKeepAlive(true, 30_000); } catch {}
+    try { socket.setNoDelay(true); socket.setKeepAlive(true, 15_000); } catch {}
   });
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_BODY, perMessageDeflate: {
     serverNoContextTakeover: true, clientNoContextTakeover: true, threshold: HISTORY_THRESHOLD,
@@ -712,7 +712,7 @@ export function createLinkServer({
     let lastTraffic = Date.now();
     const seen = () => { lastTraffic = Date.now(); };
     client.on('pong', seen); client.on('message', seen);
-    const beat = setInterval(() => { if (Date.now()-lastTraffic >= 180e3) { client.terminate(); return; } try { client.ping(); } catch {} }, 25e3);
+    const beat = setInterval(() => { if (Date.now()-lastTraffic >= 180e3) { client.terminate(); return; } try { client.ping(); } catch {} }, 15e3);
     beat.unref?.();
     client.on('close', () => { clearInterval(beat); finish(1000, 'closed'); });
     client.on('error', () => finish());

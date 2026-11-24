@@ -147,7 +147,7 @@ export function createOfficialWeb({ webServer, clientModules, connection, distRo
       if (!normalized.includes('..') && isCacheableResource(normalized.split('?')[0], normalized)) {
         urls.add(normalized);
       }
-      if (urls.size >= 16) break;
+      if (urls.size >= 64) break;
     }
     for (const assetUrl of urls) {
       if (cache.has(assetUrl)) continue;

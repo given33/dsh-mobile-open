@@ -49,11 +49,19 @@ export async function unpack(packet, peer, name) {
       typeof packet.archived !== 'boolean' || !['desktop','cloud'].includes(workspace?.owner) ||
       !validID(workspace.key) || typeof workspace.title !== 'string' || workspace.title.length > 256 ||
       typeof packet.data !== 'string' || packet.data.length > maxPacket) throw Error('Invalid task envelope');
+  if (packet.failoverClosers !== undefined && (packet.encoding !== undefined || packet.relayEnd !== undefined ||
+      packet.commandEnd !== undefined || packet.cloudIntent?.boundary !== 'auto-failover')) throw Error('Invalid failover envelope');
   if (packet.encoding === 'legacy-v3-zstd') return null;
   if (packet.encoding !== undefined) throw Error('Unknown task encoding');
   const raw = await expand(Buffer.from(packet.data, 'base64'), {maxOutputLength:maxLog});
   const events = JSON.parse(raw);
   if (!Array.isArray(events) || inherited > events.length || events.some((e,i) => !e || e.seq !== i || typeof e.type !== 'string')) throw Error('Invalid task log');
+  if (packet.failoverClosers !== undefined) {
+    const tail = packet.failoverClosers;
+    if (!Array.isArray(tail) || !tail.length || tail.length > 1024 || tail.at(-1)?.type !== 'turn/end' ||
+        tail.some((e,i) => e?.seq !== events.length + i || !Number.isSafeInteger(e.time))) throw Error('Invalid failover suffix');
+    events.push(...tail);
+  }
   if (packet.relayEnd !== undefined) {
     const tail = packet.relayEnd;
     if (packet.cloudIntent?.v !== 2 || packet.commandEnd !== undefined || !Array.isArray(tail) || (tail.length < (packet.cloudIntent.boundary === 'device-switch' ? 1 : 3) || tail.length > 16) ||

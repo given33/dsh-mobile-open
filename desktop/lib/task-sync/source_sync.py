@@ -650,7 +650,7 @@ def main():
                         file=sys.stderr,
                         flush=True,
                     )
-            stopped.wait(1)
+            stopped.wait(0.4)
         return
     with closing(Journal(opts.root, opts.key)) as j:
         if opts.action in ("scan", "fence", "mark", "git-backup"):

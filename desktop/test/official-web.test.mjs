@@ -420,7 +420,7 @@ test('anchor pre-boot interceptor and popup positioning engine accurately positi
     CSSStyleDeclaration: FakeStyle,
     CSS: { escape: s => s },
     MutationObserver: FakeMutationObserver,
-    ResizeObserver: class { observe() {} unobserve() {} },
+    ResizeObserver: class { observe() {} unobserve() {} disconnect() {} },
     AbortController, WeakMap, Map, Set, Math, Number, String, Object, RegExp,
     parseFloat, queueMicrotask, setTimeout: () => 1, clearTimeout: () => {}, setInterval: () => 1,
     requestAnimationFrame: fn => frames.push(fn),
@@ -478,6 +478,27 @@ test('anchor pre-boot interceptor and popup positioning engine accurately positi
   assert.equal(root.style.getPropertyValue('height'),'');
   ctx.visualViewport.height=780;
   assert.equal(composerReads,before);
+
+  const panel = new FakeHTMLElement('aside', {width:200, height:250});
+  panel.id = 'dsh-session-panel-chat'; panel.setAttribute('data-session-panel', 'overlay');
+  panel.matches = () => panel.getAttribute('data-session-panel') === 'overlay';
+  const button = new FakeHTMLElement('button', {right:300, bottom:40, width:24, height:24});
+  button.setAttribute('aria-controls', panel.id); button.setAttribute('aria-expanded','true');
+  const decoy = new FakeHTMLElement('button'); decoy.setAttribute('aria-expanded','true');
+  ctx.document.querySelectorAll = sel => sel === 'button[data-session-panel-toggle]' ? [decoy,button] : panel.matches() ? [panel] : [];
+  const bridge = ctx.__DSH_MOBILE_BRIDGE__;
+  bridge.repositionPopups();
+  assert.equal(panel.style.getPropertyValue('--dml-panel-top'), '46px');
+  assert.equal(panel.style.getPropertyValue('--dml-panel-left'), '100px');
+  button._rect.right = 470; bridge.setKeyboard(300,0); flush();
+  assert.equal(panel.style.getPropertyValue('--dml-panel-height'), '424px');
+  assert.equal(panel.style.getPropertyValue('--dml-panel-left'), '183px');
+  button._rect.right = 120; bridge.repositionPopups();
+  assert.equal(panel.style.getPropertyValue('--dml-panel-left'), '10px');
+  panel.setAttribute('data-session-panel','docked'); bridge.repositionPopups();
+  assert.equal(panel.hasAttribute('data-dml-anchored'), false);
+  assert.equal(panel.style.getPropertyValue('--dml-panel-top'), '');
+  bridge.setKeyboard(0,0); flush();
 
   // 2. Session '...' menu in sidebar (at x=240..268, y=410..438) -> placed right below trigger at y=442, not bottom-left!
   const sessionTrigger = new FakeHTMLElement('span', { left: 240, top: 410, right: 268, bottom: 438, width: 28, height: 28 });
@@ -1235,4 +1256,77 @@ test('cold start trusts the painted Harness body, not the frozen html theme or t
   htmlAttrs.set('data-theme', 'dark'); // The user switched to light after restoring a dark frame.
   bodyDark = false;
   assert.deepEqual(read(), { dark: false, bgBase: '#ffffff', sidebarFill: '#ffffff' });
+});
+
+// Start at document-start: the injected head runs before either the host plugin or body.
+function launchFixture(surface, readOnly = false) {
+  const attrs = new Map(), bodyAttrs = new Set(), calls = [], changes = [], storage = new Map();
+  const html = {style:{}, getAttribute:k=>attrs.get(k), hasAttribute:k=>attrs.has(k),
+    removeAttribute:k=>attrs.delete(k), setAttribute:(k,v)=>attrs.set(k,v)};
+  const document = {readyState:'loading', documentElement:html, body:null, addEventListener(){},
+    getElementById:id=>id === 'root' ? {firstElementChild:{}} : null, querySelector:()=>null};
+  const ctx = vm.createContext({document, __DSH_MOBILE_LAUNCH__:{lockTheme:'1',surface},
+    localStorage:{getItem:k=>storage.get(k), setItem:(k,v)=>storage.set(k,v)},
+    MutationObserver:class { constructor(f) {changes.push(f)} observe(){} disconnect(){} },
+    getComputedStyle:()=>({getPropertyValue:()=>'', backgroundColor:bodyAttrs.has('data-ds-dark-theme')?'#151517':'#ffffff'}),
+    webkit:{messageHandlers:{dshMobile:{postMessage:m=>calls.push(m)}}}, addEventListener(){},
+    setTimeout:()=>1, clearTimeout(){}, requestAnimationFrame:()=>1, AbortController,
+  });
+  const page = injectMobileShell('<html><head></head><body></body></html>', {readOnly});
+  vm.runInContext(page.match(/<script>([\s\S]*?)<\/script>/)[1], ctx);
+  document.body = {hasAttribute:k=>bodyAttrs.has(k), toggleAttribute:(k,on)=>on?bodyAttrs.add(k):bodyAttrs.delete(k)};
+  changes[0]();
+  return {ctx, document, html, bodyAttrs, calls, changes, storage};
+}
+
+test('launch theme survives passive adoption; explicit setTheme unlocks and notifies native', async () => {
+  const client = await readFile(new URL('../plugin/client.js', import.meta.url), 'utf8');
+  for (const [surface,readOnly] of [['dark',false],['light',true]]) {
+    const other = surface === 'dark' ? 'light' : 'dark';
+    const {ctx,document,html,bodyAttrs,calls,changes,storage} = launchFixture(surface,readOnly);
+    assert.equal(storage.get('dml.surface'), surface);
+    assert.equal(html.style.colorScheme, surface);
+    assert.equal(bodyAttrs.has('data-ds-dark-theme'), surface === 'dark');
+    vm.runInContext(MOBILE_SHELL_JS, ctx); html.removeAttribute('data-dml-routing');
+    let plugin, cleanup, onChange, active = other;
+    const writes = [];
+    function adopt(value) { active=value; html.style.colorScheme=value; document.body.toggleAttribute('data-ds-dark-theme',value==='dark'); }
+    const original = function(value) { writes.push(value); adopt(value); onChange?.(); return value; };
+    const theme = {getTheme:()=>({active:{colorScheme:active}}), setTheme:original};
+    ctx.window = {__ModuleLoader__:{load:m=>{plugin=m.factory(()=>({}))}}};
+    vm.runInContext(client,ctx);
+    plugin.apply({effect(){}, slots:{inject(){}}, inject(deps, fn) { if (deps.includes('theme')) fn({theme,
+      effect:f=>{ cleanup=f() }, on:(event,f)=>{assert.equal(event,'theme/change');onChange=f;return ()=>{};}}); }});
+    assert.deepEqual(writes,readOnly?[]:[surface]); await new Promise(r=>setImmediate(r));
+    adopt(other); onChange(); changes[0]();
+    assert.equal(html.style.colorScheme,surface);
+    assert.equal(bodyAttrs.has('data-ds-dark-theme'), surface === 'dark');
+    assert.equal(calls.some(m=>m.type==='theme' && (m.explicit || m.dark !== (surface === 'dark'))), false);
+    if (other === 'light') ctx.getComputedStyle = () => ({getPropertyValue:()=>'',backgroundColor:'#151517'});
+    assert.equal(theme.setTheme(other),other);
+    assert.equal(ctx.__DSH_MOBILE_THEME_LOCK__.surface,null);
+    assert.deepEqual(calls.filter(m=>m.type==='theme' && m.explicit).map(m=>[m.confirmed,m.dark]), [[true,other==='dark']]);
+    cleanup(); assert.equal(theme.setTheme,original);
+  }
+});
+
+test('credential refresh preserves pending mux; forced reconnect bypasses debounce', async () => {
+  const {ctx,calls} = launchFixture('light'); let count=0, now=15000;
+  ctx.Date = class extends Date {static now(){return now;}};
+  ctx.document.visibilityState = 'visible'; ctx.fetch = async () => ({ok:true,json:async()=>({wsAlive:false})});
+  ctx.WebSocket = class extends EventTarget {readyState=0;};
+  ctx.__DSH_MOBILE_CORDIS__ = {reconnect(){count++;}};
+  vm.runInContext(MOBILE_SHELL_JS, ctx);
+  const bridge = ctx.__DSH_MOBILE_BRIDGE__;
+  const old = new ctx.WebSocket('/api/remote.mux'), ws = new ctx.WebSocket('/api/remote.mux');
+  bridge.credentialsChanged(); assert.equal(count,0);
+  ws.readyState=1; bridge.credentialsChanged(); assert.equal(count,0);
+  bridge.setLogicalConnection('connected'); old.dispatchEvent(new Event('close'));
+  assert.equal(bridge.setLogicalConnection('disconnected'),false);
+  assert.equal(calls.some(m=>m.state==='disconnected'),false);
+  bridge.credentialsChanged(); bridge.wakeCheck(); await new Promise(r=>setImmediate(r)); assert.equal(count,0);
+  now += 2600; bridge.wakeCheck(); await new Promise(r=>setImmediate(r)); assert.equal(count,1);
+  ws.readyState=3; ws.dispatchEvent(new Event('close')); now+=801;
+  bridge.reconnect(); bridge.reconnect(); assert.equal(count,2);
+  bridge.reconnect(true); assert.equal(count,3);
 });

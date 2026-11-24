@@ -276,6 +276,32 @@ function hasLegacyRoutePaint(wanted, reveal) {
   return true;
 }
 
+// Installed in <head>, before the host theme service or even <body> exists.
+function installLaunchTheme() {
+  if (globalThis.__DSH_MOBILE_THEME_LOCK__) return globalThis.__DSH_MOBILE_THEME_LOCK__;
+  const launch = globalThis.__DSH_MOBILE_LAUNCH__;
+  if (launch?.lockTheme !== '1' || !['dark', 'light'].includes(launch.surface)) return;
+  const html = document.documentElement;
+  const lock = { surface: launch.surface, apply, release() { lock.surface = null; observer.disconnect(); } };
+  function apply() {
+    if (!lock.surface) return;
+    if (html.style.colorScheme !== lock.surface) html.style.colorScheme = lock.surface;
+    document.body?.toggleAttribute('data-ds-dark-theme', lock.surface === 'dark');
+  }
+  const observer = new MutationObserver(() => { observeBody(); apply(); });
+  let body;
+  function observeBody() {
+    if (document.body && body !== document.body) {
+      body = document.body;
+      observer.observe(body, {attributes:true, attributeFilter:['data-ds-dark-theme']});
+    }
+  }
+  observer.observe(html, {childList:true, attributes:true, attributeFilter:['style']});
+  observeBody(); apply();
+  try { localStorage.setItem('dml.surface', lock.surface); } catch {}
+  return globalThis.__DSH_MOBILE_THEME_LOCK__ = lock;
+}
+
 export function injectMobileShell(html, meta = {}) {
   const payload = {
     active: true,
@@ -304,7 +330,7 @@ export function injectMobileShell(html, meta = {}) {
   const hashes = shellHashes();
   const preloadTags = `<link rel="preload" as="style" href="/mobile/v1/shell.css?v=${hashes.css}"><link rel="preload" as="script" href="/mobile/v1/shell.js?v=${hashes.js}">`;
   const prebootStyle = `<style id="dml-preboot-style">html[data-dml-routing]{color-scheme:light dark;background:#fff}html[data-dml-routing] #root{visibility:hidden!important}@media(prefers-color-scheme:dark){html[data-dml-routing]{background:#151517}}html[data-dml-routing="dark"]{color-scheme:dark;background:#151517}html[data-dml-routing="light"]{color-scheme:light;background:#fff}html[data-dml-amoled="true"][data-dml-routing="dark"]{background:#000}#dml-snap-curtain{position:fixed;inset:0;z-index:2147483000;overflow:hidden;pointer-events:none;contain:strict}#dml-snap-curtain [data-dml-snap-scroll]{margin-right:0!important;scrollbar-gutter:auto!important}</style>`;
-  const prebootJs = `(()=>{const d=document.documentElement;if(!d)return;let t='auto',bg='',amoled=false;try{t=localStorage.getItem('dml.surface')||'auto';bg=localStorage.getItem('dml.bg')||'';amoled=localStorage.getItem('dml.pref.amoled')==='true'}catch{}if(amoled)d.setAttribute('data-dml-amoled','true');const r=globalThis.__DSH_MOBILE_LAUNCH__;if(r?.surface&&r.surface!=='auto')t=r.surface;if(r?.bg)bg=r.bg;if(amoled&&t==='dark')bg='#000000';if(bg)d.style.backgroundColor=bg;const clearSnap=()=>{try{document.getElementById('dml-snap-curtain')?.remove?.()}catch{}d.removeAttribute('data-dml-snap-cover');d.removeAttribute('data-dml-routing');if(d.style)d.style.backgroundColor='';if(globalThis.__DSH_MOBILE_ROUTE_STATE__)globalThis.__DSH_MOBILE_ROUTE_STATE__.intent=false};globalThis.__DSH_MOBILE_CLEAR_SNAP__=clearSnap;if(r||globalThis.webkit?.messageHandlers?.dshMobile){d.setAttribute('data-dml-routing',t);let wanted=r?.resume||'',snap=null;try{wanted||=localStorage.getItem('dml.lastSession')||'';const raw=localStorage.getItem('dml.visualSnap.v1');if(raw){const p=JSON.parse(raw);if(p&&p.v===2&&typeof p.html==='string'&&p.html.length>40&&Date.now()-Number(p.ts||0)<86400e3&&(!wanted||wanted===p.sessionId))snap=p}}catch{}if(snap){if(snap.htmlTheme&&!d.getAttribute('data-theme'))d.setAttribute('data-theme',snap.htmlTheme);if(snap.htmlScheme&&!d.getAttribute('data-color-scheme'))d.setAttribute('data-color-scheme',snap.htmlScheme);if(snap.htmlClass&&!d.className)d.className=snap.htmlClass;if(amoled&&snap.dark)d.style.backgroundColor='#000000';else if(snap.bg)d.style.backgroundColor=snap.bg;d.setAttribute('data-dml-snap-cover','true');const mountSnap=()=>{if(!document.body||!d.hasAttribute('data-dml-snap-cover')||document.getElementById('dml-snap-curtain'))return false;const el=document.createElement('div');el.id='dml-snap-curtain';el.setAttribute('aria-hidden','true');el.setAttribute('inert','');el.style.background=(amoled&&snap.dark)?'#000000':(snap.bg||bg||(t==='dark'?'#151517':'#ffffff'));if(snap.fg)el.style.color=snap.fg;el.innerHTML=snap.html;document.body.appendChild(el);const restoreScroll=()=>{if(!el.isConnected)return;for(const sc of el.querySelectorAll('[data-dml-snap-y],[data-dml-snap-x]')){void sc.scrollHeight;if(sc.hasAttribute('data-dml-snap-y'))sc.scrollTop=Number(sc.getAttribute('data-dml-snap-y'));if(sc.hasAttribute('data-dml-snap-x'))sc.scrollLeft=Number(sc.getAttribute('data-dml-snap-x'))}};restoreScroll();if(typeof requestAnimationFrame==='function')requestAnimationFrame(()=>{restoreScroll();requestAnimationFrame(restoreScroll)});return true};if(!mountSnap()&&typeof MutationObserver==='function'){const o=new MutationObserver(()=>{if(mountSnap()||!d.hasAttribute('data-dml-snap-cover'))o.disconnect()});o.observe(document,{childList:true,subtree:true});if(typeof setTimeout==='function')setTimeout(()=>o.disconnect(),3000)}}if(typeof setTimeout==='function'){setTimeout(function checkLegacy(){if(!d.hasAttribute('data-dml-routing')||globalThis.__DSH_MOBILE_ROUTE_STATE__)return;if(!(${hasLegacyRoutePaint.toString()})(wanted,clearSnap))setTimeout(checkLegacy,2000)},8500)}}})();`;
+  const prebootJs = `(()=>{const d=document.documentElement;if(!d)return;let t='auto',bg='',amoled=false;try{t=localStorage.getItem('dml.surface')||'auto';bg=localStorage.getItem('dml.bg')||'';amoled=localStorage.getItem('dml.pref.amoled')==='true'}catch{}if(amoled)d.setAttribute('data-dml-amoled','true');const r=globalThis.__DSH_MOBILE_LAUNCH__;if(r?.surface&&r.surface!=='auto')t=r.surface;const lock=(${installLaunchTheme.toString()})();if(lock?.surface)bg=r.bg||(t==='dark'?'#151517':'#ffffff');else if(r?.bg)bg=r.bg;if(amoled&&t==='dark')bg='#000000';if(bg)d.style.backgroundColor=bg;const clearSnap=()=>{try{document.getElementById('dml-snap-curtain')?.remove?.()}catch{}d.removeAttribute('data-dml-snap-cover');d.removeAttribute('data-dml-routing');if(d.style)d.style.backgroundColor='';if(globalThis.__DSH_MOBILE_ROUTE_STATE__)globalThis.__DSH_MOBILE_ROUTE_STATE__.intent=false};globalThis.__DSH_MOBILE_CLEAR_SNAP__=clearSnap;if(r||globalThis.webkit?.messageHandlers?.dshMobile){d.setAttribute('data-dml-routing',t);let wanted=r?.resume||'',snap=null;try{wanted||=localStorage.getItem('dml.lastSession')||'';const raw=localStorage.getItem('dml.visualSnap.v1');if(raw){const p=JSON.parse(raw);if(p&&p.v===2&&typeof p.html==='string'&&p.html.length>40&&Date.now()-Number(p.ts||0)<86400e3&&(!wanted||wanted===p.sessionId))snap=p}}catch{}if(snap&&(!lock?.surface||snap.dark===(t==='dark'))){if(snap.htmlTheme&&!d.getAttribute('data-theme'))d.setAttribute('data-theme',snap.htmlTheme);if(snap.htmlScheme&&!d.getAttribute('data-color-scheme'))d.setAttribute('data-color-scheme',snap.htmlScheme);if(snap.htmlClass&&!d.className)d.className=snap.htmlClass;if(amoled&&snap.dark)d.style.backgroundColor='#000000';else if(snap.bg)d.style.backgroundColor=snap.bg;d.setAttribute('data-dml-snap-cover','true');const mountSnap=()=>{if(!document.body||!d.hasAttribute('data-dml-snap-cover')||document.getElementById('dml-snap-curtain'))return false;const el=document.createElement('div');el.id='dml-snap-curtain';el.setAttribute('aria-hidden','true');el.setAttribute('inert','');el.style.background=(amoled&&snap.dark)?'#000000':(snap.bg||bg||(t==='dark'?'#151517':'#ffffff'));if(snap.fg)el.style.color=snap.fg;el.innerHTML=snap.html;document.body.appendChild(el);const restoreScroll=()=>{if(!el.isConnected)return;for(const sc of el.querySelectorAll('[data-dml-snap-y],[data-dml-snap-x]')){void sc.scrollHeight;if(sc.hasAttribute('data-dml-snap-y'))sc.scrollTop=Number(sc.getAttribute('data-dml-snap-y'));if(sc.hasAttribute('data-dml-snap-x'))sc.scrollLeft=Number(sc.getAttribute('data-dml-snap-x'))}};restoreScroll();if(typeof requestAnimationFrame==='function')requestAnimationFrame(()=>{restoreScroll();requestAnimationFrame(restoreScroll)});return true};if(!mountSnap()&&typeof MutationObserver==='function'){const o=new MutationObserver(()=>{if(mountSnap()||!d.hasAttribute('data-dml-snap-cover'))o.disconnect()});o.observe(document,{childList:true,subtree:true});if(typeof setTimeout==='function')setTimeout(()=>o.disconnect(),3000)}}if(typeof setTimeout==='function'){setTimeout(function checkLegacy(){if(!d.hasAttribute('data-dml-routing')||globalThis.__DSH_MOBILE_ROUTE_STATE__)return;if(!(${hasLegacyRoutePaint.toString()})(wanted,clearSnap))setTimeout(checkLegacy,2000)},8500)}}})();`;
   const prebootTag = `${prebootStyle}${preloadTags}<script>globalThis.__DSH_MOBILE_SHELL__=${safeJson(payload)};${prebootJs}${PREVIEW_COMPAT_JS}${MOBILE_ANCHOR_PREBOOT_JS}</script>`;
   if (/<head(?:\s[^>]*)?>/i.test(out)) {
     out = out.replace(/<head(?:\s[^>]*)?>/i, open => open + prebootTag);
@@ -330,6 +356,19 @@ const HOST_TAIL = `#root :is(${HOST_TAIL_SLOT}), #root [data-conversation-conten
 const SCROLL_BLOCKED = 'html:is([data-dml-routing], [data-dml-snap-cover], [data-dml-composer-full], [data-dml-popup-open], :has(dialog[open], [role="dialog"][aria-modal="true"]:not([hidden], [aria-hidden="true"], [data-state="closed"]), .dml-hub-backdrop:not(dialog), .dsh-lightbox, [data-trigger-menu], [data-sidebar-drawer]:not([data-sidebar-collapsed]), [data-rightbar-fullscreen], body[data-dsh-keyboard-open], #dml-voice-hud:not([hidden])))';
 
 export const MOBILE_SHELL_CSS = WEATHER_CSS + `${ATTACHMENT_PICKER_CSS}
+/* Notify the shell when React mounts an in-tree overlay (also after a breakpoint
+   change). No subtree observer on the token-streaming conversation is needed. */
+@keyframes dml-session-panel-mount { from { opacity: 0; } to { opacity: 0; } }
+aside[data-session-panel="overlay"]::after {
+  content: ''; position: absolute; pointer-events: none; animation: dml-session-panel-mount 1ms;
+}
+aside[data-session-panel="overlay"][data-dml-anchored] {
+  position: fixed !important; z-index: 1100 !important;
+  top: var(--dml-panel-top) !important; left: var(--dml-panel-left) !important;
+  bottom: auto !important; right: auto !important; transform-origin: top right !important;
+  max-width: var(--dml-panel-width) !important; max-height: var(--dml-panel-height) !important;
+  box-sizing: border-box;
+}
 /* DSH Mobile shell: preserves 100% native DSH styling while polishing iOS layout, popups, and 120Hz smoothness. */
 :root, html, body {
   /* Replace expensive 40px Gaussian backdrop blurs on iOS WKWebView with opaque elevated surfaces for 120Hz smoothness. */
@@ -2579,6 +2618,7 @@ export const MOBILE_SHELL_JS = `(() => {
   globalThis.__DSH_MOBILE_SHELL_INSTALLED__ = true;
 
   const readSurface = ${readHarnessSurface.toString()};
+  const themeLock = (${installLaunchTheme.toString()})();
   const shell = globalThis.__DSH_MOBILE_SHELL__ || {};
   const reducedMotion = () => globalThis.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches === true;
   const scrollBehavior = () => reducedMotion() ? 'auto' : 'smooth';
@@ -2592,7 +2632,7 @@ export const MOBILE_SHELL_JS = `(() => {
 
   let followDesktop = false;
   let lastFollowedId = null;
-  let lastThemeKey = '';
+  let lastThemeKey = '', explicitSurface = null;
   let lastUiKey = '';
   let wsState = 'connecting';
   let desktopFocus = null;
@@ -3273,18 +3313,29 @@ export const MOBILE_SHELL_JS = `(() => {
   }, { capture: true, passive: true });
 
   // 1. Observe DSH's actual active theme & computed surface colors so the native iOS bar blends seamlessly.
-  function reportTheme() {
-    const surface = readSurface(document, getComputedStyle);
-    if (!surface) return;
+  function reportTheme(explicit = false) {
+    themeLock?.apply();
+    let surface = readSurface(document, getComputedStyle);
+    if (explicitSurface) {
+      const dark = explicitSurface === 'dark';
+      // CSS transitions can still report the previous background on the frame
+      // in which the user selected light. Never label that color as confirmed.
+      if (document.body?.hasAttribute('data-ds-dark-theme') !== dark || surface?.dark === dark) explicitSurface = null;
+      else if (explicit) {
+        const bgBase = dark ? '#151517' : '#ffffff';
+        surface = {dark, bgBase, sidebarFill:bgBase};
+      } else return;
+    }
+    if (!surface || (themeLock?.surface && surface.dark !== (themeLock.surface === 'dark'))) return;
     const { dark, bgBase, sidebarFill } = surface;
     const key = dark + '|' + bgBase + '|' + sidebarFill;
-    if (key === lastThemeKey) return;
+    if (!explicit && key === lastThemeKey) return;
     lastThemeKey = key;
     try {
       localStorage.setItem('dml.surface', dark ? 'dark' : 'light');
       localStorage.setItem('dml.bg', bgBase);
     } catch {}
-    post({ type: 'theme', confirmed: true, ...surface });
+    post({ type: 'theme', confirmed: true, ...(explicit ? {explicit:true} : {}), ...surface });
   }
 
   // 2. Observe UI state (sidebar drawer open/closed, document title, current session id).
@@ -3359,6 +3410,56 @@ export const MOBILE_SHELL_JS = `(() => {
   }
 
   // 3. Universal CSS Anchor Positioning Engine for all DSH portaled popups/menus/dialogs.
+  const panelSelector = 'aside[data-session-panel="overlay"]';
+  const toggleSelector = 'button[data-session-panel-toggle]';
+  const panels = new Map();
+  function releasePanel(panel) {
+    panels.get(panel)?.disconnect();
+    panels.delete(panel);
+    panel.removeAttribute('data-dml-anchored');
+    for (const name of ['top', 'left', 'width', 'height']) panel.style.removeProperty('--dml-panel-' + name);
+  }
+  function positionPanel(panel) {
+    if (!panel.isConnected || !panel.matches(panelSelector)) { releasePanel(panel); return; }
+    const buttons = [...document.querySelectorAll(toggleSelector)];
+    const visible = btn => { const r = btn.getBoundingClientRect(); return r.width > 0 && r.height > 0; };
+    const toggle = buttons.find(btn => panel.id && visible(btn) &&
+      (btn.getAttribute('aria-controls') === panel.id || btn.id === panel.id.replace('dsh-session-panel-', 'dsh-session-panel-toggle-'))) ||
+      buttons.find(btn => btn.getAttribute('aria-expanded') === 'true' && visible(btn));
+    if (!toggle || toggle.getAttribute('aria-expanded') === 'false') {
+      releasePanel(panel); return;
+    }
+    if (panels.get(panel)?.toggle !== toggle) {
+      panels.get(panel)?.disconnect();
+      const mode = new MutationObserver(() => positionPanel(panel));
+      mode.observe(panel, {attributes:true, attributeFilter:['data-session-panel']});
+      if (panel.parentElement) mode.observe(panel.parentElement, {childList:true});
+      const size = typeof ResizeObserver === 'function' ? new ResizeObserver(() => positionPanel(panel)) : null;
+      size?.observe(panel); size?.observe(toggle);
+      panels.set(panel, {toggle, disconnect() { mode.disconnect(); size?.disconnect(); }});
+    }
+    const vv = globalThis.visualViewport;
+    const vw = vv?.width || innerWidth;
+    const bottom = Math.min(vv?.height || innerHeight, innerHeight - (nativeKbMode ? nativeKbInset : 0));
+    const rect = toggle.getBoundingClientRect();
+    const top = Math.round(rect.bottom + 6);
+    panel.setAttribute('data-dml-anchored', '');
+    panel.style.setProperty('--dml-panel-width', Math.max(0, vw - 20) + 'px');
+    const width = panel.getBoundingClientRect().width;
+    const left = Math.max(10, Math.min(Math.round(rect.right - width), vw - 10 - width));
+    panel.style.setProperty('--dml-panel-top', top + 'px');
+    panel.style.setProperty('--dml-panel-left', left + 'px');
+    panel.style.setProperty('--dml-panel-height', Math.max(0, Math.floor(bottom - top - 10)) + 'px');
+  }
+  function discoverPanels() {
+    for (const panel of document.querySelectorAll?.(panelSelector) || []) positionPanel(panel);
+  }
+  document.addEventListener('animationstart', e => {
+    if (e.animationName === 'dml-session-panel-mount' && e.target.matches?.(panelSelector)) positionPanel(e.target);
+  });
+  document.addEventListener('click', e => {
+    if (e.target.closest?.(toggleSelector)) requestAnimationFrame(discoverPanels);
+  }, true);
   const activePopups = new Set();
   const popupResizeObserver = typeof ResizeObserver === 'function'
     ? new ResizeObserver((entries) => {
@@ -3653,7 +3754,13 @@ export const MOBILE_SHELL_JS = `(() => {
   }
 
   function repositionAllPopups() {
+    repositionTrackedPopups();
+    discoverPanels();
+  }
+
+  function repositionTrackedPopups() {
     popupRaf = 0;
+    for (const panel of panels.keys()) positionPanel(panel);
     for (const popup of activePopups) {
       if (!popup.isConnected) {
         activePopups.delete(popup);
@@ -3666,8 +3773,8 @@ export const MOBILE_SHELL_JS = `(() => {
   }
 
   function scheduleRepositionPopups() {
-    if (activePopups.size === 0 || popupRaf) return;
-    popupRaf = requestAnimationFrame(repositionAllPopups);
+    if ((!activePopups.size && !panels.size) || popupRaf) return;
+    popupRaf = requestAnimationFrame(repositionTrackedPopups);
   }
 
   anchorApi.onPopupChange = (el) => {
@@ -3709,7 +3816,7 @@ export const MOBILE_SHELL_JS = `(() => {
   }
 
   // 5. Passively observe DSH's /api/remote.mux WebSocket to report live sync state to Swift.
-  let latestMux;
+  let latestMux, latestMuxCreatedAt = 0;
   const NativeWebSocket = globalThis.WebSocket;
   if (typeof NativeWebSocket === 'function') {
     const setWsState = (next) => {
@@ -3723,6 +3830,7 @@ export const MOBILE_SHELL_JS = `(() => {
         const href = String(url || '');
         if (href.includes('/api/remote.mux')) {
           latestMux = ws;
+          latestMuxCreatedAt = Date.now();
           const report = state => { if (ws === latestMux) setWsState(state); };
           report('connecting');
           // TCP/WSS open is not a usable Harness generation. Cordis confirms
@@ -3887,6 +3995,7 @@ export const MOBILE_SHELL_JS = `(() => {
     scheduleRepositionPopups();
   }
   function scheduleViewport() {
+    if (nativeKbMode) scheduleRepositionPopups();
     if (!viewportRaf) viewportRaf = requestAnimationFrame(() => { viewportRaf = 0; syncViewport(); });
   }
   const maybeOverlayHeight = () => {
@@ -4115,8 +4224,8 @@ export const MOBILE_SHELL_JS = `(() => {
     }
     const cordis = globalThis.__DSH_MOBILE_CORDIS__;
     if (typeof cordis?.reconnect === 'function') {
-      if (Date.now() < reconnectUntil) return true;
-      reconnectUntil = Date.now() + 1500;
+      if (!force && Date.now() < reconnectUntil) return true;
+      reconnectUntil = Date.now() + 800;
       if (cordis.reconnect() === false) { reconnectUntil = 0; return false; }
       return true;
     }
@@ -4156,7 +4265,7 @@ export const MOBILE_SHELL_JS = `(() => {
       if (syncRequest !== controller) return;
       // Instant half-open zombie socket detection: if the desktop has zero live mux sockets
       // for this device while our browser socket still claims OPEN, reconnect immediately.
-      if (shouldPoke && data.wsAlive === false && latestMux?.readyState === 1) {
+      if (shouldPoke && data.wsAlive === false && latestMux?.readyState === 1 && Date.now() - latestMuxCreatedAt > 2500) {
         reconnect(true);
       }
       const cursor = typeof data.cursor === 'string' ? data.cursor : '';
@@ -4188,10 +4297,15 @@ export const MOBILE_SHELL_JS = `(() => {
     if (poke) pendingPoke = true;
     void pollSync();
   }
+  function muxStarting() {
+    return (latestMux?.readyState === 0 || latestMux?.readyState === 1) && Date.now() - latestMuxCreatedAt < 10_000;
+  }
   function wakeForeground() {
-    // Cancel any exponential WebSocket backoff immediately when returning to foreground.
-    if (wsState !== 'connected' || (latestMux && latestMux.readyState >= 2)) {
-      reconnect(true);
+    // pageshow, network and native wake can describe the same transition. An
+    // uncertain socket gets a debounced retry; a confirmed close bypasses it.
+    if (!muxStarting() && !(activePoke && syncRequest && Date.now() - lastSyncReset < 500)) {
+      if (latestMux?.readyState >= 2) reconnect(true);
+      else if (wsState !== 'connected') reconnect();
     }
     resetSync(true);
     syncViewport();
@@ -4200,14 +4314,7 @@ export const MOBILE_SHELL_JS = `(() => {
   }
 
   function wakeCheck() {
-    if (lifecycle?.isSuspended() || document.visibilityState === 'hidden') return;
-    if (wsState !== 'connected' || (latestMux && latestMux.readyState >= 2)) {
-      reconnect(true);
-    }
-    resetSync(true);
-    syncViewport();
-    reportTheme();
-    scheduleReportUi();
+    if (!lifecycle?.isSuspended() && document.visibilityState !== 'hidden') wakeForeground();
   }
 
   globalThis.__DSH_MOBILE_BRIDGE__ = {
@@ -4234,10 +4341,31 @@ export const MOBILE_SHELL_JS = `(() => {
     applyDisplayPrefs,
     onTaskEvent,
     groupMobileTasks: ${groupMobileTasks.toString()},
-    credentialsChanged() { resetSync(); reconnectUntil = 0; if(wsState !== 'connected') reconnect(); },
+    notifyExplicitThemeChange(surface) {
+      themeLock?.release();
+      if (surface === 'light' || surface === 'dark') {
+        explicitSurface = surface;
+        document.body?.toggleAttribute('data-ds-dark-theme', surface === 'dark');
+        document.documentElement.style.colorScheme = surface;
+      }
+      reportTheme(true);
+    },
+    credentialsChanged() {
+      resetSync();
+      if (muxStarting() || (latestMux?.readyState === 1 && wsState === 'connected')) return;
+      reconnectUntil = 0;
+      reconnect();
+    },
     reportUi: scheduleReportUi,
     reportSelection: scheduleReportUi,
-    setLogicalConnection(state) { wsState = state; if(state === 'connected') reconnectUntil = 0; },
+    setLogicalConnection(state) {
+      const ready = latestMux?.readyState;
+      if (ready !== undefined && ((state === 'connected' && ready !== 1) ||
+          (state === 'disconnected' && ready < 2))) return false;
+      wsState = state;
+      if (state === 'connected') reconnectUntil = 0;
+      return true;
+    },
     repositionPopups: repositionAllPopups,
     refreshCommandMenu: scheduleOverlayHeight,
     followFocus,
@@ -4271,6 +4399,7 @@ export const MOBILE_SHELL_JS = `(() => {
       insertDraft, showToast, haptic, releaseAction: ${voiceGestureAction.toString()},
     });
     applyDisplayPrefs();
+    discoverPanels();
     reportTheme();
     reportUi();
     syncViewport();

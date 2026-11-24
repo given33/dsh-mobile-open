@@ -1,9 +1,11 @@
 // Native runtime context is evidence about where a model step ran, not a grant to run another one.
 import { randomUUID } from 'node:crypto';
-import { continuation } from './relay-boundary.mjs';
+import { callLedger } from './relay-evidence.mjs';
+import { isContinuation } from './relay-boundary.mjs';
 
 const hostSection = 'mobile-link:execution-host';
 const observationTools = new Set(['read', 'read_image', 'glob', 'grep', 'relay_environment', 'relay_wait_deployment']);
+const workspaceWrites = new Set(['write', 'edit', 'edit_file', 'write_file', 'multi_edit', 'apply_patch', 'delete_file']);
 const humanRequest = message => ['user', 'retry'].includes(message?.source?.kind);
 
 export function previousHost(events, inherited = 0) {
@@ -21,44 +23,49 @@ export function previousHost(events, inherited = 0) {
 // is scoped to its step. A synthetic closer is not a real tool failure or success receipt.
 export function taskProgress(events, inherited = 0) {
   const request = events.findLast(e => e.seq >= inherited && e.type === 'user/message' && humanRequest(e.data) &&
-    !(e.data.content?.length === 1 && e.data.content[0].text === continuation && /^[a-f0-9]{64}$/.test(e.data.source.rpcId ?? '')));
-  const entries = new Map();
-  const key = (d, id) => JSON.stringify([d.turn, d.step, id]);
+    !(e.data.content?.length === 1 && isContinuation(e.data.content[0].text) && /^[a-f0-9]{64}$/.test(e.data.source.rpcId ?? '')));
   const start = request?.seq ?? inherited;
-  let boundary = null;
+  const steps = new Map();
+  function stepAt(turn, step) {
+    const key = JSON.stringify([turn, step]);
+    if (!steps.has(key)) steps.set(key,{turn, step, tools:new Set(), completed:0, unverified:0, notStarted:0});
+    return steps.get(key);
+  }
+  let boundary = null, interrupted = null;
   for (let i = start; i < events.length; i++) {
-    const {seq, type, data: d} = events[i];
+    const {seq, type, data:d} = events[i];
     if (!d) continue;
+    if (Number.isInteger(d.step) && Number.isInteger(d.turn)) stepAt(d.turn,d.step);
     if (type === 'step/end' || type === 'turn/end') boundary = {seq, type, turn:d.turn, step:d.step, reason:d.reason?.kind};
-    if (type === 'assistant/message') {
-      for (const call of d.message?.content ?? []) {
-        if (call.type === 'tool-call') entries.set(key(d,call.id), {name:call.name, seq, state:'outcome-unknown'});
-      }
-    } else if (type === 'tool/call') {
-      entries.set(key(d,d.callId), {name:d.name, seq, state:'outcome-unknown', started:true});
-    } else if (type === 'tool/result') {
-      const msg = d.message;
-      const item = entries.get(key(d, msg?.toolCallId));
-      if (!item || msg.role !== 'tool' || msg.source?.kind !== 'tool' || msg.source.callId !== msg.toolCallId ||
-          events[i].surfaceOp !== 'append' || typeof msg.isError !== 'boolean') continue;
-      const code = d.error?.code;
-      item.resultSeq = seq;
-      if (code === 'TOOL_NOT_STARTED' && msg.isError && !item.started) item.state = 'not-started';
-      else if (code === 'TOOL_OUTCOME_UNKNOWN' || !item.started) item.state = 'outcome-unknown';
-      else item.state = msg.isError ? 'tool-error' : 'tool-returned';
-    }
+    if (type === 'turn/end') interrupted = ['interrupted','blocked'].includes(d.reason?.kind) ?
+      {turn:d.turn, step:d.step ?? null, reason:d.reason.kind, pendingNotStarted:0, pendingUnknown:0} : null;
   }
   const counts = {}, attention = [], recent = [];
-  for (const {name, seq, resultSeq, state} of entries.values()) {
+  let completedCount = 0, unverifiedCount = 0, notStartedCount = 0;
+  for (const {turn, step, name, callSeq, proposalSeq, resultSeq, state} of callLedger(events,start)) {
+    const category = observationTools.has(name) ? 'read-only' : workspaceWrites.has(name) ? 'workspace-write' : 'shell-or-external';
     const next = state === 'not-started' ? 'plan-on-target' : state === 'tool-returned' ? 'use-result-do-not-repeat' :
-      observationTools.has(name) ? 'refresh-with-read-only-tool' : 'verify-before-retry';
-    const row = {tool:name, callOrProposalSeq:seq, resultSeq, state, next};
+      category === 'read-only' ? 'refresh-with-read-only-tool' : 'verify-before-retry';
+    const verifyHint = state === 'not-started' ? 'safe-to-plan-on-target' : state === 'tool-returned' ? 'already-completed' :
+      category === 'read-only' ? 'safe-to-re-read' : category === 'workspace-write' ? 'check-workspace-file-and-source-sync' : 'check-external-target-receipt';
+    const row = {tool:name, callOrProposalSeq:callSeq ?? proposalSeq, resultSeq, state, next, category, verifyHint};
     counts[next] = (counts[next] ?? 0) + 1;
     if (next === 'verify-before-retry') attention.push(row);
     recent.push(row);
+    const summary = stepAt(turn,step);
+    summary.tools.add(name);
+    if (state === 'tool-returned') { completedCount++; summary.completed++; }
+    else if (state === 'not-started') { notStartedCount++; summary.notStarted++; }
+    else { unverifiedCount++; summary.unverified++; }
+    if (interrupted && interrupted.turn === turn) {
+      if (state === 'not-started') interrupted.pendingNotStarted++;
+      if (state === 'outcome-unknown') interrupted.pendingUnknown++;
+    }
   }
+  const stepSummary = [...steps.values()].slice(-12).map(s => ({...s, tools:[...s.tools]}));
   return {requestSeq:request?.seq ?? null, boundary, counts, recent:recent.slice(-16),
     verifyBeforeRetry:attention.slice(-16), omittedUnverified:Math.max(0,attention.length-16),
+    completedCount, unverifiedCount, notStartedCount, interrupted, stepSummary,
     externalEffects:'A tool return is not an external receipt. Verify the original operation at its destination; an unknown outcome never authorizes replay.'};
 }
 
@@ -78,9 +85,9 @@ export function registerHostChange(ctx, role, probe, hasLocalClaim) {
     if (decision.kind !== 'enter' || step !== 1 || !decision.messages.length || signal.aborted) return decision;
     const session = agent.session, events = await readHistory(ctx,session.id,session,signal), inherited = session.inheritedEventCount;
     const previous = previousHost(events, inherited);
-    const request = decision.messages.find(m => humanRequest(m) && /^[a-f0-9]{64}$/.test(m.source.rpcId ?? '') && m.content?.length === 1 && m.content[0].text === continuation);
+    const request = decision.messages.find(m => humanRequest(m) && /^[a-f0-9]{64}$/.test(m.source.rpcId ?? '') && m.content?.length === 1 && isContinuation(m.content[0].text));
     if (previous === current || (!previous && !(request && await hasLocalClaim(request.source.rpcId)))) return decision;
-    const env = await probe(agent, signal);
+    const env = await probe(agent, signal, previous);
     signal.throwIfAborted();
     const report = {from:previous ?? 'paired-host (legacy)', to:current, ...env, progress:taskProgress(events, inherited)};
     const notice = {id:randomUUID(), role:'user', source:{kind:'mobile-link-host-change',form:'notice',summary:'执行设备已切换'},

@@ -1,9 +1,10 @@
+import { createLinkService } from '../lib/link-service.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import https from 'node:https';
 import { once } from 'node:events';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -157,4 +158,43 @@ test('notification settings authorize the paired device, not the recipient named
   assert.deepEqual(updates,[['iphone-test-0001','island']]);
   assert.equal((await req({method:'POST',token,body:{padding:'a'.repeat(4100)}})).status, 413);
   assert.equal(updates.length,1);
+});
+
+test('temporary family grant read errors preserve the socket; revocation still closes it', async t => {
+  const dir = await mkdtemp(join(tmpdir(), 'family-refresh-'));
+  const harness = await fakeHarness(t);
+  let service;
+  t.after(async () => { await service?.close(); await harness.close(); await rm(dir, {recursive:true, force:true}); });
+  const {id:cloudID, fingerprint} = await loadIdentity(dir);
+  const familyID = 'fixture-family';
+  const path = join(dir, 'family-grants.json');
+  const grants = hashes => JSON.stringify({familyID, cloudID, fingerprint, hashes});
+  const token = 'local-fixture-only'.repeat(2), valid = grants([createHash('sha256').update(token).digest('base64url')]);
+  await writeFile(join(dir, 'family-policy.json'), JSON.stringify({familyID, cloudID}));
+  await writeFile(path, valid);
+  let refresh;
+  const interval = setInterval;
+  t.mock.method(globalThis, 'setInterval', (fn, ms, ...args) => {
+    if (ms === 2000 && fn.name === 'refresh') { refresh = fn; return {unref() {}}; }
+    return interval(fn, ms, ...args);
+  });
+  service = await createLinkService({stateDir:dir, host:'127.0.0.1', port:0, enabled:true,
+    upstream:httpUpstream(await exchangeLaunchURL(harness.url))});
+  const {port} = await service.status();
+  for (const revoke of ['empty', 'missing', 'persistent error']) {
+    await writeFile(path, valid); await refresh();
+    const ws = new WebSocket(`wss://127.0.0.1:${port}/api/remote.mux`, {
+      rejectUnauthorized:false, headers:{Authorization:`Bearer ${token}`}});
+    await once(ws, 'open');
+    await writeFile(path, '{'); await refresh(); await refresh();
+    assert.equal(service.devices.list().length, 1);
+    assert.equal(ws.readyState, WebSocket.OPEN);
+    if (revoke !== 'persistent error') { await writeFile(path, valid); await refresh(); }
+    const closed = once(ws, 'close', {signal:AbortSignal.timeout(2000)});
+    if (revoke === 'empty') await writeFile(path, grants([]));
+    if (revoke === 'missing') await rm(path);
+    await refresh();
+    assert.equal(service.devices.list().length, 0);
+    assert.equal((await closed)[0], 4401, revoke);
+  }
 });

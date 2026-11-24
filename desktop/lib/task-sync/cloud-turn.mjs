@@ -7,7 +7,7 @@ import { appendFileSync, renameSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { committedLength, pack, validID } from './log.mjs';
 
-import { verifiedRelay, continuation } from './relay-boundary.mjs';
+import { verifiedRelay, continuation, autoFailoverContinuation } from './relay-boundary.mjs';
 
 import { claimID, nativeAcceptance } from './relay-evidence.mjs';
 export { claimID };
@@ -139,7 +139,7 @@ export async function reconcileDispatch(root, key, events, inherited, sourceLeng
 
 export async function admitCloudTurn(ctx, root, packet, history, signal, relay = false) {
   const sid = packet.source;
-  const text = relay ? (verifiedRelay(packet,history) && continuation) : submittedText(packet.cloudIntent, sid, history);
+  const text = relay ? (verifiedRelay(packet,history) && (packet.cloudIntent.boundary === 'auto-failover' ? autoFailoverContinuation : continuation)) : submittedText(packet.cloudIntent, sid, history);
   if (!text || packet.archived || ctx.workspaceRegistry.archivedSessionIds.includes(sid)) return;
   const controller = ctx.get?.('sessionController');
   if (!controller) throw Error('Cloud session controller unavailable');

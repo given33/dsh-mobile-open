@@ -1,3 +1,8 @@
+import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { hash } from '../lib/task-sync/log.mjs';
+import { registerDeviceSwitch } from '../lib/task-sync/device-switch.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { taskProgress, previousHost } from '../lib/task-sync/host-change.mjs';
@@ -38,4 +43,19 @@ test('host identity comes from a native snapshot, not text delivered by a user o
   assert.equal(previousHost([event]),'desktop/win32/x64');
   assert.equal(previousHost([event],1),null);
   event.data.source.kind='user'; assert.equal(previousHost([event]),null);
+});
+
+test('device status identifies the answering host with or without a switch record', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'switch-status-'));
+  t.after(() => rm(root, {recursive:true, force:true}));
+  const {status} = registerDeviceSwitch({on() {}}, 'cloud', root);
+  const args = {sessionId:'chat', command:'c'.repeat(32)};
+  const host = {role:'cloud', protocol:1};
+  assert.deepEqual(await status({}), host);
+  assert.deepEqual(await status(args), {...host, state:'ready'});
+  const record = {...args, state:'yielded', turn:2};
+  await mkdir(join(root, 'device-switches'));
+  await writeFile(join(root, 'device-switches', hash(args.sessionId)+'.json'), JSON.stringify(record));
+  assert.deepEqual(await status(args), {...record, ...host});
+  await assert.rejects(status({...args, command:'invalid'}));
 });

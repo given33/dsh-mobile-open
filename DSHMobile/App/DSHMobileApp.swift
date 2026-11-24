@@ -71,7 +71,10 @@ struct RootView: View {
                                 onError: model.pageFailed,
                                 onAuthExpired: model.pageAuthExpired,
                                 onProcessTerminated: model.pageProcessTerminated,
-                                onBridgeMessage: model.handleBridgeMessage,
+                                onBridgeMessage: { message in
+                                    guard model.desktop?.id == session.desktopID else { return }
+                                    model.handleBridgeMessage(message)
+                                },
                                 onFrame: model.captureFrame
                             )
                             .id(session.desktopID)
@@ -126,7 +129,7 @@ struct RootView: View {
                 if model.showDeviceMenu, let anchor {
                     GeometryReader { proxy in
                         let trigger = proxy[anchor]
-                        let width = max(0, min(320, proxy.size.width - 16))
+                        let width = max(0, min(trigger.width, proxy.size.width - 16))
                         let left = max(8, min(trigger.minX, proxy.size.width - width - 8))
                         let top = trigger.maxY + 6
                         ZStack(alignment: .topLeading) {
@@ -139,8 +142,8 @@ struct RootView: View {
                                 ScrollView { deviceOptions }
                             }
                             .frame(width: width)
-                            .background(Theme.sheet, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                            .overlay { RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Theme.borderL2, lineWidth: 0.5) }
+                            .background(Theme.sheet, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Theme.borderL2, lineWidth: 0.5) }
                             .shadow(color: .black.opacity(0.14), radius: 14, y: 6)
                             .shadow(color: .black.opacity(0.05), radius: 3, y: 1)
                             .frame(maxHeight: max(0, proxy.size.height - top - 8), alignment: .top)
@@ -219,6 +222,16 @@ struct RootView: View {
         return model.savedDesktops.filter { !familyIDs.contains($0.id) }
     }
 
+    private func deviceDisplayName(for host: PairedDesktop) -> String {
+        if let cloud = model.cloudHost, cloud.id == host.id { return cloud.name }
+        return model.savedDesktops.first { $0.id == host.id }?.name ?? host.name
+    }
+
+    private var currentDeviceName: String {
+        guard let host = model.selectedDevice ?? model.desktop else { return "DSH" }
+        return deviceDisplayName(for: host)
+    }
+
     private func resolvedDeviceStatus(for host: PairedDesktop) -> DeviceProbeStatus {
         if let probed = model.deviceStatuses[host.id] {
             return probed
@@ -272,53 +285,37 @@ struct RootView: View {
         let dotColor = deviceStatusColor(for: status)
         let isSwitching = model.switchTargetID == host.id
         return Button(action: action) {
-            HStack(spacing: 10) {
-                ZStack(alignment: .bottomTrailing) {
-                    Image(systemName: isCloud ? "cloud.fill" : "laptopcomputer")
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(selected ? Theme.business : Theme.labelSecondary)
-                        .frame(width: 34, height: 34)
-                        .background(selected ? Theme.business.opacity(0.12) : Theme.hover.opacity(0.75),
-                                    in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    Circle()
-                        .fill(dotColor)
-                        .frame(width: 9, height: 9)
-                        .overlay(Circle().stroke(Theme.sheet, lineWidth: 1.5))
-                        .offset(x: 2, y: 2)
-                }
+            HStack(spacing: 5) {
+                Circle().fill(dotColor).frame(width: 7, height: 7).fixedSize()
                 VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 6) {
-                        Text(host.name)
-                            .font(.subheadline.weight(selected ? .semibold : .medium))
-                            .foregroundStyle(Theme.labelPrimary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                        Text(isCloud ? "云端" : "本机")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundStyle(isCloud ? Theme.business : Theme.meta)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(isCloud ? Theme.business.opacity(0.1) : Theme.hover, in: Capsule())
-                    }
+                    Text(deviceDisplayName(for: host))
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Theme.labelPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                     HStack(spacing: 4) {
+                        Text(isCloud ? "云端" : "本机")
+                            .foregroundStyle(isCloud ? Theme.business : Theme.meta)
+                            .fixedSize()
                         Text(deviceStatusLabel(for: status, isCloud: isCloud))
-                            .font(.caption2)
                             .foregroundStyle(status.isHealthy ? Theme.meta : dotColor)
                             .lineLimit(1)
                     }
+                    .font(.caption2)
                 }
-                Spacer(minLength: 4)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 if isSwitching {
-                    ProgressView().controlSize(.small)
+                    ProgressView().controlSize(.mini).fixedSize()
                 } else if selected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.system(size: 16))
+                    Image(systemName: "checkmark")
+                        .font(.caption2.weight(.semibold))
                         .foregroundStyle(Theme.business)
+                        .fixedSize()
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 7)
-            .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
             .background(selected ? Theme.hover.opacity(0.65) : Color.clear,
                         in: RoundedRectangle(cornerRadius: 10, style: .continuous))
             .contentShape(Rectangle())
@@ -368,8 +365,7 @@ struct RootView: View {
                 }
             }
         }
-        .font(.subheadline)
-        .padding(4)
+        .padding(2)
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isModal)
     }
@@ -408,7 +404,7 @@ struct RootView: View {
                         .frame(width: 7, height: 7)
                         .fixedSize()
                         .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: statusColor)
-                    Text(model.selectedDevice?.name ?? model.desktop?.name ?? "DSH")
+                    Text(currentDeviceName)
                         .font(.caption.weight(.medium))
                         .foregroundStyle(Theme.labelPrimary)
                         .lineLimit(1)

@@ -139,10 +139,11 @@ struct LinkClient: Sendable {
         return PairedDesktop(offer: offer, response: pair, preferred: endpoint).preparedCloudGrant()
     }
 
-    func checkSession() async throws -> (actions: Bool, terminal: Bool) {
-        let (data, response) = try await transport.session.data(for: request("mobile/v1/session", timeout: 6))
+    func checkSession(expectedDesktopID: String? = nil, timeout: TimeInterval = 6) async throws -> (actions: Bool, terminal: Bool) {
+        let (data, response) = try await transport.session.data(for: request("mobile/v1/session", timeout: timeout))
         try check(response)
         let value = try JSON.parse(data)
+        if let expectedDesktopID, value["desktop"]["id"].string != expectedDesktopID { throw LinkError.wrongDesktop }
         return (value["actions"].bool, value["terminal"].bool)
     }
 

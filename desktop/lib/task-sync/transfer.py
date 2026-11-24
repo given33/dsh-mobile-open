@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -213,6 +214,7 @@ def collect_receipts(root, reader, writer):
         durable_replace(folder, str(r['seq'])+'.json',json.dumps(r).encode())
         after = r['seq']
     if rows: durable_replace(dest, 'cursor',str(after).encode())
+    return bool(rows)
 
 def progress_db(root):
     # No checkpoint database or Python module is required for legacy installations.
@@ -253,17 +255,20 @@ def pulses(root,remote=None):
 
 
 def exchange_progress(root,reader,writer,send_local):
-    send(writer,['progress-heartbeats',pulses(root) if send_local else []]);pulses(root,receive(reader))
+    local_pulses = pulses(root) if send_local else []
+    send(writer,['progress-heartbeats',local_pulses]);remote_pulses=receive(reader)
+    pulses(root,remote_pulses)
     send(writer,['progress-list']);rows=receive(reader)
     if not isinstance(rows,list) or len(rows)>8:raise ValueError('Invalid progress inventory')
     for row in rows:
         answer=store_progress(root,row)
         send(writer,['progress-ack',row['run'],row['rev'],row['digest'],answer]);
         if receive(reader) is not True:raise ValueError('Progress acknowledgement failed')
-    if send_local:
-        for row in pending_progress(root):
-            send(writer,['progress-put',row]);answer=receive(reader)
-            ack_progress(root,row['run'],row['rev'],row['digest'],answer)
+    outgoing = pending_progress(root) if send_local else []
+    for row in outgoing:
+        send(writer,['progress-put',row]);answer=receive(reader)
+        ack_progress(root,row['run'],row['rev'],row['digest'],answer)
+    return bool(rows or outgoing or local_pulses or remote_pulses)
 
 
 def result_support():
@@ -305,7 +310,7 @@ def result_op(root, action, *args):
 
 def exchange_results(root, reader, writer, send_local):
     if not (root / "result-mailbox.sqlite").is_file():
-        return
+        return False
     import result_delivery as results
 
     local = result_op(root, "inventory", "desktop")
@@ -327,7 +332,8 @@ def exchange_results(root, reader, writer, send_local):
         raise ValueError("Invalid result receipts")
     # A disconnect after durable receipt but before the ack must not require a
     # new grant, a second model turn, or a second write to the working tree.
-    for key in set(local["have"]).intersection(receipts):
+    acknowledged = set(local["have"]).intersection(receipts)
+    for key in acknowledged:
         result_op(root, "ack", key, "cloud", receipts[key])
     received = result_op(root, "receipts", "desktop", remote["have"])
     wanted = set(local["want"])
@@ -339,10 +345,139 @@ def exchange_results(root, reader, writer, send_local):
         send(writer, ["results-ack", key, received[key]])
         if receive(reader) is not True:
             raise ValueError("Result receipt rejected")
-    if send_local:
-        for key in sorted(set(local["have"]).intersection(remote["want"]))[:4]:
-            send(writer, ["results-put", key, result_op(root, "get", key, "cloud")])
-            result_op(root, "ack", key, "cloud", receive(reader))
+    outgoing = set(local["have"]).intersection(remote["want"]) if send_local else set()
+    for key in sorted(outgoing)[:4]:
+        send(writer, ["results-put", key, result_op(root, "get", key, "cloud")])
+        result_op(root, "ack", key, "cloud", receive(reader))
+    return bool(acknowledged or outgoing or offers.intersection(received))
+
+
+EPOCH = re.compile(r'[0-9a-f]{32}')
+
+
+def failover_state(root, name):
+    path = root / 'failover' / name
+    try:
+        with path.open('rb') as f:
+            data = f.read(MAX_CATALOG + 1)
+    except FileNotFoundError:
+        return {}
+    if len(data) > MAX_CATALOG:
+        raise ValueError('Oversized failover state')
+    state = json.loads(data)
+    if not isinstance(state, dict) or state.get('v') != 1:
+        raise ValueError('Invalid failover state')
+    return state
+
+
+def failover_frame(root, role, host_alive=None):
+    local = failover_state(root, 'local-state.json')
+    observed = failover_state(root, 'peer-observed.json')
+    if local and local.get('role') != role:
+        raise ValueError('Unexpected failover role')
+    if host_alive is None:  # SSH reachability is not evidence that the DSH host is alive.
+        age = int(time.time() * 1000) - local.get('updatedAt', 0)
+        host_alive = bool(local) and 0 <= age <= 10000
+    return dict(v=1, role=role, epoch=local.get('epoch'), hostAlive=host_alive,
+                active=local.get('active', {}), surrenders=local.get('surrenders', {}),
+                ackOffer={sid: {'turn': row['turn'], 'epoch': row['epoch']}
+                          for sid, row in observed.get('active', {}).items()})
+
+
+def begin_renewal(frame):
+    frame['renewalId'] = secrets.token_hex(16) if frame['hostAlive'] else None
+    return int(time.time() * 1000) if frame['renewalId'] else None
+
+
+def validated_grants(request, ack, sent_at_ms):
+    # Bind a receipt to the exact request, including each offered session. Do
+    # not trust an echoed timestamp (the two hosts need not share a clock).
+    if (not request or sent_at_ms is None or not isinstance(ack, dict) or
+            not request.get('renewalId') or ack.get('renewalId') != request['renewalId'] or
+            ack.get('epoch') != request['epoch'] or not isinstance(ack.get('sessions'), dict)):
+        return {}
+    grants = {}
+    for sid, row in request['active'].items():
+        entry = ack['sessions'].get(sid)
+        if (row['epoch'] == request['epoch'] and isinstance(entry, dict) and
+                type(entry.get('turn')) is int and entry['turn'] == row['turn'] and entry.get('armed') is row['armed']):
+            grants[sid] = dict(epoch=row['epoch'], turn=row['turn'], armed=row['armed'],
+                               renewalId=request['renewalId'], renewedAt=sent_at_ms)
+    return grants
+
+
+def save_observation(root, state):
+    raw = json.dumps(state, separators=(',', ':')).encode()
+    if len(raw) > MAX_CATALOG:
+        raise ValueError('Oversized failover records')
+    folder = root / 'failover'
+    folder.mkdir(mode=0o700, exist_ok=True)
+    durable_replace(folder, 'peer-observed.json', raw)
+
+
+def observe_failover(root, frame, peer, grants=None):
+    if not isinstance(frame, dict) or frame.get('v') != 1 or frame.get('role') != peer or type(frame.get('hostAlive')) is not bool:
+        raise ValueError('Invalid failover frame')
+    epoch = frame.get('epoch')
+    if epoch is not None and not EPOCH.fullmatch(str(epoch)):
+        raise ValueError('Invalid failover epoch')
+    renewal_id = frame.get('renewalId')
+    if renewal_id is not None and (not isinstance(renewal_id, str) or not re.fullmatch('[0-9a-f]{16,32}', renewal_id)):
+        raise ValueError('Invalid failover renewal ID')
+    old = failover_state(root, 'peer-observed.json')
+    now = int(time.time() * 1000)
+    sessions = {}
+    rows = {}
+    for field in ('active', 'surrenders', 'ackOffer'):
+        table = frame.get(field, {})
+        if not isinstance(table, dict) or len(table) > 4096:
+            raise ValueError('Invalid failover records')
+        rows[field] = {}
+        for sid, row in table.items():
+            if (not re.fullmatch(r'[\w-][\w.-]{0,159}', sid, re.ASCII) or '..' in sid or
+                    not isinstance(row, dict) or type(row.get('turn')) is not int or row['turn'] < 0 or
+                    not isinstance(row.get('epoch'), str) or not EPOCH.fullmatch(row['epoch'])):
+                raise ValueError('Invalid failover offer identity')
+            if field != 'ackOffer' and row['epoch'] != epoch:
+                continue
+            if field == 'active':
+                if type(row.get('armed')) is not bool:
+                    raise ValueError('Invalid arm commit')
+                row = dict(row, peerArmed=row['armed'])
+                row.pop('leaseRenewedAt', None)  # Only this machine can stamp a peer lease.
+                previous = old.get('active', {}).get(sid, {})
+                if frame['hostAlive'] and renewal_id and not row.get('fenced'):
+                    row['leaseRenewedAt'] = now
+                    sessions[sid] = dict(turn=row['turn'], armed=row['armed'])
+                elif (previous.get('epoch'), previous.get('turn')) == (epoch, row['turn']) and 'leaseRenewedAt' in previous:
+                    row['leaseRenewedAt'] = previous['leaseRenewedAt']
+            rows[field][sid] = row
+    receipts = old.get('leaseGrants', {})
+    if grants:
+        receipts.update(grants)
+    save_observation(root, dict(v=1, peer=peer, peerEpoch=epoch, lastSeenAt=now if frame['hostAlive'] else old.get('lastSeenAt', 0),
+                                leaseGrants=receipts, **rows))
+    if frame['hostAlive'] and renewal_id:
+        return dict(renewalId=renewal_id, epoch=epoch, sessions=sessions)
+
+
+def exchange_failover(root, reader, writer, host_alive):
+    request = failover_frame(root, 'desktop', host_alive)
+    sent_at_ms = begin_renewal(request)
+    send(writer, ['failover-ping', request])
+    reply = receive(reader)
+    grants = validated_grants(request, reply.get('leaseAck'), sent_at_ms)
+    ack = observe_failover(root, reply, 'cloud', grants)
+    if ack is not None:
+        send(writer, ['failover-lease-ack', ack])
+        if receive(reader) is not True:
+            raise ValueError('Invalid reverse lease confirmation')
+
+
+def relay_supported(path, sources, failover):
+    packet = json.loads(path.read_bytes())
+    return ((sources or 'sourceFence' not in packet) and
+            (failover or packet.get('cloudIntent', {}).get('boundary') != 'auto-failover'))
 
 
 def main():
@@ -361,6 +496,7 @@ def main():
         catalogs = 'catalog-v1' in sys.argv[3:]
         models = 'models-v1' in sys.argv[3:]
         turns = 'turns-v1' in sys.argv[3:]
+        failover = 'failover-v1' in sys.argv[3:]
         relay = 'relay-v1' in sys.argv[3:]
         progress = 'progress-v1' in sys.argv[3:] and Path(__file__).with_name('script_progress.py').is_file()
         receipts = 'receipts-v1' in sys.argv[3:] and Path(__file__).with_name('portable_worker.py').is_file()
@@ -371,8 +507,9 @@ def main():
             import source_exchange as source
         source_spaces = set()
         offered_progress = set()
+        pending_renewal = None
         previous = inventory()
-        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []) + (['catalog-v1'] if catalogs else []) + (['models-v1'] if models else []) + (['turns-v1'] if turns else []) + (['receipts-v1'] if receipts else []) + (['relay-v1'] if relay else []) + (['progress-v1'] if progress else []) + (['results-v1'] if results else []) + (['sources-v1'] if sources else []))
+        send(sys.stdout.buffer, previous + (['watch-v1'] if watching else []) + (['catalog-v1'] if catalogs else []) + (['models-v1'] if models else []) + (['turns-v1'] if turns else []) + (['receipts-v1'] if receipts else []) + (['relay-v1'] if relay else []) + (['progress-v1'] if progress else []) + (['results-v1'] if results else []) + (['sources-v1'] if sources else []) + (['failover-v1'] if failover else []))
         while True:
             cmd=receive(sys.stdin.buffer)
             if cmd==['end']:break
@@ -380,6 +517,25 @@ def main():
                 current = inventory()
                 send(sys.stdout.buffer, None if current == previous else current)
                 previous = current
+            elif failover and len(cmd) == 2 and cmd[0] == 'failover-ping':
+                ack = observe_failover(root, cmd[1], 'desktop')
+                reply = failover_frame(root, 'cloud')
+                reply['leaseAck'] = ack if reply['hostAlive'] else None
+                reply['renewalId'] = None
+                sent_at = begin_renewal(reply) if reply['active'] else None
+                pending_renewal = (reply, sent_at) if sent_at is not None else None
+                send(sys.stdout.buffer, reply)
+            elif failover and len(cmd) == 2 and cmd[0] == 'failover-lease-ack':
+                valid_ack = (pending_renewal is not None and isinstance(cmd[1], dict) and
+                             cmd[1].get('epoch') == pending_renewal[0]['epoch'] and
+                             cmd[1].get('renewalId') == pending_renewal[0]['renewalId'])
+                grants = validated_grants(pending_renewal[0], cmd[1], pending_renewal[1]) if pending_renewal else {}
+                pending_renewal = None
+                if grants:
+                    state = failover_state(root, 'peer-observed.json')
+                    state.setdefault('leaseGrants', {}).update(grants)
+                    save_observation(root, state)
+                send(sys.stdout.buffer, valid_ack)
             elif sources and len(cmd)==2 and cmd[0]=='source-list':
                 source.support(root,'cloud',cmd[1]); available=source.inventory(root)
                 source_spaces={k for k in available if available[k]==cmd[1].get(k)}
@@ -417,7 +573,7 @@ def main():
             elif cmd[0]=='receipts' and receipts:
                 send(sys.stdout.buffer, receipt_page(root,cmd[1]))
             elif cmd == ['relay-list'] and relay:
-                send(sys.stdout.buffer, [n for n in sorted(manifest(root/'relay-outgoing')) if sources or 'sourceFence' not in json.loads(regular(root/'relay-outgoing',n).read_bytes())][:64])
+                send(sys.stdout.buffer, [n for n in sorted(manifest(root/'relay-outgoing')) if relay_supported(regular(root/'relay-outgoing',n), sources, failover)][:64])
             elif cmd[0] == 'relay-get' and relay:
                 send(sys.stdout.buffer, read_packet(root/'relay-outgoing', cmd[1]) if NAME.fullmatch(cmd[1]) else None)
             elif cmd[0] == 'relay-ack' and relay and NAME.fullmatch(cmd[1]):
@@ -443,6 +599,7 @@ def exchange(mode, root, host):
     outbox, inbox = root/'outbox', root/'inbox'
     out_cache, in_cache = {}, {}
     command = 'sudo -n -u dsh-cloud /usr/bin/python3 /opt/dsh-cloud/task-transfer.py --peer /var/lib/dsh-cloud/.dsh/mobile-task-sync'
+    command += ' failover-v1'
     if mode == '--watch':
         command += ' watch-v1'
     if Path(__file__).with_name('script_progress.py').is_file():command += ' progress-v1'
@@ -460,12 +617,19 @@ def exchange(mode, root, host):
             last_grant = None
             # Bound an orphaned helper's lifetime if the host process dies without teardown.
             # Healthy hosts reopen the connection; idle polls send no digest lists.
-            deadline = time.monotonic() + 60
+            deadline = time.monotonic() + 180
+            pause = 0.25
+            previous_outgoing = None
             while True:
+                active = False
+                outgoing = {}
+                failover = 'failover-v1' in initial[2:]
+                if failover:
+                    exchange_failover(root, p.stdout, p.stdin, mode in ('--sync', '--watch'))
                 if 'progress-v1' in initial[2:]:
-                    exchange_progress(root,p.stdout,p.stdin,mode!='--receive')
+                    active |= exchange_progress(root,p.stdout,p.stdin,mode!='--receive')
                 if 'receipts-v1' in initial[2:]:
-                    collect_receipts(root,p.stdout,p.stdin)
+                    active |= collect_receipts(root,p.stdout,p.stdin)
                 here = manifest(inbox, in_cache, catalogs)
                 grant = None if mode in ('--receive', '--mailbox') else verifier_manifest(root.parent/'mobile-link')
                 if grant is not None and grant != last_grant:
@@ -473,12 +637,14 @@ def exchange(mode, root, host):
                     if receive(p.stdout) is not True:
                         raise ValueError('Family sync failed')
                     last_grant = grant
+                    active = True
                 for name, digest in offered.items():
                     if name == MODELS:
                         raise ValueError('Cloud cannot publish model preferences')
                     if here.get(name) != digest:
                         send(p.stdin, ['get', name])
                         store(inbox, name, receive(p.stdout), 'cloud')
+                        active = True
                 if 'relay-v1' in initial[2:]:
                     send(p.stdin, ['relay-list']); jobs = receive(p.stdout)
                     if not isinstance(jobs,list) or len(jobs)>64: raise ValueError('Invalid relay inventory')
@@ -487,35 +653,56 @@ def exchange(mode, root, host):
                         send(p.stdin, ['relay-get',name]); queue_turn(root,name,receive(p.stdout),'cloud',True)
                         send(p.stdin, ['relay-ack',name]);
                         if receive(p.stdout) is not True: raise ValueError('Relay acknowledgement failed')
+                        active = True
                     if mode != '--receive':
-                        for job in sorted((root/'relay-outgoing').glob('*.json'))[:64]:
-                            if 'sources-v1' not in initial[2:] and 'sourceFence' in json.loads(job.read_bytes()): continue
+                        jobs = sorted((root/'relay-outgoing').glob('*.json'))[:64]
+                        outgoing['relay-outgoing'] = [job.name for job in jobs]
+                        for job in jobs:
+                            if not relay_supported(regular(job.parent,job.name), 'sources-v1' in initial[2:], failover): continue
                             send(p.stdin, ['relay-put',job.name,read_packet(job.parent,job.name)])
                             if receive(p.stdout) is not True: raise ValueError('Relay delivery failed')
+                            active = True
                             job.unlink()
                 if mode != '--receive' and 'turns-v1' in initial[2:]:
-                    for job in sorted((root/'cloud-outgoing').glob('*.json')):
+                    jobs = sorted((root/'cloud-outgoing').glob('*.json'))
+                    outgoing['cloud-outgoing'] = [job.name for job in jobs]
+                    for job in jobs:
                         if 'sources-v1' not in initial[2:] and 'sourceFence' in json.loads(job.read_bytes()): continue
                         send(p.stdin, ['turn', job.name, read_packet(job.parent, job.name)])
                         if receive(p.stdout) is not True:
                             raise ValueError('Cloud did not acknowledge turn')
+                        active = True
                         job.unlink()  # Immutable, command-specific name; the peer has fsynced it.
-                if mode not in ('--receive', '--mailbox'):
-                    for name, digest in manifest(outbox, out_cache, catalogs, models).items():
+                if mode not in ('--receive', '--mailbox') or (mode == '--mailbox' and failover):
+                    outgoing['outbox'] = manifest(outbox, out_cache, catalogs, models)
+                    for name, digest in outgoing['outbox'].items():
                         if received.get(name) != digest:
                             send(p.stdin, ['put', name, read_packet(outbox, name)])
                             if receive(p.stdout) is not True:
                                 raise ValueError('Peer did not acknowledge packet')
+                            received[name] = digest
+                            active = True
                 # History, execution fences and new turns go first. A full result
                 # mailbox must not starve ordinary task progress on every retry.
                 if 'results-v1' in initial[2:] and result_support():
-                    exchange_results(root,p.stdout,p.stdin,mode!='--receive')
+                    active |= exchange_results(root,p.stdout,p.stdin,mode!='--receive')
                 if 'sources-v1' in initial[2:] and mode!='--receive':
                     from source_exchange import exchange as exchange_sources
-                    exchange_sources(root,p.stdout,p.stdin,send,receive)
+                    # source-put acknowledges received rows and may carry outgoing rows.
+                    def source_send(writer, frame):
+                        nonlocal active, source_cursor
+                        if frame[0] == 'source-get':
+                            source_cursor = frame[3]
+                        elif frame[0] == 'source-put' and (frame[3] != source_cursor or frame[4]):
+                            active = True
+                        send(writer, frame)
+                    source_cursor = None
+                    exchange_sources(root,p.stdout,p.stdin,source_send,receive)
                 if not watching or time.monotonic() >= deadline:
                     break
-                time.sleep(1.5)
+                pause = 0.25 if active or outgoing != previous_outgoing else min(0.6, pause + 0.1)
+                previous_outgoing = outgoing
+                time.sleep(pause)
                 send(p.stdin, ['poll'])
                 update = receive(p.stdout)
                 if update is not None:

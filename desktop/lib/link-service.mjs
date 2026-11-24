@@ -38,12 +38,18 @@ export async function createLinkService({
   const devices = await new DeviceRegistry(stateDir).load();
   let familyTimer;
   if (await readJson(join(stateDir, 'family-policy.json'))) {
-    let refreshing = false;
+    let refreshing = false, failures = 0;
     const refresh = async () => {
       if (refreshing) return;
       refreshing = true;
-      try { devices.replaceFamily(await familyDevices(stateDir, identity)); }
-      catch { devices.replaceFamily([]); } finally { refreshing = false; }
+      try {
+        devices.replaceFamily(await familyDevices(stateDir, identity));
+        failures = 0;
+      } catch (error) {
+        // Missing policy/grants revoke immediately. Tolerate a short failed read,
+        // but fail closed if a verifier file stays unreadable.
+        if (++failures >= 3 || error.code === 'ENOENT') devices.replaceFamily([]);
+      } finally { refreshing = false; }
     };
     await refresh();
     familyTimer = setInterval(refresh, 2000);

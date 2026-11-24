@@ -81,7 +81,7 @@ export function registerSourceSteps(ctx, role, root, workspaceRoute) {
       const deadline = Date.now() + 20000;
       let current = snapshot;
       while (current && current.peerStored < snapshot.seq && Date.now() < deadline) {
-        await delay(350, undefined, {signal:exec.signal});
+        await delay(120, undefined, {signal:exec.signal});
         current = await sourceState(root, route);
       }
       if (!current || current.peerStored < snapshot.seq) throw Error('云端尚未确认源码检查点。');

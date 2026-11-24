@@ -75,7 +75,7 @@ export function syncModels(ctx, role, root) {
   });
 }
 
-export function taskSync(ctx, config, root) {
+export function taskSync(ctx, config, root, autoFailover) {
   const {role, sshHost} = config;
   if (!['cloud','desktop'].includes(role) || (role === 'desktop' && !/^[a-z0-9][\w.-]*$/i.test(sshHost || ''))) throw Error('Invalid task sync configuration');
   const peer = role === 'desktop' ? 'cloud' : 'desktop';
@@ -201,6 +201,7 @@ export function taskSync(ctx, config, root) {
         try { await finishResultPlans(root,id,events,reader.inheritedEventCount,role); } catch (err) { resultFailure=err; }
       }
       packet = await pack(role, workspace, reader.header, reader.inheritedEventCount, archived, events);
+      if (await autoFailover?.checkpoint(packet,events) === false) return;
     } catch (error) {
       if (error.name !== 'SessionFormatUnsupportedError' || record.formatStatus !== 'migration-required') throw error;
       const {cwd, ...meta} = record.header;
@@ -211,22 +212,33 @@ export function taskSync(ctx, config, root) {
     if (resultFailure) throw resultFailure; // History still ships; retry artifact capture on the next full scan.
     sent.set(id,rev);
   }
-  async function receive(name, path = join(inbox,name), job = null, relay = false) {
+  async function receive(name, path = join(inbox,name), job = null, relay = false, candidate, eligible) {
     const info = await stat(path, {bigint:true});
     if (info.size > maxPacket) throw Error('Oversized task envelope');
     const mark = `${info.ino}:${info.size}:${info.mtimeNs}`;
     if (!job && seen.get(name) === mark) return;
-    const packet = JSON.parse(await readFile(path,'utf8'));
+    const packet = candidate ?? JSON.parse(await readFile(path,'utf8'));
+    // The passive history namespace never authorizes closing a live turn. Do not
+    // consume new-format jobs until this host has a registered failover controller.
+    const automatic = packet.cloudIntent?.boundary === 'auto-failover';
+    if (packet.failoverClosers !== undefined || packet.cloudIntent?.boundary === 'auto-failover') {
+      if (!relay || !job) throw Error('Unexpected auto-failover outside relay queue');
+      if (!autoFailover || (!candidate && packet.cloudIntent?.trigger !== 'shutdown')) return;
+    }
     if (job) name = packetName(peer, packet.source);
     const events = await unpack(packet,peer,name), id = packet.source;
     if (job && (!packet.cloudIntent || job !== claimID(id,packet.cloudIntent.command) + '.json')) throw Error('Invalid cloud job ID');
     if (relay && (!events || !verifiedRelay(packet,events) || !compatiblePolicy(ctx,packet.cloudIntent.security,events))) throw Error('Invalid or expired execution relay');
+    if (automatic) {
+      if (await autoFailover.accepted(packet)) { if (!candidate) await unlink(path); return; }
+      if (!await autoFailover.canReceive(packet) || (eligible && !eligible())) return;
+    }
     if (packet.membership !== undefined) {
       checkMembership(packet.membership);
       if ((packet.membership.state === 'archived') !== packet.archived) throw Error('Inconsistent task membership');
     }
     if (isRetired(packet.workspace)) { seen.set(name,mark); return; }
-    if (job && !await sourceReady(root,packet, relay && role === 'cloud' && packet.cloudIntent.boundary === 'device-switch')) return; // Retry after durable source delivery and merge.
+    if (job && !await sourceReady(root,packet, relay && role === 'cloud' && ['device-switch','auto-failover'].includes(packet.cloudIntent.boundary))) return; // Retry after durable source delivery and merge.
     const length = events ? committedLength(events) : 0;
     // A first turn is still in flight, not an empty finished session.
     if (!length && events?.length) { seen.set(name,mark); return; }
@@ -241,6 +253,10 @@ export function taskSync(ctx, config, root) {
       return;
     }
     const history = events.slice(0,length);
+    function compare(local) {
+      try { return comparePrefix(local,history); }
+      catch (error) { if (automatic) autoFailover.archiveTail(packet,local.length); throw error; }
+    }
     if (packet.inherited > history.length) return;
     let localEvents = [];
     let missing = history.length;
@@ -248,36 +264,44 @@ export function taskSync(ctx, config, root) {
       const reader = await store.open(id,'read',options(signal));
       try {
         localEvents = (await reader.read()).events;
-        missing = comparePrefix(localEvents,history);
+        missing = compare(localEvents);
       } finally { await reader.close(); }
     }
     if (!existing || missing > 0) {
       if (ctx.get?.('sessions')?.get(id)) return; // An open native runtime owns this writer.
+      if (automatic && (!await autoFailover.canReceive(packet) || (eligible && !eligible()))) return;
       const writer = existing ? await store.open(id,'write',options(signal)) : await store.create(header,{signal,inheritedEventCount:packet.inherited});
       try {
         const old = (await writer.read()).events;
-        missing = comparePrefix(old,history);
+        missing = compare(old);
         if (missing > 0) await writer.append(history.slice(old.length),options(signal));
         await writer.flush(options(signal));
       } finally { await writer.close(); }
       ctx.get?.('sessionProjectionCache')?.coldSnapshot(header,packet.inherited,history);
     }
+    if (missing >= 0) autoFailover?.observeHistory(id,history,packet.inherited);
     if (!project.sessionIds.includes(id)) await project.attachSession(id);
     await importMembership(packet, existing);
     if (job && length === events.length && readMembership(registry,id) !== 'archived') {
       const state = await reconcileDispatch(root,job.slice(0,-5),localEvents,packet.inherited,length);
-      if (state === 'accepted') { await unlink(path); return; }
+      if (state === 'accepted') { if (!candidate) await unlink(path); return; }
       if (state === 'uncertain' || missing < 0) return; // Keep the packet; never replay to find out.
 
-      if (relay) {
+      if (relay && !automatic) {
         const live = ctx.get?.('agents')?.get(id);
         if (live && (live.status !== 'idle' || live.session.seq !== history.length || live.inbox.nextStep.length || live.inbox.nextTurn.length)) return;
         const canWrite = packet.cloudIntent.security.sandbox !== 'read-only' && ctx.get('sandboxPolicy').defaultMode !== 'read-only' && history.findLast(e=>e.type === 'sandbox/mode')?.data?.mode !== 'read-only';
         await prepareInputs(root,role,packet.workspace,project.path,packet.relayInputs,canWrite);
         await rememberResultPlan(root,packet,job.slice(0,-5),history.length,canWrite);
       }
+      if (automatic) {
+        if (!await autoFailover.canReceive(packet) || (eligible && !eligible())) return;
+        autoFailover.markClaim(packet);
+      }
+      if (relay) autoFailover?.authorizeReturn(packet);
       if (await admitCloudTurn(ctx, root, packet, history, signal, relay) === 'uncertain') return;
     }
+    if (candidate) return;
     if (job) await unlink(path);
     else seen.set(name,mark);
   }
@@ -319,6 +343,10 @@ export function taskSync(ctx, config, root) {
       }
       // Read packets already delivered even when the peer has since lost power.
       await receiveInbox();
+      await autoFailover?.evaluateTakeover((packet, eligible) => {
+        const name = packetName(peer,packet.source), job = claimID(packet.source,packet.cloudIntent.command) + '.json';
+        return receive(name,join(inbox,name),job,true,packet,eligible);
+      });
       for (const project of registry.list()) for (const id of project.sessionIds) {
         signal.throwIfAborted();
         if (!scanAll && !changed.has(id)) continue;
@@ -332,22 +360,26 @@ export function taskSync(ctx, config, root) {
   function schedule() {
     if (timer || signal.aborted) return;
     // Throttle, don't debounce: a busy tool stream must not postpone shipping indefinitely.
-    timer = setTimeout(() => { timer = undefined; void tick(false); }, 450);
+    timer = setTimeout(() => { timer = undefined; void tick(false); }, 150);
   }
   async function watchPeer() {
     // The transport owns no DSH writer. Local checkpoints keep advancing during SSH outages.
     while (!signal.aborted) {
+      let retryMs = 150;
       try {
-        await run('py',['-3.11',transfer,'--watch',root,sshHost],{windowsHide:true,timeout:240000,signal});
-      } catch { if (!signal.aborted) report(new Error('Task sync SSH unavailable')); }
+        await run('py',['-3.11',transfer,'--watch',root,sshHost],{windowsHide:true,timeout:300000,signal});
+      } catch {
+        retryMs = 2000;
+        if (!signal.aborted) report(new Error('Task sync SSH unavailable'));
+      }
       if (signal.aborted) break;
-      try { await delay(2000, undefined, {signal}); } catch { break; }
+      try { await delay(retryMs, undefined, {signal}); } catch { break; }
     }
   }
   ctx.effect(() => {
-    const first = setTimeout(() => tick(),400), interval = setInterval(() => tick(),12000);
+    const first = setTimeout(() => tick(),400), interval = setInterval(() => tick(),6000);
     // Imported packets can arrive between full registry scans on either host.
-    const polling = setInterval(() => tick(false),1500);
+    const polling = setInterval(() => tick(false),350);
     watchSource(root,signal,role);
     if (role === 'desktop') void watchPeer();
     return () => { clearTimeout(first); clearInterval(interval); clearInterval(polling); clearTimeout(timer); ctrl.abort(); };

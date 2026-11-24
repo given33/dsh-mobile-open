@@ -369,7 +369,10 @@ struct OfficialWebView: UIViewRepresentable {
         func bind(_ next: BrowserSession, initial: Bool = false) {
             guard initial || next.id != session.id, let web = webView else { return }
             let changingOrigin = !local(next.url)
-            if changingOrigin { coverCurrentDocument(); web.stopLoading(); loadingStarted = false }
+            if changingOrigin {
+                coverCurrentDocument(); web.stopLoading()
+                loaded = false; loadingStarted = false; routePainted = false
+            }
             session = next
             // Optimistic cold boot: start loading immediately at t=0 using WKWebsiteDataStore's persisted HttpOnly cookie.
             if initial && next.cookies.isEmpty {
@@ -383,11 +386,10 @@ struct OfficialWebView: UIViewRepresentable {
                     await web.configuration.websiteDataStore.httpCookieStore.setCookie(cookie)
                 }
                 guard self.session.id == next.id, self.webView === web else { return }
-                if initial || changingOrigin || (!self.loaded && !self.loadingStarted) { self.loadHome(); return }
-                if self.loaded {
-                    // Renew the HTTP-only cookie inside the same data store and document without reloading.
-                    web.evaluateJavaScript("(()=>{const b=globalThis.__DSH_MOBILE_BRIDGE__;if(b?.credentialsChanged)b.credentialsChanged();else b?.reconnect?.()})()", completionHandler: nil)
-                }
+                if !changingOrigin && !self.loaded && self.loadingStarted { return }
+                if changingOrigin || !self.loaded { self.loadHome(); return }
+                // Notify only a loaded, same-origin document, after installing all its cookies.
+                web.evaluateJavaScript("(()=>{const b=globalThis.__DSH_MOBILE_BRIDGE__;if(b?.credentialsChanged)b.credentialsChanged();else b?.reconnect?.()})()", completionHandler: nil)
             }
         }
 

@@ -8,7 +8,7 @@ import { hash, maxPacket, pack, validID } from './log.mjs';
 import { collectInputs } from './relay-inputs.mjs';
 import { authorizeResults } from './relay-results.mjs';
 import { sealSource } from './source-state.mjs';
-import { continuation, passiveDelivery, switchBoundary } from './relay-boundary.mjs';
+import { isContinuation, passiveDelivery, switchBoundary } from './relay-boundary.mjs';
 import { readHistory, taskProgress } from './host-change.mjs';
 
 function syncDirectory(dir) {
@@ -17,7 +17,7 @@ function syncDirectory(dir) {
   try { fsyncSync(fd); } finally { closeSync(fd); }
 }
 
-export function registerDeviceSwitch(ctx, role, root) {
+export function registerDeviceSwitch(ctx, role, root, failover) {
   const dir = join(root, 'device-switches'), out = join(root, 'relay-outgoing');
   const staged = new Map();
   const path = id => join(dir, hash(id) + '.json');
@@ -58,13 +58,15 @@ export function registerDeviceSwitch(ctx, role, root) {
     }
     return save({session:sessionId, turn:start.data.turn, start:start.seq, command}, 'requested');
   }
-  async function status({sessionId, command}) {
-    if (sessionId === undefined && command === undefined) return {role, protocol:1};
+  async function status({sessionId, command} = {}) {
+    if (sessionId === undefined && command === undefined) return {role, protocol:1,
+      ...(failover === undefined ? {} : {autoFailover:Boolean(failover), failoverProtocol:1})};
+    if (failover && validID(sessionId) && command === undefined) return {role, protocol:1, ...await failover.sessionStatus(sessionId)};
     if (!validID(sessionId) || !/^[a-f0-9]{32}$/.test(command)) throw Error('无效接力凭据。');
     const local = read(sessionId);
-    if (local?.command === command) return local;
+    if (local?.command === command) return {...local, role, protocol:1};
     const key = claimID(sessionId, command), state = await dispatchState(root,key);
-    return {state:state === 'ready' && existsSync(join(root,'relay-incoming',key+'.json')) ? 'received' : state};
+    return {role, protocol:1, state:state === 'ready' && existsSync(join(root,'relay-incoming',key+'.json')) ? 'received' : state};
   }
   // Prepare at a native pre-step AFTER the previous tool batch has settled. The framework
   // emits turn/end(blocked) itself when we reject. No model cooperation or fake event needed.
@@ -73,7 +75,7 @@ export function registerDeviceSwitch(ctx, role, root) {
     if (['sealing','yielded'].includes(record?.state) && step === 1) {
       // A new message on the old host cannot fork a surrendered task. Only an admitted
       // return transfer or a mirrored terminal result for that specific claim releases it.
-      const localReturn = messages.find(m => m.source?.kind === 'user' && /^[a-f0-9]{64}$/.test(m.source.rpcId ?? '') && m.content?.[0]?.text === continuation);
+      const localReturn = messages.find(m => m.source?.kind === 'user' && /^[a-f0-9]{64}$/.test(m.source.rpcId ?? '') && isContinuation(m.content?.[0]?.text));
       const events = await readHistory(ctx,session.id,session,signal), key = claimID(session.id,record.command);
       const original = events.findLast(e => e.seq > record.start && e.type === 'user/message' && e.data?.source?.rpcId === key);
       const finished = original && events.slice(original.seq+1).some(e => e.type === 'turn/end');

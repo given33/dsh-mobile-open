@@ -1,3 +1,4 @@
+import { registerAutoFailover } from '../lib/task-sync/auto-failover.mjs';
 import { registerDeviceSwitch } from '../lib/task-sync/device-switch.mjs';
 import { registerHostChange } from '../lib/task-sync/host-change.mjs';
 import { dispatchState } from '../lib/task-sync/cloud-turn.mjs';
@@ -16,7 +17,7 @@ import { installModelRouting } from './model-routing.mjs';
 import { registerScriptCheckpoint } from '../lib/task-sync/script-checkpoint-tool.mjs';
 import { registerDeploymentRef } from '../lib/task-sync/deployment-ref.mjs';
 import { registerGitReleasePlan } from '../lib/task-sync/git-release-tool.mjs';
-import { registerEnvironment, textOutput } from '../lib/task-sync/relay-environment.mjs';
+import { hostChangeProbe, registerEnvironment, textOutput } from '../lib/task-sync/relay-environment.mjs';
 import { registerTurnRelay } from '../lib/task-sync/relay-turn.mjs';
 import { sessionPlacement } from '../lib/task-sync/command-placement.mjs';
 import { registerCloudRun, workspaceRoute } from '../lib/task-sync/cloud-turn.mjs';
@@ -87,15 +88,17 @@ export function apply(ctx, rawConfig = {}) {
   if (rawConfig.taskSync?.role) {
     const root = join(config.stateDir,'..','mobile-task-sync');
     const role = rawConfig.taskSync.role;
-    if (['desktop','cloud'].includes(role) && rawConfig.taskSync.turnRelay === true) {
+    const relayEnabled = ['desktop','cloud'].includes(role) && rawConfig.taskSync.turnRelay === true;
+    const autoEnabled = relayEnabled && rawConfig.taskSync.autoFailover !== false;
+    if (relayEnabled) {
       ctx.inject(['agents','sessions','sessionPersistence','workspaceRegistry'], child => {
-        deviceSwitch = registerDeviceSwitch(child,role,root);
+        const failover = autoEnabled ? registerAutoFailover(child,role,root,rawConfig.taskSync) : undefined;
+        if (failover) taskSync(child,rawConfig.taskSync,root,failover);
+        deviceSwitch = registerDeviceSwitch(child,role,root,failover);
         child.effect(() => () => { deviceSwitch = undefined; });
       });
-      ctx.inject(['systemPrompt','workingDirectory','tools','sessions','sessionPersistence'], child => registerHostChange(child, role, async (agent,signal) => ({
-        cwd: await child.workingDirectory.ensure(agent,signal),
-        nativeShellTools: ['bash','pwsh'].filter(name => !!child.tools.get(name,agent)),
-      }), async key => await dispatchState(root,key) !== 'ready'));
+      ctx.inject(['systemPrompt','workingDirectory','tools','sessions','sessionPersistence','workspaceRegistry'], child => registerHostChange(child, role, hostChangeProbe(child,role,root),
+        async key => await dispatchState(root,key) !== 'ready'));
       ctx.inject(['tools'],child => registerScriptCheckpoint(child,root,textOutput));
       ctx.inject(['tools'],child => registerGitReleasePlan(child,textOutput));
       ctx.inject(['tools'],child => registerDeploymentRef(child,textOutput));
@@ -111,7 +114,7 @@ export function apply(ctx, rawConfig = {}) {
       });
       ctx.inject(['tools','sessions','sessionPersistence','workspaceRegistry','workingDirectory'], child => registerTurnRelay(child,role,root));
       ctx.inject(['systemPrompt'], child => child.systemPrompt.section({name:'mobile-link:relay', order:850,
-        text:'This DSH has a paired execution host. Use relay_environment to check the actual OS, native shells and workspace manifests. When the owner wants work to survive this host going offline, proactively call relay_remaining_task alone at a completed step boundary BEFORE starting the next long operation, if the task can run there. On the peer, verify source files, dependencies, credentials and previous side effects; never translate a destructive command blindly or bypass required approvals. For an authorized release to an opted-in Git target, record relay_git_release_plan before any push. Use the helper returned by relay_environment through the native shell: node HELPER status|prepare|finish REMOTE BRANCH OPERATION IDENTITY BASE DESIRED. Keep the original operation; check target status before retries. Committed means the Git branch was updated, not that CI or deployment succeeded. For a GitHub deployment, record relay_deployment_ref with the original authorized target. After a switch, read relay_environment.deploymentVerification and check for a fresh owner-configured observation matching the original referenceOperation. Otherwise, if allowed, run node HELPER TICKET via the native shell. Do not change sandbox rules or create watch policies. Use relay_wait_deployment for a first or changed owner observation; a timeout is not a deployment outcome. Pending means wait, success describes this specific rollout only. Unknown, failure or a missing creation response is not permission to submit again. Do not fabricate an ID or actor. Do not enable target policies yourself. For replay-safe computation in scripts you can adapt, use relay_environment.scriptProgress, bind the recipe to code and inputs, save explicit state and check paired acknowledgement. If native sandbox denies access, use relay_script_checkpoint(quiet or load), pass only explicit data into the approved project script, and save its checkpoint result using the same job and recipe. Never loosen the sandbox. A prestarted standby can resume a quiet checkpoint; quiet is not proof of source death and never authorizes installs, external writes or deployments. When relay_environment provides resultDelivery, stage the exact final bytes of its requested workspace outputs under the indicated directory before finishing. Never synthesize a missing result. If relay_environment.handoff.deferredCall says sourceExecution is not-started, the source shell body was never invoked for that specific call. Review its original purpose and timeout, choose the native target command and obtain its normal approvals. Never infer that any earlier call did not run. A live process is not portable. Do not transfer again merely because of an automatic handoff.',
+        text:'This DSH has a paired execution host. Use relay_environment to check the actual OS, native shells and workspace manifests. When the owner wants work to survive this host going offline, proactively call relay_remaining_task alone at a completed step boundary BEFORE starting the next long operation, if the task can run there. On auto-failover, first use the injected toolchain mappings and progress ledger to distinguish completed, not-started and unverified calls. On the peer, verify source files, dependencies, credentials and previous side effects; never translate a destructive command blindly or bypass required approvals. For an authorized release to an opted-in Git target, record relay_git_release_plan before any push. Use the helper returned by relay_environment through the native shell: node HELPER status|prepare|finish REMOTE BRANCH OPERATION IDENTITY BASE DESIRED. Keep the original operation; check target status before retries. Committed means the Git branch was updated, not that CI or deployment succeeded. For a GitHub deployment, record relay_deployment_ref with the original authorized target. After a switch, read relay_environment.deploymentVerification and check for a fresh owner-configured observation matching the original referenceOperation. Otherwise, if allowed, run node HELPER TICKET via the native shell. Do not change sandbox rules or create watch policies. Use relay_wait_deployment for a first or changed owner observation; a timeout is not a deployment outcome. Pending means wait, success describes this specific rollout only. Unknown, failure or a missing creation response is not permission to submit again. Do not fabricate an ID or actor. Do not enable target policies yourself. For replay-safe computation in scripts you can adapt, use relay_environment.scriptProgress, bind the recipe to code and inputs, save explicit state and check paired acknowledgement. If native sandbox denies access, use relay_script_checkpoint(quiet or load), pass only explicit data into the approved project script, and save its checkpoint result using the same job and recipe. Never loosen the sandbox. A prestarted standby can resume a quiet checkpoint; quiet is not proof of source death and never authorizes installs, external writes or deployments. When relay_environment provides resultDelivery, stage the exact final bytes of its requested workspace outputs under the indicated directory before finishing. Never synthesize a missing result. If relay_environment.handoff.deferredCall says sourceExecution is not-started, the source shell body was never invoked for that specific call. Review its original purpose and timeout, choose the native target command and obtain its normal approvals. Never infer that any earlier call did not run. A live process is not portable. Do not transfer again merely because of an automatic handoff.',
         retirement:'The paired-host execution relay is unavailable.'}));
     }
     if (rawConfig.taskSync.portableSteps === true) {
@@ -130,7 +133,7 @@ export function apply(ctx, rawConfig = {}) {
     ctx.inject(['tools','workspaceRegistry'], child => registerSourceSteps(child,role,root,workspaceRoute));
     ctx.inject(['commands','workspaceRegistry'], child => registerSourceCommands(child,role,root,workspaceRoute));
     ctx.inject(['settings'], child => syncModels(child,rawConfig.taskSync.role,root));
-    ctx.inject(['workspaceRegistry','sessionPersistence'], child => {
+    if (!autoEnabled) ctx.inject(['workspaceRegistry','sessionPersistence'], child => {
       taskSync(child, rawConfig.taskSync, root);
     });
   }

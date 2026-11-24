@@ -35,6 +35,8 @@ struct PageTheme: Equatable, Codable {
     var bgBase: String
     var sidebarFill: String
 
+    static let unknown = PageTheme(dark: nil, bgBase: "", sidebarFill: "")
+
     var backgroundUIColor: UIColor? {
         if let color = Self.parseColor(bgBase), color.cgColor.alpha == 1 {
             var brightness: CGFloat = 0
@@ -191,7 +193,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     @Published private(set) var pageTitle = ""
     @Published private(set) var currentSessionID: String?
     @Published private(set) var desktopFocus: DesktopFocus?
-    @Published private(set) var pageTheme = PageTheme(dark: nil, bgBase: "", sidebarFill: "")
+    @Published private(set) var pageTheme = PageTheme.unknown
     @Published private(set) var followDesktop = false
     @Published private(set) var secondaryHubBadge: String?
     @Published private(set) var taskRunning = false
@@ -240,22 +242,23 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     }
 
     private func loadSavedTheme(for id: String) -> PageTheme {
-        guard !ephemeral else { return PageTheme(dark: nil, bgBase: "", sidebarFill: "") }
+        guard !ephemeral else { return .unknown }
         let defaults = UserDefaults.standard
-        let key = "dsh.theme." + id
-        let bg = defaults.string(forKey: key + ".bg") ?? ""
-        let sidebar = defaults.string(forKey: key + ".sidebar") ?? ""
-        let darkObj = defaults.object(forKey: key + ".dark") as? Bool
-        return PageTheme(dark: darkObj, bgBase: bg, sidebarFill: sidebar)
+        let global = "dsh.theme.global"
+        let key = defaults.object(forKey: global + ".dark") == nil ? "dsh.theme." + id : global
+        let theme = PageTheme(dark: defaults.object(forKey: key + ".dark") as? Bool,
+                              bgBase: defaults.string(forKey: key + ".bg") ?? "",
+                              sidebarFill: defaults.string(forKey: key + ".sidebar") ?? "")
+        if key != global { saveTheme(theme) }
+        return theme
     }
 
-    private func saveTheme(_ theme: PageTheme, for id: String) {
-        guard !ephemeral else { return }
+    private func saveTheme(_ theme: PageTheme) {
+        guard !ephemeral, let dark = theme.dark else { return }
         let defaults = UserDefaults.standard
-        let key = "dsh.theme." + id
-        if let dark = theme.dark { defaults.set(dark, forKey: key + ".dark") }
-        if !theme.bgBase.isEmpty { defaults.set(theme.bgBase, forKey: key + ".bg") }
-        if !theme.sidebarFill.isEmpty { defaults.set(theme.sidebarFill, forKey: key + ".sidebar") }
+        defaults.set(dark, forKey: "dsh.theme.global.dark")
+        defaults.set(theme.bgBase, forKey: "dsh.theme.global.bg")
+        defaults.set(theme.sidebarFill, forKey: "dsh.theme.global.sidebar")
     }
 
     private func loadCachedRoute(for id: String) -> CachedBrowserRoute? {
@@ -390,9 +393,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         }
         if let dark = pageTheme.dark {
             route["surface"] = dark ? "dark" : "light"
-        }
-        if !pageTheme.bgBase.isEmpty {
-            route["bg"] = pageTheme.bgBase
+            route["lockTheme"] = "1"
+            route["bg"] = pageTheme.bgBase.isEmpty ? (dark ? "#151517" : "#ffffff") : pageTheme.bgBase
         }
         return route
     }
@@ -483,6 +485,10 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 guard !Task.isCancelled, self.familyID == primary.id else { return }
                 if !self.ephemeral { try SecureStore.write("cloud." + primary.id, try cloud.map { try JSONEncoder().encode($0) }) }
                 self.cloudHost = cloud
+                if let cloud {
+                    if self.desktop?.id == cloud.id { self.desktop?.name = cloud.name }
+                    if self.selectedDevice?.id == cloud.id { self.selectedDevice?.name = cloud.name }
+                }
             } catch { /* Keep the last pinned grant on transient network errors. */ }
         }
     }
@@ -580,18 +586,35 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     private nonisolated static func probeHost(_ host: PairedDesktop) async -> DeviceProbeStatus {
         let channel = PinnedTransport(fingerprint: host.fingerprint)
         defer { channel.invalidate() }
-        let started = Date()
-        guard let endpoint = await EndpointRace.first(host.candidates, desktopID: host.id, transport: channel) else {
-            return .offline("当前离线")
-        }
-        do {
-            _ = try await LinkClient(transport: channel, base: endpoint.baseURL, token: host.token).checkSession()
-            let ms = max(1, Int((Date().timeIntervalSince(started) * 1000).rounded()))
-            return .online(route: endpoint.kind.label, latencyMs: ms)
-        } catch LinkError.unpaired {
-            return .offline("配对已失效")
-        } catch {
-            return .offline("暂不可用")
+        return await withTaskGroup(of: Result<DeviceProbeStatus, LinkError>.self) { group in
+            for (index, endpoint) in host.candidates.enumerated() {
+                group.addTask {
+                    do {
+                        if index > 0 { try await Task.sleep(for: .milliseconds(EndpointTiming.delay(index: index))) }
+                        try Task.checkCancellation()
+                        let client = LinkClient(transport: channel, base: endpoint.baseURL, token: host.token)
+                        let start = ContinuousClock.now
+                        _ = try await client.checkSession(expectedDesktopID: host.id, timeout: endpoint.kind == .other ? 10 : 4)
+                        let elapsed = start.duration(to: .now).components
+                        let ms = max(1, Int(elapsed.seconds) * 1000 + Int(elapsed.attoseconds / 1_000_000_000_000_000))
+                        return .success(.online(route: endpoint.kind.label, latencyMs: ms))
+                    } catch let error as LinkError { return .failure(error) }
+                    catch is URLError { return .failure(.unreachable) }
+                    catch is CancellationError { return .failure(.unreachable) }
+                    catch { return .failure(.badResponse) }
+                }
+            }
+            var revoked = false, answered = false
+            for await result in group {
+                switch result {
+                case .success(let status): group.cancelAll(); return status
+                case .failure(.unpaired): revoked = true
+                case .failure(.unreachable): break
+                case .failure: answered = true
+                }
+            }
+            if revoked { return .offline("配对已失效") }
+            return .offline(answered ? "暂不可用" : "当前离线")
         }
     }
 
@@ -613,6 +636,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         } }
         deviceStatuses[target.id] = .connecting
         switchTargetID = target.id
+        recoveryTask?.cancel(); recoveryTask = nil
         switchTask = Task { [weak self] in
             let channel = PinnedTransport(fingerprint: target.fingerprint)
             var adopted = false
@@ -623,14 +647,25 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 if let session, let source, source.id != target.id {
                     let destination = LinkClient(transport: channel, base: ready.endpoint.baseURL, token: target.token)
                     let targetRole = target.id == owner ? "desktop" : "cloud"
-                    let capability = try await destination.rpc("mobileRelay/status", args: .object([:]))
-                    guard capability["role"].string == targetRole, capability["protocol"].int == 1 else { throw LinkError.badResponse }
                     let key = "dsh.handoff.\(owner).\(source.id).\(target.id).\(session)"
                     let defaults = UserDefaults.standard
-                    var command = defaults.string(forKey: key) ?? UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
+                    let existingCommand = defaults.string(forKey: key).flatMap { $0.isEmpty ? nil : $0 }
+                    var command = existingCommand ?? UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased()
                     let statusArgs: () -> JSON = { .object(["sessionId": .string(session), "command": .string(command)]) }
                     // If the reply was lost after the old host yielded, reconnect to the SAME claim.
-                    let previous = try await destination.rpc("mobileRelay/status", args: statusArgs())
+                    let previous: JSON
+                    if existingCommand != nil {
+                        previous = try await destination.rpc("mobileRelay/status", args: statusArgs())
+                    } else {
+                        previous = .null
+                    }
+                    var capability = previous
+                    if capability["role"] == .null || capability["protocol"] == .null {
+                        capability = try await destination.rpc("mobileRelay/status", args: .object([:]))
+                    }
+                    guard capability["role"] == .string(targetRole), capability["protocol"] == .number(1) else { throw LinkError.badResponse }
+                    // Even expectedRunning:false can stage a yield if the source started a turn since its last UI event.
+                    guard !Task.isCancelled, self.switchID == ticket, self.currentSessionID == session else { throw CancellationError() }
                     if previous["state"].string != "accepted" {
                         let result: JSON
                         if ["received", "uncertain"].contains(previous["state"].string) {
@@ -651,6 +686,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                             command = result["command"].string
                             defaults.set(command, forKey: key)
                             let deadline = ContinuousClock.now.advanced(by: .seconds(90))
+                            var pollDelay = 200
                             while true {
                                 try Task.checkCancellation()
                                 let state = try await destination.rpc("mobileRelay/status", args: statusArgs())
@@ -663,7 +699,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                                     }
                                 }
                                 guard ContinuousClock.now < deadline else { throw ClientError.message("交接尚未确认。再次选择此设备可查询同一次交接，不会重新执行。") }
-                                try await Task.sleep(for: .milliseconds(750))
+                                try await Task.sleep(for: .milliseconds(pollDelay))
+                                pollDelay = pollDelay == 200 ? 300 : 500
                             }
                         }
                     }
@@ -672,13 +709,16 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 }
                 guard !Task.isCancelled, self.switchID == ticket, self.currentSessionID == session else { throw CancellationError() }
                 var chosen = target; chosen.preferred = ready.endpoint
-                self.deviceStatuses[chosen.id] = .online(route: ready.endpoint.kind.label, latencyMs: self.lastLatencyMs)
+                self.deviceStatuses[chosen.id] = .online(route: ready.endpoint.kind.label, latencyMs: ready.latencyMs)
                 self.performHaptic("success")
                 adopted = true; self.selectedDevice = chosen
                 self.activate(chosen, transport: channel, ready: ready, sharedSessionID: session)
             } catch {
                 guard let self, !Task.isCancelled, self.switchID == ticket else { return }
                 self.switchTargetID = nil
+                if self.wsHealth != .connected {
+                    self.scheduleRecoveryCheck(delaySeconds: self.wsHealth == .connecting ? 10 : 0.2)
+                }
                 self.performHaptic("error")
                 self.probeDeviceStatuses(force: true)
                 self.deviceIssue = "仍保留当前连接。" + error.localizedDescription
@@ -713,17 +753,17 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         transport = channel
         cancelDocumentDeadline()
         needsLaunchSelection = true; recoveryFailures = 0; revoked = false
+        if pageTheme.dark == nil { pageTheme = loadSavedTheme(for: desktop?.id ?? selected.id) }
         desktop = selected
         if !ephemeral { taskPush.bind(selected,channel) }
         currentSessionID = ephemeral ? nil : (sharedSessionID ?? UserDefaults.standard.string(forKey: "dsh.lastSession." + selected.id))
         persistSelection()
-        pageTheme = loadSavedTheme(for: selected.id)
         if !ephemeral, let data = try? Data(contentsOf: frameURL(selected.id)),
            let saved = try? JSONDecoder().decode(ResumeSnapshot.self, from: data),
            saved.sessionID == currentSessionID, Date().timeIntervalSince(saved.capturedAt) < 86400,
            let savedImg = UIImage(data: saved.jpeg), !Self.isBlankFrame(savedImg) {
-            pageTheme = saved.theme ?? pageTheme.matchingLegacyFrame(savedImg)
-            resumeFrame = savedImg
+            let frameDark = saved.theme?.dark ?? PageTheme.unknown.matchingLegacyFrame(savedImg).dark
+            resumeFrame = pageTheme.dark == nil || frameDark == pageTheme.dark ? savedImg : nil
         } else {
             resumeFrame = nil
         }
@@ -953,6 +993,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     func restoringDocument() {
         cancelDocumentDeadline()
         if !needsLaunchSelection { needsLaunchSelection = true }
+        // The page may never emit an initial socket event. Give the handshake a full grace period.
+        if wsHealth == .connecting { scheduleRecoveryCheck(delaySeconds: 10) }
         // HTTP and the socket can be ready before the target conversation paints.
         // Keep its snapshot, but never leave the user stuck behind the cover.
         var delay = 12.0
@@ -1012,15 +1054,18 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 pendingCommand = .setFollowDesktop(UUID(), true)
             }
         case "theme":
+            let explicit = body["explicit"] as? Bool == true
             // Old plugins can report the light bootstrap document over a dark snapshot.
-            guard !needsLaunchSelection || pageTheme.dark == nil || body["confirmed"] as? Bool == true,
-                  let dark = body["dark"] as? Bool else { return }
+            guard let dark = body["dark"] as? Bool,
+                  explicit || pageTheme.dark == nil || pageTheme.dark == dark,
+                  explicit || !needsLaunchSelection || pageTheme.dark == nil || body["confirmed"] as? Bool == true else { return }
             let bgBase = body["bgBase"] as? String ?? ""
             let sidebarFill = body["sidebarFill"] as? String ?? ""
             guard let surface = PageTheme.parseColor(bgBase), surface.cgColor.alpha == 1 else { return }
             let next = PageTheme(dark: dark, bgBase: bgBase, sidebarFill: sidebarFill)
+            if pageTheme.dark != next.dark, let id = desktop?.id { discardFrame(id) }
             pageTheme = next
-            if let id = desktop?.id { saveTheme(next, for: id) }
+            saveTheme(next)
         case "ws":
             let raw = (body["state"] as? String ?? "").lowercased()
             switch raw {
@@ -1030,14 +1075,16 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 problem = nil
                 reconnecting = false
                 recoveryTask?.cancel(); recoveryTask = nil; recoveryFailures = 0
-            case "connecting":
+            case "connecting", "reconnecting":
+                if wsHealth == .disconnected { recoveryTask?.cancel(); recoveryTask = nil }
                 if wsHealth == .connected { linkInterrupted = true }
                 wsHealth = .connecting
-                scheduleRecoveryCheck(delaySeconds: 3.0, fresh: true)
-            default:
+                scheduleRecoveryCheck(delaySeconds: 10, fresh: false)
+            case "disconnected":
                 if !linkInterrupted { linkInterrupted = true }
                 wsHealth = .disconnected
-                scheduleRecoveryCheck(delaySeconds: 0.05)
+                scheduleRecoveryCheck(delaySeconds: 0.2)
+            default: break
             }
         case "secondary-hub":
             secondaryHubBadge = body["visible"] as? Bool == true ? (body["badge"] as? String ?? "") : nil
@@ -1164,15 +1211,20 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         endBackgroundKeepAlive()
         let roamed = networkChangedWhileBackgrounded
         networkChangedWhileBackgrounded = false
-        guard desktop != nil, !revoked, pathAvailable else { return }
+        guard desktop != nil, !switchingDevice, !revoked, pathAvailable else { return }
         if browser == nil {
             if !connecting { beginConnection(preservePage: false) }
             return
         }
+        if wsHealth == .disconnected { pendingCommand = .wakeCheck(UUID()) }
         if browser?.endpoint.kind == .lan && currentOnWifi == false {
             linkInterrupted = true
             wsHealth = .connecting
             scheduleRecoveryCheck(delaySeconds: 0, fresh: true)
+            return
+        }
+        if wsHealth == .connecting {
+            scheduleRecoveryCheck(delaySeconds: 10)
             return
         }
         if testRenewOnResume || (browser?.expiresAt.timeIntervalSinceNow ?? 0) < 120 {
@@ -1182,8 +1234,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         }
         // Immediately wake-check the browser bridge (cancels WS backoff + triggers 1-RTT sync?poke=1)
         // when returning to foreground or after offscreen roaming so half-open NAT sockets recover at t=0.
-        if wsHealth != .connected {
-            pendingCommand = .wakeCheck(UUID())
+        if wsHealth == .disconnected {
             scheduleRecoveryCheck(delaySeconds: 0)
         } else if roamed || !ephemeral {
             pendingCommand = .wakeCheck(UUID())
@@ -1203,29 +1254,32 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 self.lastNetworkSignature = sig
                 self.pathAvailable = available
                 self.currentOnWifi = available ? onWifi : nil
-                guard previous != nil, previous != sig else { return }
+                guard previous != nil, previous != sig, self.desktop != nil else { return }
+                if !available {
+                    self.linkInterrupted = true
+                    self.wsHealth = .disconnected
+                }
                 if !self.isForeground {
                     self.networkChangedWhileBackgrounded = true
                     return
                 }
-                guard self.desktop != nil else { return }
-                if available {
-                    // Instant Wi-Fi <-> 5G roaming failover:
-                    // If currently pinned to a private LAN endpoint while off Wi-Fi (e.g. cellular),
-                    // immediately switch to public/tailnet at t = 0ms instead of waiting for TCP timeout.
-                    if !onWifi, self.browser?.endpoint.kind == .lan, !self.revoked {
-                        self.linkInterrupted = true
-                        self.wsHealth = .connecting
-                        self.scheduleRecoveryCheck(delaySeconds: 0, fresh: true)
-                        return
-                    }
-                    self.recoveryTask?.cancel(); self.recoveryTask = nil
+                guard !self.switchingDevice, !self.revoked, available else { return }
+                // Instant Wi-Fi <-> 5G roaming failover:
+                // If currently pinned to a private LAN endpoint while off Wi-Fi (e.g. cellular),
+                // immediately switch to public/tailnet at t = 0ms instead of waiting for TCP timeout.
+                if !onWifi, self.browser?.endpoint.kind == .lan {
                     self.pendingCommand = .wakeCheck(UUID())
-                    if self.wsHealth != .connected { self.scheduleRecoveryCheck(delaySeconds: 0.05) }
-                } else {
                     self.linkInterrupted = true
-                    self.wsHealth = .disconnected
+                    self.wsHealth = .connecting
+                    self.scheduleRecoveryCheck(delaySeconds: 0, fresh: true)
+                    return
                 }
+                if self.browser != nil, self.wsHealth == .connecting {
+                    self.scheduleRecoveryCheck(delaySeconds: 10)
+                    return
+                }
+                self.pendingCommand = .wakeCheck(UUID())
+                if self.wsHealth != .connected { self.scheduleRecoveryCheck(delaySeconds: 0.05) }
             }
         }
         monitor.start(queue: DispatchQueue(label: "app.dshmobile.netpath"))
@@ -1235,7 +1289,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     // One non-sliding deadline per outage: repeated socket events must not push
     // recovery into the future indefinitely. Timers have no ownership offscreen.
     private func scheduleRecoveryCheck(delaySeconds: Double, fresh: Bool = false) {
-        guard isForeground, pathAvailable, !revoked, desktop != nil else { return }
+        guard isForeground, pathAvailable, !switchingDevice, !revoked, desktop != nil else { return }
         let deadline = Date().addingTimeInterval(delaySeconds)
         if recoveryTask != nil, let due = recoveryDue, due <= deadline { return }
         recoveryTask?.cancel(); recoveryDue = deadline
@@ -1243,7 +1297,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             try? await Task.sleep(for: .seconds(delaySeconds))
             guard !Task.isCancelled, let self, self.isForeground, self.desktop != nil else { return }
             self.recoveryTask = nil
-            guard self.pathAvailable, !self.revoked, self.connectionTask == nil else { return }
+            guard self.pathAvailable, !self.switchingDevice, !self.revoked, self.connectionTask == nil else { return }
             self.beginConnection(preservePage: self.browser != nil, reusePage: !fresh)
         }
     }
@@ -1298,6 +1352,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                     if self.browser == nil { self.wsHealth = .connecting }
                 } else if self.wsHealth == .disconnected {
                     self.pendingCommand = .reconnect(UUID())
+                } else if self.wsHealth == .connecting {
+                    self.pendingCommand = .wakeCheck(UUID())
                 }
                 self.actionsEnabled = ready.actions
                 self.terminalEnabled = ready.terminal
@@ -1312,7 +1368,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 self.reconnecting = false
                 self.problem = nil
                 if self.wsHealth != .connected {
-                    self.scheduleRecoveryCheck(delaySeconds: active?.id == ready.id ? 1.5 : min(20, 8 + 3 * Double(self.recoveryFailures)), fresh: true)
+                    self.scheduleRecoveryCheck(delaySeconds: active?.id == ready.id ? 6 : min(20, 10 + 3 * Double(self.recoveryFailures)), fresh: false)
                     self.recoveryFailures = min(8, self.recoveryFailures + 1)
                 }
             } catch {

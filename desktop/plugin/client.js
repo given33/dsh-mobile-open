@@ -767,6 +767,46 @@ window.__ModuleLoader__.load({
       } catch {}
     }
 
+    function installMobileTheme(ctx) {
+      const theme = ctx.theme
+      if (typeof theme?.setTheme !== 'function' || typeof theme.getTheme !== 'function') return
+      return ctx.effect(() => {
+        const original = theme.setTheme
+        if (original.dmlThemeWrapper) return
+        let aligning = false, editing = false
+        const lock = () => globalThis.__DSH_MOBILE_THEME_LOCK__
+        const scheme = () => theme.getTheme()?.active?.colorScheme
+        const align = () => {
+          const surface = lock()?.surface
+          if (!surface || editing) return
+          lock().apply()
+          if (aligning || globalThis.__DSH_MOBILE_SHELL__?.readOnly || scheme() === surface) return
+          aligning = true
+          // A rejected settings write must not defeat the local lock. Retry on the next change.
+          try { Promise.resolve(original.call(theme, surface)).catch(() => {}).finally(() => { aligning = false; lock()?.apply() }) }
+          catch { aligning = false }
+        }
+        function setTheme(preference, ...args) {
+          editing = true
+          const done = () => {
+            editing = false
+            const surface = ['dark','light'].includes(preference) ? preference : scheme()
+            globalThis.__DSH_MOBILE_BRIDGE__?.notifyExplicitThemeChange?.(surface)
+          }
+          try {
+            const result = original.call(this, preference, ...args)
+            if (result?.then) return result.then(value => { done(); return value }, error => { editing = false; throw error })
+            done(); return result
+          } catch (error) { editing = false; throw error }
+        }
+        setTheme.dmlThemeWrapper = true
+        theme.setTheme = setTheme
+        const off = ctx.on?.('theme/change', align)
+        align()
+        return () => { off?.(); if (theme.setTheme === setTheme) theme.setTheme = original }
+      }, 'dsh-mobile-link: mobile theme')
+    }
+
     function applyMobileBridge(ctx) {
       let conversationSvc = null
       ctx.inject?.(['conversation'], scope => {
@@ -982,7 +1022,7 @@ window.__ModuleLoader__.load({
         const push = () => {
           const state = source.getSnapshot?.()
           if (state) {
-            globalThis.__DSH_MOBILE_BRIDGE__?.setLogicalConnection?.(state)
+            if (globalThis.__DSH_MOBILE_BRIDGE__?.setLogicalConnection?.(state) === false) return
             try { globalThis.webkit?.messageHandlers?.dshMobile?.postMessage({ type: 'ws', state }) } catch {}
           }
         }
@@ -2703,6 +2743,7 @@ window.__ModuleLoader__.load({
       installWorkspaceSessions(ctx)
       // Inside the paired phone's WebView, skip the desktop QR UI and wire Cordis services.
       if (globalThis.__DSH_MOBILE_SHELL__?.active) {
+        ctx.inject(['theme'], installMobileTheme)
         ctx.inject(['documentPreviews'], installReader)
         ctx.inject(['remote.workspaceFiles'], scope => installFileExport(scope))
         ctx.slots.inject('conversation.composer.dock', () => ctx.slots.register({ name:'conversation.composer.dock', id:'mobile-stats-fit' }, MobileStatsFit))
