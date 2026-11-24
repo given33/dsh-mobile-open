@@ -23,7 +23,7 @@ export function eventSpec(call) {
   } catch { return null; }
 }
 
-async function readSetting(path, limit) {
+export async function readSetting(path, limit) {
   let file;
   try { file = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)); }
   catch (err) { if (err.code === 'ENOENT') return null; throw err; }

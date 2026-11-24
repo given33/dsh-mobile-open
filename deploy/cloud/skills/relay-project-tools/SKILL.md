@@ -11,3 +11,5 @@ description: DSH 从 Windows 接手到 Linux，或 Linux 构建缺少工具、�
 * **PowerShell 项目**：如果源端用 `.ps1`，先看 `foundOnPath` 是否包含 `pwsh`，再核对脚本的模块、路径和系统 API。对两端兼容的脚本，可用本机原生终端调用 `pwsh -NoLogo -NoProfile -NonInteractive -File ./scripts/Build-Project.ps1`（路径以项目为准）；不要把脚本逐行猜译成 Bash。Win32、COM、注册表和 Windows 专用模块不会因为 Linux 装了 PowerShell 就可用。
 * **编译工具**：从 CMake 生成器、编译器版本及系统库探测入手。只有在项目支持时，Ninja 缺失才可选已有的 Unix Makefiles，并使用新的构建目录。如果工具是项目声明且版本已锁定的用户空间包，可以用项目自己的包管理器安装到工作区，不全局安装。`pwsh` 不存在不等于 Bash 能执行 PowerShell 脚本；先验证有对应的 Linux 实现和所需输入。
 * **权限与接力**：所有写入或联网都走当前会话原生工具和审批，计划/只读模式只检查。需要 root、驱动、系统服务、来源不明的软件源或超出磁盘预算时，说明缺哪个包、版本和用途，不改服务权限、不用 `sudo` 或远程脚本管道。安装后重新探测环境，记录实际完成的步骤与产物再继续。部署、发消息等有外部副作用的步骤必须查实际回执或幂等键；无法证明未执行，不自动重放。
+
+* **部署回执**：若原任务使用 GitHub Deployments，记录 `relay_deployment_ref`；在新设备先读 `relay_environment.deploymentVerification`。优先按 `referenceOperation` 查同一会话、同一目标的观察；用 `relay_wait_deployment` 等到首次查询或状态变化。终端可访问时，也能用本机 `helper` 和原 `ticket` 只读查询。不要修改监视清单或沙箱设置。没有原始 ID 或匹配的关联标记、有多个结果、回执未确认、被限流均不是“未部署”，不要重发。其他部署系统必须查它们自己的记录。

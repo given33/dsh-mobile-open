@@ -154,3 +154,17 @@ Linux 沙箱可能看不到插件安装目录。请将包里的 `tools/computati
 接手端已开始构建时，源 DSH 退出不会杀掉配对端进程。回执只证明**这一条**被拦下的命令没有在源端启动，不证明更早的安装或部署没有生效。如果源端在接力包送达前突然掉电，或任意普通进程已经在掉电机器上运行，单靠此设置不能恢复该进程的内存、套接字或尚未落盘的数据。
 
 可选的 Linux x64 PowerShell 运行时：从 PowerShell 官方 GitHub 发布页获取 `v7.6.10` 的 `powershell-7.6.10-linux-x64.tar.gz`，管理员运行 `sudo sh install-project-pwsh.sh /path/to/powershell-7.6.10-linux-x64.tar.gz`。安装器核对固定 SHA-256，用 `dsh-cloud` 账户测试后只链接到 `/opt/dsh-cloud/bin/pwsh`，不替换系统 Shell。Windows 专用模块仍不能在 Linux 上工作。
+
+### 0.7.20：接手后核对原 GitHub 部署，不重复发布
+
+`relay_deployment_ref` 在会话记录中保存要查的仓库、环境、提交和发布者，不创建部署。只使用用户已授权发布目标的真实信息，不从同名分支猜部署。已知 deployment ID 的情况下，接手端逐项核对仓库数字 ID、提交 SHA、环境、部署创建者、最新状态的发布者和部署 ID，然后报告 **GitHub 对该次部署的状态**。成功不是服务健康证明；`inactive` 也不是失败。网络错误、未授权、没有状态或身份不匹配统一保留为未确认，任何返回值都不授权重发。
+
+普通终端可用 `relay_environment.deploymentVerification.helper` 给出的本机路径执行 `node HELPER TICKET`，`TICKET` 来自原生引用。助手只读固定 GitHub API，不读取部署日志或环境变量列表。私有项目可在运行助手的设备按需提供 `DSH_RELAY_GITHUB_READ_TOKEN`（仅部署读取权限）与 `DSH_RELAY_GITHUB_REPOSITORY_ID`（匹配才使用）；不通过手机、会话或接力包传令牌。如果创建部署的响应丢了，可在原有发布流程支持时提前把 `relay_deployment_ref` 产生的 `operation` 存进 GitHub 部署 `payload.dshRelayOperation`。查询在给定提交和环境下只接受唯一匹配；找不到、超过查询边界或有两次匹配均不重发。不支持这个标记且没有原 ID，就不能通过猜测补出回执。
+
+**沙箱读不到插件目录或不能联网时**，无需放宽终端权限。管理员可以在接手端工作区以外的 `mobile-task-sync/deployment-watch.json` 设置最多八个精确的现有部署。例如（用真实值替换占位符）：
+
+```json
+[{"sessionId":"<原会话 ID>","target":{"repository":"owner/repo","repositoryId":"123","environment":"staging","sha":"<40 位完整提交 SHA>","deploymentActor":"456","statusActor":"789","deploymentId":"1001"}}]
+```
+
+只有清单内的目标由插件后台主动只读查询；来自聊天、脚本或模型的文字不能添加目标或触发主机网络请求。`relay_environment` 显示原会话中已记录引用的观察时间与结果；`relay_wait_deployment` 可等待首次观察或下一次状态变化。后台对运行中状态约每 5 分钟复查，已结束状态约每 30 分钟复查，并对限流退避；等待超时不等于失败。移除条目后工具不再返回它的状态。未接入的 CI、Shell 部署和任意外部业务仍需各自的目标回执，不能借用 GitHub 的成功状态。

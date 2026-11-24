@@ -3,7 +3,7 @@ then require the peer to discover its OS, execute a native npm build, and finish
 No production model key, workspace, deploy command or elevated shell is used.
 """
 import urllib.request
-import argparse, base64, hashlib, http.server, io, json, os, shutil, subprocess, tarfile, tempfile, threading, time, uuid
+import argparse, re, base64, hashlib, http.server, io, json, os, shutil, subprocess, tarfile, tempfile, threading, time, uuid
 from pathlib import Path
 from offline_cloud_turn import Host, wait, exchange, transfer
 
@@ -80,9 +80,14 @@ def cut_install(workspace):
             if proc.poll() is None: proc.kill(); proc.wait(timeout=10)
 
 
-def test(root, cli, package, origin, export=None, incoming=None, paired_cut=False, return_files=False, placement=False, cut_during_build=False, session_placement=False, external_mailbox=False, portable_ps1=False):
+def test(root, cli, package, origin, export=None, incoming=None, paired_cut=False, return_files=False, placement=False, cut_during_build=False, session_placement=False, external_mailbox=False, portable_ps1=False, check_deployment=False):
     target = 'cloud' if origin == 'desktop' else 'desktop'
     build_command = 'pwsh -NoLogo -NoProfile -NonInteractive -File ./scripts/Build-Project.ps1' if portable_ps1 else 'npm run build'
+    # Optional network probe: GET only, against an existing public GitHub Pages rollout.
+    deployment = dict(repository='github/choosealicense.com', repositoryId='11426474', environment='github-pages',
+                      sha='b851d0a602dc4db48a913cccd3a670b9183eeb09', deploymentActor='40415',
+                      statusActor='40415', deploymentId='7953860305')
+    observed = []
     reports, native_calls, source_advanced, evidence = [], [], [], []
     class Model(http.server.BaseHTTPRequestHandler):
         def log_message(self, *_): pass
@@ -105,6 +110,8 @@ def test(root, cli, package, origin, export=None, incoming=None, paired_cut=Fals
                     elif 'planObject' not in history:
                         tool = 'relay_git_release_plan'
                         args = dict(remote='origin',branch='release',identity='1'*40,base='2'*40,desired='3'*40)
+                    elif check_deployment and 'github-deployments' not in history:
+                        tool = 'relay_deployment_ref'; args = deployment
                     elif placement:
                         tool = 'pwsh' if os.name == 'nt' else 'bash'
                         args = dict(command=build_command,description='Run requested project build',timeoutMs=120000)
@@ -121,11 +128,29 @@ def test(root, cli, package, origin, export=None, incoming=None, paired_cut=Fals
                                 try: result = json.loads(raw)
                                 except (ValueError, TypeError): continue
                                 if isinstance(result, dict) and result.get('handoff'): evidence.append(result)
+
                     tool = 'pwsh' if os.name == 'nt' else 'bash'
                     setup = evidence[-1]['nodeSetup']
                     assert setup['modules']=='absent' and setup['locks']==['package-lock.json']
                     install = setup['freshInstall'] + ' --offline --cache .fixture-cache'
-                    if install not in history:
+                    if check_deployment:
+                        verify=evidence[-1]['deploymentVerification']; ref,=verify['references']
+                        assert all(ref[k]==v for k,v in deployment.items()) and 'sourceCallSeq' in ref
+                        if 'deploymentObservation' not in history:
+                            tool='relay_wait_deployment'; args={'operation':ref['operation'],'timeoutSeconds':45}
+                        else:
+                            for message in req['messages']:
+                                for block in message.get('content',[]):
+                                    if not isinstance(block,dict) or block.get('type')!='tool_result': continue
+                                    for part in block.get('content',[]) if isinstance(block.get('content'),list) else []:
+                                        try: value=json.loads(part['text'])
+                                        except (ValueError,TypeError,KeyError): continue
+                                        if isinstance(value,dict) and value.get('deploymentObservation')==ref['operation']:
+                                            observed.append(value)
+                            assert observed and observed[-1].get('state') in ('reported-success','inactive'), observed[-1:]
+                            assert observed[-1]['retryDeployment'] is False and observed[-1]['deploymentId']==deployment['deploymentId']
+                    if tool=='relay_wait_deployment': pass
+                    elif install not in history:
                         args = dict(command=install,description='Install the locked dependency from the project tarball')
                     elif setup['verify'] + ' relay-local-lib' not in history:
                         args = dict(command=setup['verify']+' relay-local-lib',description='Verify the receiver installation')
@@ -167,12 +192,18 @@ def test(root, cli, package, origin, export=None, incoming=None, paired_cut=Fals
             host = Host(root/r,cli,package,'http://127.0.0.1:'+str(server.server_port)+'/'+r)
             cfg = host.root/'profiles/web/cordis.patch.yml'
             cfg.write_text(cfg.read_text('utf8').replace('cloudTurns: true','cloudTurns: true, turnRelay: true'),encoding='utf8')
+            if check_deployment and fixture:
+                host.sync.mkdir(exist_ok=True)
+                (host.sync/'deployment-watch.json').write_text(json.dumps([{'sessionId':fixture['sid'],'target':deployment}]),'utf8')
             hosts[r] = host; host.start()
         if not fixture:
             source = hosts[origin]
             workspace = source.root/'Source workspace'; workspace.mkdir()
             wid = source.rpc('workspace/create',{'path':str(workspace)})['workspace']['workspaceId']
             sid = source.rpc('session/create',{'workspaceId':wid})['sessionId']
+            if check_deployment and not export:
+                hosts[target].sync.mkdir(exist_ok=True)
+                (hosts[target].sync/'deployment-watch.json').write_text(json.dumps([{'sessionId':sid,'target':deployment}]),'utf8')
             inputs = create_project(workspace, marker, cut_during_build, portable_ps1)
             (workspace/'not-shared.txt').write_text('private fixture')
             source.sync.mkdir(exist_ok=True)
@@ -257,6 +288,8 @@ def test(root, cli, package, origin, export=None, incoming=None, paired_cut=Fals
             expected_shell = ('pwsh' if origin=='desktop' else 'bash') if fixture else ('pwsh' if os.name=='nt' else 'bash')
             assert h['deferredCall']['sourceExecution']=='not-started' and h['deferredCall']['shell']==expected_shell
             assert h['deferredCall']['command']==build_command and (peer_work/'native-build-starts').read_text()=='1'
+        if check_deployment:
+            print('Owner observation re-read on receiver: '+observed[-1]['state']+' (no dispatch or credentials sent).',flush=True)
         if portable_ps1:
             runtime = json.loads((peer_work/'pwsh-build.json').read_text('utf-8-sig'))
             assert runtime['edition']=='Core' and runtime['linux']==(os.name!='nt')
@@ -290,7 +323,7 @@ def test(root, cli, package, origin, export=None, incoming=None, paired_cut=Fals
         transfer.durable_replace(dest.sync/'relay-incoming', jobname, raw)
         wait(lambda: b'accepted' in fence.read_bytes() and not (dest.sync/'relay-incoming'/jobname).exists(),30)
         assert (peer_work/'build-count').read_text() == '1'
-        assert native_calls.count(target)==(6 if return_files else 5) and not source_advanced, native_calls
+        assert native_calls.count(target)==(6 if return_files else 5)+int(check_deployment) and not source_advanced, native_calls
         print('%s -> %s (%s): original host stopped; peer completed native model rounds, installed the offline locked dependency without hooks, verified it, ran the unmodified npm build once and finished in original session.' % (origin,target,os.name),flush=True)
     except BaseException:
         print('model requests:',native_calls[-12:],flush=True)
@@ -313,6 +346,7 @@ if __name__ == '__main__':
     p.add_argument('--origin',choices=['desktop','cloud'],default='desktop')
     p.add_argument('--paired-cut', action='store_true', help='Wait for an out-of-band fixture-copy digest before killing an actual npm install')
     p.add_argument('--placement',action='store_true')
+    p.add_argument('--check-public-deployment',action='store_true',help='Verify an existing public rollout through the receiving native shell (network required, GET only)')
     p.add_argument('--portable-ps1', action='store_true',help='Execute the same real project PowerShell script on either OS')
     p.add_argument('--external-mailbox',action='store_true',help='Let the actual paired mailbox deliver the protected job to this receiver')
     p.add_argument('--session-placement',action='store_true',help='Use the owner panel instead of a per-command config file')
@@ -321,7 +355,7 @@ if __name__ == '__main__':
     p.add_argument('--fixture-home',type=Path,help='Create a new isolated directory for external two-host transport verification')
     mode=p.add_mutually_exclusive_group();mode.add_argument('--export-fixture',type=Path);mode.add_argument('--import-fixture',type=Path);a=p.parse_args()
     def run(d):
-        test(Path(d),a.cli.resolve(),a.tgz.resolve(),a.origin,a.export_fixture,a.import_fixture,a.paired_cut,a.return_files,a.placement or a.session_placement,a.cut_during_build,a.session_placement,a.external_mailbox,a.portable_ps1)
+        test(Path(d),a.cli.resolve(),a.tgz.resolve(),a.origin,a.export_fixture,a.import_fixture,a.paired_cut,a.return_files,a.placement or a.session_placement,a.cut_during_build,a.session_placement,a.external_mailbox,a.portable_ps1,a.check_public_deployment)
     if a.fixture_home:
         a.fixture_home.mkdir(mode=0o700); run(a.fixture_home.resolve())
     else:

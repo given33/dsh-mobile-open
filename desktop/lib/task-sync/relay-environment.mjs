@@ -1,3 +1,6 @@
+import { setTimeout as delay } from 'node:timers/promises';
+import { deploymentWatch } from './deployment-watch.mjs';
+import { deploymentHelper, savedDeployments } from './deployment-ref.mjs';
 import { ownerResultStatus, resultInstructions } from './relay-results.mjs';
 import { access, lstat, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
@@ -61,6 +64,40 @@ export async function environment(cwd, role, shells, searchPath = process.env.PA
 }
 
 export function registerEnvironment(ctx,role,root) {
+  const observer=deploymentWatch(root);
+  ctx.effect(() => {
+    void observer.tick();
+    const timer=setInterval(()=>void observer.tick(),30_000);
+    timer.unref?.();
+    return () => { clearInterval(timer); observer.stop(); };
+  });
+  ctx.tools.register({name:'relay_wait_deployment',output:textOutput,
+    parameters:{type:'object',required:['operation'],additionalProperties:false,properties:{operation:{type:'string'},
+      previousStatusId:{type:'string'},timeoutSeconds:{type:'integer',minimum:1,maximum:60}}},
+    description:'Wait for a first or changed owner-monitored GitHub deployment receipt in THIS session. Use the original reference operation; no network or rollout is triggered by the tool. A timeout is not a failed deployment or permission to submit again.',
+    async execute(args,exec) {
+      const timeout=args.timeoutSeconds ?? 15;
+      if (!/^[a-f0-9]{64}$/.test(args.operation) || !Number.isInteger(timeout) || timeout<1 || timeout>60 ||
+          (args.previousStatusId!==undefined && !/^[1-9]\d{0,15}$/.test(args.previousStatusId))) throw Error('Invalid deployment wait');
+      const session=exec.agent.session;
+      await ctx.sessions.flush(session);
+      const reader=await ctx.sessionPersistence.open(session.id,'read',{signal:exec.signal});
+      let ref;
+      try { ref=savedDeployments((await reader.read()).events,reader.inheritedEventCount,session.id).find(r=>r.operation===args.operation); }
+      finally { await reader.close(); }
+      if (!ref) throw Error('No matching native deployment reference in this session');
+      const deadline=performance.now()+timeout*1000;
+      while (true) {
+        exec.signal.throwIfAborted();
+        const [receipt]=await observer.forSession(session.id,[ref]);
+        if (!receipt) return JSON.stringify({deploymentObservation:ref.operation,state:'unconfirmed',reason:'no-owner-watch',retryDeployment:false});
+        if (receipt.reason!=='awaiting-owner-observation' && (!args.previousStatusId || receipt.statusId!==args.previousStatusId)) return JSON.stringify({deploymentObservation:ref.operation,...receipt});
+        const remaining=deadline-performance.now();
+        if (remaining<=0) return JSON.stringify({deploymentObservation:ref.operation,...receipt,waitTimedOut:true});
+        await delay(Math.min(remaining,1000),undefined,{signal:exec.signal});
+      }
+    },
+  });
   ctx.tools.register({name:'relay_environment', parameters:noArgs, output:textOutput,
     description:'Inspect the current execution host, native DSH shells, PATH tools and project manifests after switching devices. Read source tool result references for this handoff. Missing results or shell success do not prove external effects; verify the target before retrying. Does not run or install anything.',
     async execute(_args,exec) {
@@ -75,6 +112,8 @@ export function registerEnvironment(ctx,role,root) {
       const reader = await ctx.sessionPersistence.open(session.id,'read',{signal:exec.signal});
       try {
         const {events} = await reader.read();
+        const references=savedDeployments(events,reader.inheritedEventCount,session.id);
+        info.deploymentVerification = {helper:deploymentHelper, references, observations:await observer.forSession(session.id,references)};
         const handoff = handoffEvidence(events,reader.inheritedEventCount,session.id,role);
         // Passive sync can bring the very same accepted request back to its source.
         // Only the real receiver holds this local dispatch fence.
