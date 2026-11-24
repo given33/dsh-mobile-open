@@ -113,20 +113,24 @@ def grants(root):
 
 
 def grant_value(root, key, folder, scopes, auto):
-    requested = Path(folder).absolute()
+    requested = Path(os.path.abspath(folder))
     folder = requested.resolve(strict=True)
-    if auto and requested != folder:
-        raise ValueError("Automatic sharing requires the actual project path, not a link")
-    if not folder.is_dir() or folder in {
-        Path.home(),
-        Path(folder.anchor),
-        root.resolve(),
-    }:
+    home = Path.home().resolve()
+    if not folder.is_dir() or folder in {home, Path(folder.anchor), root.resolve()}:
         raise ValueError("Select a project, not a home or disk root")
+    if auto:
+        # Ancestors may be links (e.g. macOS /var); the project itself must not be one.
+        parent = requested.parent.resolve(strict=True)
+        if (
+            requested == requested.parent
+            or os.path.islink(requested)
+            or os.path.normcase(str(folder)) != os.path.normcase(str(parent / requested.name))
+        ):
+            raise ValueError("Automatic sharing requires the actual project path, not a link")
     if scopes == ["*"] and (auto or root.resolve() / "workspaces" / key != folder):
         # A mistaken project-wide opt-in must not scan a disk or a general user/profile directory.
         if (
-            folder.parent == Path.home()
+            folder.parent == home
             or folder.name.casefold() in {"desktop", "documents", "downloads"}
             or any(p.startswith(".") for p in folder.parts)
             or not any(

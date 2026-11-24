@@ -19,6 +19,14 @@ from source_exchange import inventory, support, exchange
 from transfer import send, receive
 
 
+def link_directory(link, target):
+    if os.name == "nt":
+        subprocess.run(["cmd", "/d", "/c", "mklink", "/J", str(link), str(target)],
+                       check=True, stdout=subprocess.PIPE)
+    else:
+        link.symlink_to(target, target_is_directory=True)
+
+
 class CloudLayoutTest(unittest.TestCase):
     def test_renamed_transfer_supports_source_binding_and_peer(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -234,34 +242,68 @@ class SourceTest(unittest.TestCase):
             j.scan()
             self.assertEqual({r[2] for r in j.page(0)}, {"package.json", "ui/view.ts"})
 
-    def test_auto_bind_skips_protected_roots_even_with_project_markers(self):
-        home = self.base / "profile"
+    def test_auto_bind_accepts_project_below_linked_parent(self):
+        parent = self.base / "actual"
+        project = parent / "app"
+        project.mkdir(parents=True)
+        (project / "package.json").write_text("{}")
+        linked = self.base / "linked"
+        link_directory(linked, parent)
+
         mail = self.base / "mail"
+        authorize(mail, self.key, linked / "app", ["*"], auto=True)
+        grant = json.loads((mail / "source-grants" / (self.key + ".json")).read_bytes())
+        self.assertIs(grant["auto"], True)
+        self.assertEqual(grant["folder"], str(project.resolve(strict=True)))
+
+    def test_auto_bind_skips_protected_roots_even_with_project_markers(self):
+        parent = self.base / "actual"
+        parent.mkdir()
+        linked = self.base / "linked"
+        link_directory(linked, parent)
+        home = linked / "profile"
+        mail = parent / "mail"
         protected = [home, home / "Desktop", home / "Documents", home / "Downloads",
-                     home / ".codex" / "nested", home / ".hidden", self.base / "empty"]
+                     home / "Projects", home / ".codex" / "nested", home / ".hidden",
+                     linked / "mail", linked / "empty"]
         for path in protected:
             path.mkdir(parents=True, exist_ok=True)
             if path.name != "empty":
                 (path / "package.json").write_text("{}")
         with patch.object(Path, "home", return_value=home):
-            for path in [*protected, Path(home.anchor)]:
+            # Both spellings must stay protected when the reported home is not canonical.
+            for path in [*protected, *(p.resolve() for p in protected), Path(home.anchor)]:
                 with self.subTest(path=path):
-                    authorize(mail, self.key, path, ["*"], auto=True)
-                    self.assertEqual(inventory(mail), {})
+                    key = digest(os.fsencode(path))
+                    authorize(mail, key, path, ["*"], auto=True)
+                    self.assertFalse((mail / "source-grants" / (key + ".json")).exists())
 
     def test_auto_bind_does_not_follow_project_alias(self):
-        project = self.base / "dedicated"
+        parent = self.base / "actual"
+        project = parent / "dedicated"
+        project.mkdir(parents=True)
+        (project / "package.json").write_text("{}")
+        link_directory(parent / "alias", project)
+        linked = self.base / "linked"
+        link_directory(linked, parent)
+
+        mail = self.base / "mail"
+        for path in [parent / "alias", linked / "alias"]:
+            with self.subTest(path=path):
+                key = digest(os.fsencode(path))
+                authorize(mail, key, path, ["*"], auto=True)
+                self.assertFalse((mail / "source-grants" / (key + ".json")).exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows case-insensitive paths")
+    def test_auto_bind_accepts_windows_case_variant(self):
+        project = self.base / "Dedicated"
         project.mkdir()
         (project / "package.json").write_text("{}")
-        alias = self.base / "alias"
-        if os.name == "nt":
-            subprocess.run(["cmd", "/d", "/c", "mklink", "/J", str(alias), str(project)],
-                           check=True, stdout=subprocess.PIPE)
-        else:
-            alias.symlink_to(project, target_is_directory=True)
-        root = self.base / "mail"
-        authorize(root, self.key, alias, ["*"], auto=True)
-        self.assertEqual(inventory(root), {})
+        mail = self.base / "mail"
+        authorize(mail, self.key, str(project).swapcase(), ["*"], auto=True)
+        grant = json.loads((mail / "source-grants" / (self.key + ".json")).read_bytes())
+        self.assertIs(grant["auto"], True)
+        self.assertEqual(grant["folder"], str(project.resolve(strict=True)))
 
     def test_auto_source_exchange_and_original_scope_only_resume(self):
         root, cloud = self.base / "pc-mail", self.base / "peer-mail"
