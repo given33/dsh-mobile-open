@@ -1,4 +1,4 @@
-import { sourceReady, watchSource } from './source-state.mjs';
+import { createAutoSource, sourceReady, watchSource } from './source-state.mjs';
 import { finishResultPlans, rememberResultPlan } from './relay-results.mjs';
 import { mkdir, readFile, writeFile, readdir, rename, stat, unlink } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
@@ -75,7 +75,7 @@ export function syncModels(ctx, role, root) {
   });
 }
 
-export function taskSync(ctx, config, root, autoFailover) {
+export function taskSync(ctx, config, root, autoFailover, ensureAutoSource = createAutoSource(root, config)) {
   const {role, sshHost} = config;
   if (!['cloud','desktop'].includes(role) || (role === 'desktop' && !/^[a-z0-9][\w.-]*$/i.test(sshHost || ''))) throw Error('Invalid task sync configuration');
   const peer = role === 'desktop' ? 'cloud' : 'desktop';
@@ -127,6 +127,7 @@ export function taskSync(ctx, config, root, autoFailover) {
         else report(new Error('Retired workspace has an open session or user history; registration preserved'));
         continue;
       }
+      try { await ensureAutoSource(project, route, retired); } catch (error) { report(error); }
       const {owner,key} = route, identity = `${owner}:${key}`;
       const file = join(root,'titles',hash(identity)+'.json');
       const previous = titles.get(identity) ?? await optionalJson(file);

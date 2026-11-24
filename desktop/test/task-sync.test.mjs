@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { sourceState, registerSourceCommands } from '../lib/task-sync/source-state.mjs';
 import { taskSync } from '../lib/task-sync/host.mjs';
-import { committedLength, comparePrefix, pack, unpack, packetName } from '../lib/task-sync/log.mjs';
+import { committedLength, comparePrefix, hash, pack, unpack, packetName } from '../lib/task-sync/log.mjs';
 
 const events = ['turn/start','user/message','assistant/message','turn/end'].map((type,seq) => ({seq,type,time:seq,data:{}}));
 const header = {id:'session-ordinary-1',version:4,isSeeded:false,createdAt:10};
@@ -169,4 +170,38 @@ test('paired hosts share empty native workspaces, preserve session identity in b
   // Refuse to retire real history even if an operator accidentally supplied its ID.
   await writeFile(join(pc.dir,'retired-workspaces.json'), JSON.stringify({desktop:[project.id],cloud:[]})); await pc.tick();
   assert.ok(pc.registry.list().includes(project)); assert.equal(pc.rows.get(header.id).events.length,8);
+});
+
+test('catalogue auto-enrols owned projects only, caches skipped paths, and respects off across restarts', async t => {
+  const root = await mkdtemp(join(tmpdir(),'dsh-source-catalog-'));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  const make = (id,path) => ({id,path,title:id,sessionIds:[]});
+  const owned = make('active',join(root,'app')), retired = make('old',join(root,'old'));
+  const foreign = make('replica',join(root,'workspaces',hash('cloud:remote')));
+  for (const p of [owned,retired,foreign]) await mkdir(p.path,{recursive:true});
+  for (const p of [retired,foreign]) await writeFile(join(p.path,'package.json'),'{}');
+  await mkdir(join(root,'routes'));
+  await writeFile(join(root,'routes',hash('cloud:remote')+'.json'),JSON.stringify({owner:'cloud',key:'remote'}));
+  await writeFile(join(root,'retired-workspaces.json'),JSON.stringify({desktop:['old'],cloud:[]}));
+  const projects = [owned,retired,foreign];
+  const ctx = {workspaceRegistry:{list:()=>projects,delete:async id=>projects.splice(projects.findIndex(p=>p.id===id),1)},effect(){},on(){}};
+  const start = options => taskSync(ctx,{role:'desktop',sshHost:'fixture',turnRelay:true,...options},root);
+  const tick = start({}), route = {owner:'desktop',key:'active'};
+  await tick();
+  assert.equal(await sourceState(root,{owner:'desktop',key:'old'}),null);
+  assert.equal(await sourceState(root,{owner:'cloud',key:'remote'}),null);
+  await writeFile(join(owned.path,'package.json'),'{}'); await tick();
+  assert.equal(await sourceState(root,route),null); // skipped path is cached
+  owned.path = join(root,'moved'); await mkdir(owned.path); await mkdir(join(owned.path,'.git'));
+  for (const options of [{autoSourceShare:false},{turnRelay:false}]) {
+    await start(options)(); assert.equal(await sourceState(root,route),null);
+  }
+  await tick(); assert.equal((await sourceState(root,route)).auto,true);
+  let command;
+  registerSourceCommands({commands:{register:d=>{command=d.handler;}},workspaceRegistry:{list:()=>[{...owned,sessionIds:['s']}]},
+    invocation:{peer:{principal:{kind:'owner'}}}},'desktop',root,async()=>route);
+  await command({agent:{session:{id:'s'}},rawInput:'--off'});
+  await tick(); await start({})();
+  assert.equal(await sourceState(root,route),null);
+  assert.deepEqual(JSON.parse(await readFile(join(root,'source-grants',hash('desktop:active')+'.disabled'))).previousScopes,['*']);
 });

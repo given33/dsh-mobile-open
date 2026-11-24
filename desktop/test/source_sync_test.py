@@ -3,6 +3,9 @@
 from pathlib import Path
 from contextlib import ExitStack, closing
 import os
+import json
+from unittest.mock import patch
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -10,9 +13,42 @@ import unittest
 
 LIB = Path(__file__).resolve().parents[1] / "lib/task-sync"
 sys.path.insert(0, str(LIB))
-from source_sync import Journal, authorize, digest, allowed
+from source_sync import Journal, authorize, digest, allowed, disable, ScopeChangeError
 from source_backup import backup
-from source_exchange import inventory, support
+from source_exchange import inventory, support, exchange
+from transfer import send, receive
+
+
+class CloudLayoutTest(unittest.TestCase):
+    def test_renamed_transfer_supports_source_binding_and_peer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            install = Path(tmp)
+            for name in ("source_sync.py", "source_exchange.py", "project_inputs.py", "source_backup.py"):
+                shutil.copyfile(LIB / name, install / name)
+            shutil.copyfile(LIB / "transfer.py", install / "task-transfer.py")
+
+            def run(*args, stdin=b""):
+                # Ignore PYTHONPATH and skip site packages; only the deployed siblings are available.
+                result = subprocess.run([sys.executable, "-E", "-S", *args], cwd=install,
+                                        input=stdin, capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                return result.stdout
+
+            root, project = install / "state", install / "project"
+            project.mkdir()
+            (project / "package.json").write_text("{}")
+            key = digest(b"cloud-layout")
+            grant = root / "source-grants" / (key + ".json")
+            run("source_sync.py", "auto-bind", root, key, project)
+            auto = json.loads(grant.read_bytes())
+            self.assertIs(auto.pop("auto"), True)
+            run("source_sync.py", "bind", root, key, project, "*")
+            self.assertEqual(json.loads(grant.read_bytes()), auto)
+            if os.name == "posix":
+                self.assertEqual(grant.stat().st_mode & 0o777, 0o600)
+
+            hello = run("task-transfer.py", "--peer", root, "sources-v1", stdin=b'["end"]\n')
+            self.assertIn("sources-v1", json.loads(hello))
 
 
 class SourceTest(unittest.TestCase):
@@ -197,6 +233,84 @@ class SourceTest(unittest.TestCase):
             (project / "node_modules" / "omit.ts").write_text("omit")
             j.scan()
             self.assertEqual({r[2] for r in j.page(0)}, {"package.json", "ui/view.ts"})
+
+    def test_auto_bind_skips_protected_roots_even_with_project_markers(self):
+        home = self.base / "profile"
+        mail = self.base / "mail"
+        protected = [home, home / "Desktop", home / "Documents", home / "Downloads",
+                     home / ".codex" / "nested", home / ".hidden", self.base / "empty"]
+        for path in protected:
+            path.mkdir(parents=True, exist_ok=True)
+            if path.name != "empty":
+                (path / "package.json").write_text("{}")
+        with patch.object(Path, "home", return_value=home):
+            for path in [*protected, Path(home.anchor)]:
+                with self.subTest(path=path):
+                    authorize(mail, self.key, path, ["*"], auto=True)
+                    self.assertEqual(inventory(mail), {})
+
+    def test_auto_bind_does_not_follow_project_alias(self):
+        project = self.base / "dedicated"
+        project.mkdir()
+        (project / "package.json").write_text("{}")
+        alias = self.base / "alias"
+        if os.name == "nt":
+            subprocess.run(["cmd", "/d", "/c", "mklink", "/J", str(alias), str(project)],
+                           check=True, stdout=subprocess.PIPE)
+        else:
+            alias.symlink_to(project, target_is_directory=True)
+        root = self.base / "mail"
+        authorize(root, self.key, alias, ["*"], auto=True)
+        self.assertEqual(inventory(root), {})
+
+    def test_auto_source_exchange_and_original_scope_only_resume(self):
+        root, cloud = self.base / "pc-mail", self.base / "peer-mail"
+        project = self.base / "nested" / "app"
+        project.mkdir(parents=True)
+        (project / "package.json").write_text("{}")
+        replica = cloud / "workspaces" / self.key
+        replica.mkdir(parents=True)
+        (cloud / "routes").mkdir()
+        (cloud / "routes" / (self.key + ".json")).write_text(json.dumps({"owner":"desktop", "key":"test"}))
+        authorize(root, self.key, project, ["*"], auto=True)
+        with closing(Journal(root, self.key)) as j:
+            self.assertTrue(j.fence()["auto"])
+            epoch = j.fence()["epoch"]
+        with subprocess.Popen([sys.executable, "-B", str(LIB / "transfer.py"), "--peer", str(cloud), "sources-v1"],
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE) as peer:
+            try:
+                self.assertIn("sources-v1", receive(peer.stdout)[2:])
+                def pump():
+                    exchange(root, peer.stdout, peer.stdin, send, receive)
+                pump()
+                self.assertEqual((replica / "package.json").read_bytes(), b"{}")
+                disable(root, self.key)
+                marker = root / "source-grants" / (self.key + ".disabled")
+                original = marker.read_bytes()
+                self.assertEqual(json.loads(original)["previousScopes"], ["*"])
+                disable(root, self.key)
+                authorize(root, self.key, project, ["*"], auto=True)
+                with self.assertRaisesRegex(ScopeChangeError, "使用原范围恢复"):
+                    authorize(root, self.key, project, ["src"])
+                self.assertEqual(marker.read_bytes(), original)
+                self.assertEqual(inventory(root), {})
+                (project / "unshared.js").write_bytes(b"offline")
+                (replica / "peer.js").write_bytes(b"peer")
+                pump()
+                self.assertFalse((replica / "unshared.js").exists())
+                self.assertFalse((project / "peer.js").exists())
+                authorize(root, self.key, project, ["*"])
+                pump()
+                self.assertEqual((replica / "unshared.js").read_bytes(), b"offline")
+                self.assertEqual((project / "peer.js").read_bytes(), b"peer")
+                with closing(Journal(root, self.key)) as j:
+                    self.assertEqual(j.fence()["epoch"], epoch)
+                    self.assertFalse(j.fence()["auto"])
+                send(peer.stdin, ["end"])
+                self.assertEqual(peer.wait(timeout=10), 0)
+            finally:
+                if peer.poll() is None:
+                    peer.kill()
 
     def test_delete_modify_conflict(self):
         self.seed()

@@ -9,7 +9,7 @@ import { dispatchState } from '../lib/task-sync/cloud-turn.mjs';
 // and official frontend resources in-process, and gives the desktop panel
 // (plugin/client.js) a small API on the host's own web server, behind the
 // host's own login check.
-import { registerSourceCommands, registerSourceSteps } from '../lib/task-sync/source-state.mjs';
+import { createAutoSource, registerSourceCommands, registerSourceSteps } from '../lib/task-sync/source-state.mjs';
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -89,11 +89,12 @@ export function apply(ctx, rawConfig = {}) {
     const root = join(config.stateDir,'..','mobile-task-sync');
     const role = rawConfig.taskSync.role;
     const relayEnabled = ['desktop','cloud'].includes(role) && rawConfig.taskSync.turnRelay === true;
+    const ensureAutoSource = createAutoSource(root,rawConfig.taskSync);
     const autoEnabled = relayEnabled && rawConfig.taskSync.autoFailover !== false;
     if (relayEnabled) {
       ctx.inject(['agents','sessions','sessionPersistence','workspaceRegistry'], child => {
         const failover = autoEnabled ? registerAutoFailover(child,role,root,rawConfig.taskSync) : undefined;
-        if (failover) taskSync(child,rawConfig.taskSync,root,failover);
+        if (failover) taskSync(child,rawConfig.taskSync,root,failover,ensureAutoSource);
         deviceSwitch = registerDeviceSwitch(child,role,root,failover);
         child.effect(() => () => { deviceSwitch = undefined; });
       });
@@ -130,11 +131,11 @@ export function apply(ctx, rawConfig = {}) {
         child.effect(() => () => { submitCloudTurn = undefined; });
       });
     }
-    ctx.inject(['tools','workspaceRegistry'], child => registerSourceSteps(child,role,root,workspaceRoute));
+    ctx.inject(['tools','workspaceRegistry'], child => registerSourceSteps(child,role,root,workspaceRoute,ensureAutoSource));
     ctx.inject(['commands','workspaceRegistry'], child => registerSourceCommands(child,role,root,workspaceRoute));
     ctx.inject(['settings'], child => syncModels(child,rawConfig.taskSync.role,root));
     if (!autoEnabled) ctx.inject(['workspaceRegistry','sessionPersistence'], child => {
-      taskSync(child, rawConfig.taskSync, root);
+      taskSync(child, rawConfig.taskSync, root, undefined, ensureAutoSource);
     });
   }
   const say = (...parts) => console.log('[dsh-mobile-link]', ...parts);

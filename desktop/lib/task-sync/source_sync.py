@@ -88,24 +88,46 @@ def allowed(name, scopes):
     )
 
 
+def durable_replace(folder, name, raw):
+    fd, temporary = tempfile.mkstemp(dir=folder)
+    try:
+        with os.fdopen(fd, "wb") as out:
+            if os.name == "posix":
+                os.fchmod(out.fileno(), 0o600)
+            out.write(raw)
+            out.flush()
+            os.fsync(out.fileno())
+        os.replace(temporary, folder / name)
+        if os.name == "posix":
+            directory = os.open(folder, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 def grants(root):
     return root / "source-grants"
 
 
-def authorize(root, key, folder, scopes):
-    if not HASH.fullmatch(key) or not valid_scopes(scopes):
-        raise ValueError("Choose specific project directories or files")
-    folder = Path(folder).resolve(strict=True)
+def grant_value(root, key, folder, scopes, auto):
+    requested = Path(folder).absolute()
+    folder = requested.resolve(strict=True)
+    if auto and requested != folder:
+        raise ValueError("Automatic sharing requires the actual project path, not a link")
     if not folder.is_dir() or folder in {
         Path.home(),
         Path(folder.anchor),
         root.resolve(),
     }:
         raise ValueError("Select a project, not a home or disk root")
-    if scopes == ["*"] and not (root.resolve() / "workspaces" / key == folder):
+    if scopes == ["*"] and (auto or root.resolve() / "workspaces" / key != folder):
         # A mistaken project-wide opt-in must not scan a disk or a general user/profile directory.
         if (
             folder.parent == Path.home()
+            or folder.name.casefold() in {"desktop", "documents", "downloads"}
             or any(p.startswith(".") for p in folder.parts)
             or not any(
                 (folder / n).exists()
@@ -126,28 +148,91 @@ def authorize(root, key, folder, scopes):
                 "Project-wide sharing needs a dedicated project root; choose explicit source paths instead"
             )
     st = folder.stat()
-    value = dict(
+    return dict(
         folder=str(folder),
         scopes=sorted(set(scopes)),
         device=str(st.st_dev),
         inode=str(st.st_ino),
     )
-    grants(root).mkdir(parents=True, exist_ok=True, mode=0o700)
-    with tree.directory(str(grants(root))) as dest:
+
+
+@contextmanager
+def grant_change(root):
+    # Auto-enrolment, owner commands and the independent mailbox run in separate processes.
+    folder = grants(root)
+    folder.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with closing(sqlite3.connect(folder / ".changes.sqlite")) as lock:
+        lock.execute("BEGIN IMMEDIATE")
+        with tree.directory(str(folder)) as dest:
+            yield dest
+
+
+def disable(root, key):
+    if not HASH.fullmatch(key):
+        raise ValueError("Invalid workspace identity")
+    grant = grants(root) / (key + ".json")
+    marker = grant.with_suffix(".disabled")
+    with grant_change(root) as dest:
+        if not marker.exists():
+            value = {"disabledAt": time.time_ns() // 1_000_000}
+            if grant.exists():
+                value["previousScopes"] = json.loads(tree.regular_bytes(dest, grant.name, 65536))["scopes"]
+            tree.publish(dest, marker.name, encoded(value))
+        grant.unlink(missing_ok=True)  # Repeated --off must preserve previousScopes.
+
+
+class ScopeChangeError(ValueError):
+    pass
+
+
+def authorize(root, key, folder, scopes, auto=False):
+    if not HASH.fullmatch(key) or not valid_scopes(scopes) or (auto and scopes != ["*"]):
+        raise ValueError("Choose specific project directories or files")
+    grant = grants(root) / (key + ".json")
+    marker = grant.with_suffix(".disabled")
+    if auto and (grant.exists() or marker.exists()):
+        return
+    with grant_change(root) as dest:
+        if auto and (grant.exists() or marker.exists()):
+            return
+        disabled = json.loads(tree.regular_bytes(dest, marker.name, 65536)) if marker.exists() else {}
+        if "previousScopes" in disabled and sorted(set(scopes)) != disabled["previousScopes"]:
+            raise ScopeChangeError("此工作区已有按原范围（" + "、".join(disabled["previousScopes"]) +
+                                   "）配对的历史账本，不支持直接变更范围；请使用原范围恢复，或保持关闭。")
         try:
-            tree.publish(dest, key + ".json", encoded(value))
-        except FileExistsError:
-            if json.loads(tree.regular_bytes(dest, key + ".json", 16384)) != value:
-                raise ValueError(
-                    "Existing grant differs; refusing to silently change scope"
-                )
+            value = grant_value(root, key, folder, scopes, auto)
+        except (ValueError, FileNotFoundError, NotADirectoryError):
+            if auto:
+                return
+            raise
+        if grant.exists():
+            current = json.loads(tree.regular_bytes(dest, grant.name, 65536))
+            was_auto = current.pop("auto", False)
+            if current != value:
+                raise ValueError("Existing grant differs; refusing to silently change scope")
+            if was_auto:
+                durable_replace(grants(root), grant.name, encoded(value))
+        else:
+            if "previousScopes" not in disabled and (root / "source-history" / (key + ".sqlite")).exists():
+                # Older installations could remove grants by hand. Never guess that ledger's scope.
+                if auto:
+                    return
+                raise ScopeChangeError("此工作区已有历史账本，但缺少原范围记录，不能安全地重新授权。")
+            if auto:
+                value["auto"] = True
+            tree.publish(dest, grant.name, encoded(value))
+        # A crash between the two writes always leaves the disabled marker authoritative.
+        marker.unlink(missing_ok=True)
 
 
 class Journal:
     def __init__(self, root, key):
         if not HASH.fullmatch(key):
             raise ValueError("Invalid workspace identity")
+        if (grants(root) / (key + ".disabled")).exists():
+            raise ValueError("Source sharing disabled")
         grant = json.loads((grants(root) / (key + ".json")).read_bytes())
+        self.auto = bool(grant.get("auto", False))
         self.path, self.scopes = Path(grant["folder"]), grant["scopes"]
         self.bound_inode = (grant["device"], grant["inode"])
         st = self.path.stat()
@@ -512,6 +597,7 @@ class Journal:
             "SELECT COUNT(*) FROM heads h LEFT JOIN disk d ON d.path=h.path AND d.id=h.id WHERE d.id IS NULL"
         ).fetchone()[0]
         return dict(
+            auto=self.auto,
             epoch=self.meta("epoch"),
             seq=self.db.execute("SELECT COALESCE(MAX(seq),0) FROM versions").fetchone()[
                 0
@@ -582,7 +668,8 @@ def read(folder, name):
 
 def keys(root):
     return [
-        p.stem for p in sorted(grants(root).glob("*.json")) if HASH.fullmatch(p.stem)
+        p.stem for p in sorted(grants(root).glob("*.json"))
+        if HASH.fullmatch(p.stem) and not p.with_suffix(".disabled").exists()
     ][:64]
 
 
@@ -592,7 +679,7 @@ def main():
         "action",
         choices=[
             "git-backup",
-            "bind",
+            "bind", "auto-bind", "disable",
             "scan",
             "watch",
             "status",
@@ -606,9 +693,17 @@ def main():
     parser.add_argument("key", nargs="?")
     parser.add_argument("args", nargs="*")
     opts = parser.parse_args()
-    if opts.action == "bind":
+    if opts.action == "disable":
+        disable(opts.root, opts.key)
+        return
+    if opts.action in ("auto-bind", "bind"):
         folder, *scopes = opts.args
-        authorize(opts.root, opts.key, folder, scopes)
+        auto = opts.action == "auto-bind"
+        try:
+            authorize(opts.root, opts.key, folder, ["*"] if auto else scopes, auto=auto)
+        except ScopeChangeError as exc:
+            print(json.dumps({"scopeError": str(exc)}))
+            raise SystemExit(1) from None
         return
     if opts.action == "watch":
         # Parent owns the write end; even an ungraceful DSH exit closes it.
