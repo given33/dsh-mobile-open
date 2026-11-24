@@ -50,12 +50,12 @@ export function registerSourceCommands(ctx, role, root, workspaceRoute) {
       const names = (rawInput || '').trim();
       if (names) {
         if (route.owner !== role || ctx.invocation?.peer?.principal?.kind !== 'owner') return {kind:'error',text:'只能由原工作区的设备所有者授权源码目录。'};
-        const scopes = names.startsWith('[') ? JSON.parse(names) : names.split(/\s+/u);
+        const scopes = names === '--project' ? ['*'] : names.startsWith('[') ? JSON.parse(names) : names.split(/\s+/u);
         if (!Array.isArray(scopes) || !scopes.length || scopes.some(s => typeof s !== 'string')) throw Error('请输入目录或文件名。');
         await run(python,[...prefix,'bind',root,identity(route),project.path,...scopes],{windowsHide:true,timeout:15000});
       }
       const state = await sourceState(root, route,'fence');
-      if (!state) return {kind:'success',text:'本工作区尚未共享源码。示例：/source-share src tests README.md'};
+      if (!state) return {kind:'success',text:'本工作区尚未共享源码。整个工程：/source-share --project；指定目录：/source-share src tests README.md'};
       const issues = state.conflicts.length ? '；待合并：'+state.conflicts.join('、') : state.ready ? '' : '；存在尚未应用的版本';
       return {kind:'success',text:`本机版本 ${state.seq}，对端已持久接收 ${state.peerStored}；已收到对端版本 ${state.received}${issues}。`};
     }});

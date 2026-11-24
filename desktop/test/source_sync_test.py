@@ -155,6 +155,25 @@ class SourceTest(unittest.TestCase):
         self.assertEqual(self.file(self.b).read_bytes(), b"editor")
         self.assertFalse(self.b.fence()["ready"])
 
+    def test_whole_project_picks_up_new_source_directories_not_profile_or_dependencies(
+        self,
+    ):
+        project = self.base / "nested" / "app"
+        project.mkdir(parents=True)
+        root = self.base / "auto"
+        k = digest(b"desktop:auto")
+        self.assertRaises(ValueError, authorize, root, k, project, ["*"])
+        (project / "package.json").write_text("{}")
+        authorize(root, k, project, ["*"])
+        with closing(Journal(root, k)) as j:
+            j.scan()
+            (project / "ui").mkdir()
+            (project / "ui" / "view.ts").write_text("hello")
+            (project / "node_modules").mkdir()
+            (project / "node_modules" / "omit.ts").write_text("omit")
+            j.scan()
+            self.assertEqual({r[2] for r in j.page(0)}, {"package.json", "ui/view.ts"})
+
     def test_delete_modify_conflict(self):
         self.seed()
         self.file(self.a).unlink()

@@ -351,8 +351,6 @@ def main():
     for d in (outbox,inbox):d.mkdir(mode=0o700,parents=True,exist_ok=True)
     out_cache, in_cache = {}, {}
     sources_available = Path(__file__).with_name('source_exchange.py').is_file()
-    if sources_available:
-        import source_exchange as source
     results_available = result_support()
     if results_available:
         result_op(root,'deliver','cloud' if mode=='--peer' else 'desktop')
@@ -369,6 +367,8 @@ def main():
         def inventory():
             return [manifest(outbox, out_cache, catalogs), manifest(inbox, in_cache, catalogs, models)]
         sources = sources_available and 'sources-v1' in sys.argv[3:]
+        if sources:
+            import source_exchange as source
         source_spaces = set()
         offered_progress = set()
         previous = inventory()

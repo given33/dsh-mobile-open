@@ -5,19 +5,14 @@ import json
 import sqlite3
 import subprocess
 
-from source_sync import HASH, Journal, authorize, digest, grants, keys, part_ok
+from source_sync import HASH, Journal, authorize, digest, grants, keys, valid_scopes
 
 
 def support(root, role, offers):
     if not isinstance(offers, dict) or len(offers) > 64:
         raise ValueError("Invalid source offers")
     for key, scopes in offers.items():
-        if (
-            not HASH.fullmatch(key)
-            or not isinstance(scopes, list)
-            or not 0 < len(scopes) <= 64
-            or not all(isinstance(s, str) and part_ok(s) for s in scopes)
-        ):
+        if not HASH.fullmatch(key) or not valid_scopes(scopes):
             raise ValueError("Invalid source scope")
         if (grants(root) / (key + ".json")).exists():
             continue

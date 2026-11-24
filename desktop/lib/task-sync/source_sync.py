@@ -40,7 +40,7 @@ SKIP = {
     "obj",
 }
 SUFFIX = set(
-    "c cc cpp h hpp m mm swift kt kts java cs fs fsx go rs py pyi rb php js jsx mjs cjs ts tsx vue svelte html css scss less sql sh ps1 lua dart r ex exs erl hrl scala proto graphql json toml yaml yml xml md txt csv".split()
+    "c cc cpp h hpp m mm swift kt kts java cs fs fsx go rs py pyi rb php js jsx mjs cjs ts tsx vue svelte html css scss less sql sh ps1 lua dart r ex exs erl hrl scala proto graphql gradle lock mod sum ini properties cmake make mk csproj sln fsproj vbproj json toml yaml yml xml md txt csv".split()
 )
 NOEXT = {"Makefile", "Dockerfile", "LICENSE", "README", "CMakeLists.txt"}
 
@@ -65,6 +65,16 @@ def part_ok(part):
     )
 
 
+def valid_scopes(scopes):
+    return isinstance(scopes, list) and (
+        scopes == ["*"]
+        or (
+            0 < len(scopes) <= 64
+            and all(isinstance(s, str) and part_ok(s) for s in scopes)
+        )
+    )
+
+
 def allowed(name, scopes):
     parts = name.split("/")
     return (
@@ -72,7 +82,7 @@ def allowed(name, scopes):
         and name == unicodedata.normalize("NFKC", name)
         and len(parts) <= 12
         and all(map(part_ok, parts))
-        and parts[0] in scopes
+        and (scopes == ["*"] or parts[0] in scopes)
         and (parts[-1] in NOEXT or parts[-1].rsplit(".", 1)[-1].lower() in SUFFIX)
     )
 
@@ -82,11 +92,7 @@ def grants(root):
 
 
 def authorize(root, key, folder, scopes):
-    if (
-        not HASH.fullmatch(key)
-        or not 0 < len(scopes) <= 64
-        or not all(map(part_ok, scopes))
-    ):
+    if not HASH.fullmatch(key) or not valid_scopes(scopes):
         raise ValueError("Choose specific project directories or files")
     folder = Path(folder).resolve(strict=True)
     if not folder.is_dir() or folder in {
@@ -95,6 +101,29 @@ def authorize(root, key, folder, scopes):
         root.resolve(),
     }:
         raise ValueError("Select a project, not a home or disk root")
+    if scopes == ["*"] and not (root.resolve() / "workspaces" / key == folder):
+        # A mistaken project-wide opt-in must not scan a disk or a general user/profile directory.
+        if (
+            folder.parent == Path.home()
+            or any(p.startswith(".") for p in folder.parts)
+            or not any(
+                (folder / n).exists()
+                for n in (
+                    ".git",
+                    "package.json",
+                    "pyproject.toml",
+                    "Cargo.toml",
+                    "go.mod",
+                    "CMakeLists.txt",
+                    "pom.xml",
+                    "build.gradle",
+                    "project.yml",
+                )
+            )
+        ):
+            raise ValueError(
+                "Project-wide sharing needs a dedicated project root; choose explicit source paths instead"
+            )
     st = folder.stat()
     value = dict(
         folder=str(folder),
@@ -276,7 +305,12 @@ class Journal:
                 if total > MAX_BYTES or len(names) > MAX_FILES:
                     raise ValueError("Source scope too large")
 
-        for name in self.scopes:
+        scopes = (
+            self.scopes
+            if self.scopes != ["*"]
+            else [p.name for p in self.path.iterdir() if part_ok(p.name)]
+        )
+        for name in scopes:
             visit(self.path / name, name)
         return names
 
