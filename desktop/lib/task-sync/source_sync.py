@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unicodedata
 import uuid
 
@@ -249,8 +250,8 @@ class Journal:
         self.db.execute("DELETE FROM stamps WHERE path=?", (name,))
 
     def capture(self, folder, name, full):
-        # Avoid reopening unchanged source bytes on each tick. Explicit handoff fences
-        # bypass this stat cache (notably on Windows, where ctime is creation time).
+        # Windows can record two quick, same-size edits with identical stat fields.
+        # Re-read recently touched files; explicit execution fences always check bytes.
         try:
             with tree.leaf(folder, name) as (parent, leaf):
                 st = os.stat(
@@ -262,12 +263,14 @@ class Journal:
                 or getattr(st, "st_file_attributes", 0) & 0x400
             ):
                 raise ValueError("Refusing a linked or special source file")
+            hot_windows_file = os.name == "nt" and abs(time.time_ns() - st.st_mtime_ns) < 2_000_000_000
             stamp = json.dumps(
                 [st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns]
             )
         except FileNotFoundError:
             stamp = "missing"
-        if not full and self.db.execute(
+            hot_windows_file = False
+        if not full and not hot_windows_file and self.db.execute(
             "SELECT stamp FROM stamps WHERE path=?", (name,)
         ).fetchone() == (stamp,):
             return
@@ -588,6 +591,7 @@ def main():
     parser.add_argument(
         "action",
         choices=[
+            "git-backup",
             "bind",
             "scan",
             "watch",
@@ -617,11 +621,22 @@ def main():
                 stopped.set()
 
         threading.Thread(target=wait_for_parent, daemon=True).start()
+        backups = {}
         while not stopped.is_set():
             for key in keys(opts.root):
                 try:
                     with closing(Journal(opts.root, key)) as j:
                         j.scan()
+                        if opts.key == "cloud" and time.monotonic() >= backups.get(key, (0, None))[0]:
+                            state = j.fence()
+                            revision = (state["epoch"], state["seq"], state["peerEpoch"])
+                            previous = backups.get(key, (0, None))[1]
+                            backups[key] = (time.monotonic() + 30, previous)
+                            if state["ready"] and state["peerEpoch"] and revision != previous:
+                                from source_backup import backup
+                                saved = backup(opts.root, key, j, state["peerEpoch"], state["received"], allowed)
+                                if saved.get("gitCommit"):
+                                    backups[key] = (time.monotonic() + 30, revision)
                 except (
                     ValueError,
                     OSError,
@@ -638,8 +653,13 @@ def main():
             stopped.wait(1)
         return
     with closing(Journal(opts.root, opts.key)) as j:
-        if opts.action in ("scan", "fence", "mark"):
+        if opts.action in ("scan", "fence", "mark", "git-backup"):
             j.scan(full=True)
+        if opts.action == "git-backup":
+            from source_backup import backup
+            epoch, seq = opts.args
+            print(json.dumps(backup(opts.root, opts.key, j, epoch, int(seq), allowed)))
+            return
         if opts.action == "mark":
             session, call, phase = opts.args
             if phase not in ("before", "returned", "threw") or not all(

@@ -27,16 +27,16 @@ export async function sealSource(root, packet) {
   packet.sourceFence = { epoch: state.epoch, seq: state.seq };
 }
 
-export async function sourceReady(root, packet) {
+export async function sourceReady(root, packet, archive = false) {
   const fence = packet.sourceFence;
   if (fence === undefined) return !await sourceState(root, packet.workspace); // Never start an unversioned handoff in an enrolled workspace.
   if (!/^[0-9a-f]{32}$/.test(fence?.epoch) || !Number.isSafeInteger(fence.seq) || fence.seq < 0) throw Error('无效源码检查点');
-  const state = await sourceState(root, packet.workspace, 'fence');
-  return !!state?.ready && state.peerEpoch === fence.epoch && state.received >= fence.seq;
+  const state = archive ? await sourceState(root, packet.workspace, 'git-backup', [fence.epoch, String(fence.seq)]) : await sourceState(root, packet.workspace, 'fence');
+  return (!archive || !!state?.gitCommit) && !!state?.ready && state.peerEpoch === fence.epoch && state.received >= fence.seq;
 }
 
-export function watchSource(root, signal) {
-  const child = spawn(python, [...prefix, 'watch', root], { signal, windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] });
+export function watchSource(root, signal, role) {
+  const child = spawn(python, [...prefix, 'watch', root, role], { signal, windowsHide: true, stdio: ['pipe', 'ignore', 'ignore'] });
   child.on('error', () => {}); // Periodic transport scans remain available without the watcher.
 }
 

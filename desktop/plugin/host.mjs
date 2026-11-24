@@ -1,3 +1,6 @@
+import { registerDeviceSwitch } from '../lib/task-sync/device-switch.mjs';
+import { registerHostChange } from '../lib/task-sync/host-change.mjs';
+import { dispatchState } from '../lib/task-sync/cloud-turn.mjs';
 // Host half of the dsh-mobile-link DSH plugin.
 //
 // Runs inside the DSH host process (desktop app or `dsh web`). It serves paired
@@ -80,11 +83,19 @@ export function apply(ctx, rawConfig = {}) {
   if (rawConfig.modelRouting !== false) {
     ctx.inject?.(['llm'], child => installModelRouting(child, config.stateDir));
   }
-  let submitCloudTurn, shellPlacement;
+  let submitCloudTurn, shellPlacement, deviceSwitch;
   if (rawConfig.taskSync?.role) {
     const root = join(config.stateDir,'..','mobile-task-sync');
     const role = rawConfig.taskSync.role;
     if (['desktop','cloud'].includes(role) && rawConfig.taskSync.turnRelay === true) {
+      ctx.inject(['agents','sessions','sessionPersistence','workspaceRegistry'], child => {
+        deviceSwitch = registerDeviceSwitch(child,role,root);
+        child.effect(() => () => { deviceSwitch = undefined; });
+      });
+      ctx.inject(['systemPrompt','workingDirectory','tools','sessions','sessionPersistence'], child => registerHostChange(child, role, async (agent,signal) => ({
+        cwd: await child.workingDirectory.ensure(agent,signal),
+        nativeShellTools: ['bash','pwsh'].filter(name => !!child.tools.get(name,agent)),
+      }), async key => await dispatchState(root,key) !== 'ready'));
       ctx.inject(['tools'],child => registerScriptCheckpoint(child,root,textOutput));
       ctx.inject(['tools'],child => registerGitReleasePlan(child,textOutput));
       ctx.inject(['tools'],child => registerDeploymentRef(child,textOutput));
@@ -137,6 +148,8 @@ export function apply(ctx, rawConfig = {}) {
   const focus = createMobileFocusTracker();
   ctx.provide?.('mobilePanels', { register: panels.register });
   const upstream = inProcessUpstream({ connection: ctx.connection, typertGateway: ctx.typertGateway, local: {
+    'mobileRelay/status': args => { if (!deviceSwitch) throw Error('此设备未启用任务接力。'); return deviceSwitch.status(args); },
+    'mobileRelay/request': args => { if (!deviceSwitch) throw Error('此设备未启用任务接力。'); return deviceSwitch.request(args); },
     ...mobileHostActions(ctx), 'mobilePanels/list': panels.list, 'mobilePanels/read': panels.read, 'mobilePanels/perform': panels.perform,
   }, nativeLocal: method => nativeScheduleAction(ctx, method) });
 

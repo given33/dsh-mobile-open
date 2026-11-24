@@ -56,7 +56,7 @@ export async function unpack(packet, peer, name) {
   if (!Array.isArray(events) || inherited > events.length || events.some((e,i) => !e || e.seq !== i || typeof e.type !== 'string')) throw Error('Invalid task log');
   if (packet.relayEnd !== undefined) {
     const tail = packet.relayEnd;
-    if (packet.cloudIntent?.v !== 2 || packet.commandEnd !== undefined || !Array.isArray(tail) || (tail.length < 3 || tail.length > 16) ||
+    if (packet.cloudIntent?.v !== 2 || packet.commandEnd !== undefined || !Array.isArray(tail) || (tail.length < (packet.cloudIntent.boundary === 'device-switch' ? 1 : 3) || tail.length > 16) ||
         tail.some((e,i) => !e || e.seq !== events.length+i || !Number.isSafeInteger(e.time))) throw Error('Invalid relay suffix');
     events.push(...tail);
   }

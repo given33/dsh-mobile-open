@@ -28,6 +28,19 @@ export function validTail(intent,call,tail) {
     end?.type === 'turn/end' && end.data?.turn === data.turn && end.data.reason?.kind === 'completed' &&
     tail.every((e,i)=>e.seq === call.seq + i + 1);
 }
+// A real settled native batch, not just a plausible last line in a transcript.
+export function switchBoundary(events, turn, step) {
+  const semantic = events.filter(e => !passiveDelivery(e));
+  const end = semantic.at(-1);
+  if (!Number.isSafeInteger(turn) || !Number.isSafeInteger(step) || end?.type !== 'step/end' || end.data?.turn !== turn || end.data.step !== step) return false;
+  const start = semantic.findLastIndex(e => e.type === 'step/start');
+  if (start < 0 || semantic[start].data?.turn !== turn || semantic[start].data.step !== step) return false;
+  const batch = semantic.slice(start+1,-1);
+  const proposal = batch.findLast(e => e.type === 'assistant/message');
+  const calls = proposal?.data?.message?.content?.filter(b => b.type === 'tool-call') ?? [];
+  return proposal?.data?.turn === turn && proposal.data.step === step && calls.length > 0 && calls.every(c => batch.some(e => e.type === 'tool/result' && e.surfaceOp === 'append' && e.seq > proposal.seq && e.data?.turn === turn && e.data.step === step &&
+    e.data.message?.role === 'tool' && e.data.message.toolCallId === c.id && e.data.message.source?.kind === 'tool' && e.data.message.source.callId === c.id));
+}
 export function verifiedRelay(packet,events) {
   const {cloudIntent:intent} = packet;
   if (intent?.v !== 2 || intent.session !== packet.source || intent.from !== packet.origin ||
@@ -35,6 +48,14 @@ export function verifiedRelay(packet,events) {
       !Number.isSafeInteger(intent.created) || intent.created > Date.now()+60_000 || Date.now()-intent.created > 86400_000) return false;
   const tail = packet.relayEnd;
   if (!Array.isArray(tail)) return false;
+  if (intent.boundary === 'device-switch') {
+    const end = tail.at(-1), prefix = events.slice(0, -tail.length);
+    const last = prefix.findLast(e => !passiveDelivery(e));
+    return !!packet.sourceFence && last?.seq >= packet.inherited && tail.length > 0 && tail.length <= 16 &&
+      isDeepStrictEqual(tail, events.slice(prefix.length)) && tail.slice(0,-1).every(passiveDelivery) &&
+      tail.every((e,i) => e.seq === prefix.length+i) && end?.type === 'turn/end' && end.data?.reason?.kind === 'blocked' &&
+      switchBoundary(prefix,end.data.turn,last.data?.step);
+  }
   const call = events.at(-tail.length-1);
   if (intent.boundary !== undefined && (intent.boundary !== 'before-shell' || packet.workspace?.owner !== packet.origin)) return false;
   return call?.seq >= packet.inherited && singleCall(events,call,intent.boundary) && validTail(intent,call,events.slice(call.seq+1));

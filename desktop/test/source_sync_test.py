@@ -10,7 +10,8 @@ import unittest
 
 LIB = Path(__file__).resolve().parents[1] / "lib/task-sync"
 sys.path.insert(0, str(LIB))
-from source_sync import Journal, authorize, digest
+from source_sync import Journal, authorize, digest, allowed
+from source_backup import backup
 from source_exchange import inventory, support
 
 
@@ -50,6 +51,29 @@ class SourceTest(unittest.TestCase):
     def seed(self):
         self.file(self.a).write_bytes(b"a\nb\nc\nd\ne\nf\n")
         self.sync()
+
+    def test_private_git_history_only_includes_applied_granted_sources(self):
+        self.seed()
+        (self.b.path / "src/secret.py").write_text("excluded")
+        (self.b.path / "outside.txt").write_text("excluded")
+        self.b.scan()
+        epoch = self.a.fence()["epoch"]
+        def archive():
+            return backup(self.roots[1], self.key, self.b, epoch, self.a.fence()["seq"], allowed)["gitCommit"]
+        repo = self.roots[1] / "source-backups" / (self.key + ".git")
+        def git(*args):
+            return subprocess.check_output(["git", "--git-dir=" + str(repo), *args])
+        assert "gitCommit" not in backup(self.roots[1], self.key, self.b, "0" * 32, 0, allowed)
+        first = archive()
+        self.assertEqual(archive(), first)
+        self.assertEqual(git("ls-tree", "-r", "--name-only", "HEAD").splitlines(), [b"src/demo.py"])
+        self.assertFalse(git("remote"))
+        self.file(self.a).unlink(); self.sync()
+        second = archive()
+        self.assertNotEqual(first, second)
+        self.assertEqual(git("rev-parse", "HEAD^" ).decode().strip(), first)
+        self.assertFalse(git("ls-tree", "-r", "--name-only", "HEAD"))
+        self.assertEqual(git("show", first + ":src/demo.py"), b"a\nb\nc\nd\ne\nf\n")
 
     def test_creation_edit_deletion_and_offline_history(self):
         self.seed()

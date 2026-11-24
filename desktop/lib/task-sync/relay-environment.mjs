@@ -1,3 +1,4 @@
+import { taskProgress } from './host-change.mjs';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { deploymentWatch } from './deployment-watch.mjs';
@@ -124,6 +125,7 @@ export function registerEnvironment(ctx,role,root) {
       const reader = await ctx.sessionPersistence.open(session.id,'read',{signal:exec.signal});
       try {
         const {events} = await reader.read();
+        info.taskProgress = taskProgress(events,reader.inheritedEventCount);
         const references=savedDeployments(events,reader.inheritedEventCount,session.id);
         info.deploymentVerification = {helper:deploymentHelper, references, observations:await observer.forSession(session.id,references)};
         const handoff = handoffEvidence(events,reader.inheritedEventCount,session.id,role);
