@@ -1731,3 +1731,35 @@ test('a newly tripped breaker releases an earlier user attempt before the next e
   assert.equal(bridge.forceUserReconnect(), 'pending');
   assert.equal(forces, 2);
 });
+
+test('rebuilding a document with an open device breaker issues zero forces until the original deadline', t => {
+  const key = 'dml.reconnect-budget.v1';
+  const seed = { updated: 1000, until: 1000 + RECONNECT_POLICY.breakerCooldownMs, decision: 0,
+    forces: 0, closes: RECONNECT_POLICY.breakerAfter, lastClose: 1000, lastForce: null };
+  for (const origin of ['fresh origin with native seed', 'same origin with persisted seed']) {
+    const { ctx, calls, storage } = launchFixture('light');
+    let now = seed.updated + 1, forces = 0;
+    ctx.Date = class extends Date { static now() { return now; } };
+    if (origin.startsWith('fresh')) ctx.__DSH_RECONNECT_BUDGET__ = seed;
+    else storage.set(key, JSON.stringify(seed));
+    ctx.__DSH_MOBILE_SHELL__.linkEvents = true;
+    ctx.WebSocket = class extends EventTarget { readyState = 0; };
+    ctx.fetch = () => new Promise(() => {});
+    ctx.__DSH_MOBILE_CORDIS__ = { reconnect() { forces++; } };
+    vm.runInContext(MOBILE_SHELL_JS, ctx);
+    const bridge = ctx.__DSH_MOBILE_BRIDGE__;
+    new ctx.WebSocket('/api/remote.mux');
+    const started = now;
+    for (now of [started, started + RECONNECT_POLICY.handshakeGraceMs, seed.until - 1]) {
+      bridge.wakeCheck(); bridge.credentialsChanged();
+      assert.equal(bridge.reconnect(true), false);
+      assert.equal(forces, 0, origin);
+      assert.equal(calls.filter(m => m.type === 'link-force').length, 0);
+      assert.equal(JSON.parse(storage.get(key)).until, seed.until);
+    }
+    now = seed.until;
+    assert.equal(bridge.reconnect(true), true);
+    assert.equal(forces, 1);
+    t.diagnostic(`${origin}: 0 forces through ${seed.until - 1}ms, first allowed at ${now}ms`);
+  }
+});

@@ -379,6 +379,7 @@ struct OfficialWebView: UIViewRepresentable {
             webView.addSubview(image); cover = image
         }
         func reloadHome(userInitiated: Bool) {
+            let holdUntil = handshake.holdUntil // A reload token represents document navigation only.
             guard userInitiated || holdUntil <= Date() else { return }
             coverCurrentDocument(); loadHome()
         }
@@ -401,7 +402,8 @@ struct OfficialWebView: UIViewRepresentable {
                 guard !Task.isCancelled, self.webView === web else { return }
                 if !initial && !changingOrigin && (self.loaded || self.loadingStarted) {
                     self.session = next
-                    guard self.loaded else { return } // A new document is already loading.
+                    // A replacement may have started or finished while the failed document's cookies installed.
+                    guard self.loaded, !next.restoresFailedDocument else { return }
                     if next.userInitiatedBind { self.userReconnect(in: web); return }
                     guard self.holdUntil <= Date() else { return }
                     web.evaluateJavaScript("globalThis.__DSH_MOBILE_BRIDGE__?.credentialsChanged?.()", completionHandler: nil)
@@ -409,8 +411,10 @@ struct OfficialWebView: UIViewRepresentable {
                 }
                 // Only a new origin or a missing document needs navigation. A newer
                 // bind cancels this one, including while the cookie store is suspended.
-                while !initial && !next.userInitiatedBind && self.holdUntil > Date() {
-                    do { try await Task.sleep(for: .seconds(max(0, self.holdUntil.timeIntervalSinceNow))) } catch { return }
+                while !initial && !next.userInitiatedBind {
+                    let deadline = next.restoresFailedDocument ? self.handshake.holdUntil : self.holdUntil
+                    guard deadline > Date() else { break }
+                    do { try await Task.sleep(for: .seconds(max(0, deadline.timeIntervalSinceNow))) } catch { return }
                 }
                 guard !Task.isCancelled, self.webView === web else { return }
                 if changingOrigin {

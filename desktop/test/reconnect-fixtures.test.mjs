@@ -96,3 +96,59 @@ if (process.platform === 'darwin') test('native device budget rejects stale gene
     execFileSync(executable);
   } finally { await rm(tmp, { recursive: true, force: true }); }
 });
+
+// Bound every assertion to its own Swift method, so a guard in an unrelated caller cannot satisfy it.
+function method(source, signature) {
+  const start = source.indexOf(`func ${signature}`);
+  assert.notEqual(start, -1, signature);
+  const indent = source.slice(source.lastIndexOf('\n', start) + 1, start).match(/^ */)[0];
+  const end = source.indexOf(`\n${indent}}`, start);
+  assert.notEqual(end, -1, signature);
+  return source.slice(start, end);
+}
+
+const swiftSource = name => readFile(new URL(`../../DSHMobile/App/${name}.swift`, import.meta.url), 'utf8');
+const socketCommand = /issueWakeCheck|wakeCheck\s*\(|\.reconnect\s*\(|forceUserReconnect|credentialsChanged|clearUserBudget/;
+
+test('terminated WebContent immediately issues a non-user navigation through both native layers', async () => {
+  const [app, web] = await Promise.all(['AppModel', 'OfficialWebView'].map(swiftSource));
+  const terminated = method(app, 'pageProcessTerminated(');
+  const reload = method(app, 'reloadPage(source:');
+  const automatic = reload.slice(0, reload.indexOf('guard source.userInitiated'));
+  assert.match(terminated, /handshake = PageHandshake\(\)[\s\S]*?reloadPage\(source: \.pageFailed\)/);
+  assert.match(automatic, /if source == \.pageFailed \{[\s\S]*restore source=pageFailed breaker=ignored[\s\S]*startReload\(userInitiated: false\)\s*return/);
+  assert.match(method(app, 'startReload('), /reloadID = PageReload\(userInitiated: userInitiated\)/);
+  assert.match(method(web, 'webViewWebContentProcessDidTerminate('), /handshake = PageHandshake\(\)[\s\S]*onProcessTerminated\(\)/);
+  assert.match(method(web, 'updateUIView('), /reloadHome\(userInitiated: reloadID.userInitiated\)/);
+  const home = method(web, 'reloadHome(');
+  assert.match(home, /let holdUntil = handshake.holdUntil[^\n]*\n\s*guard userInitiated \|\| holdUntil <= Date\(\)[\s\S]*loadHome\(\)/);
+  assert.match(method(web, 'loadHome('), /webView.load\(URLRequest/);
+  const path = [terminated, automatic, method(app, 'startReload('), home, method(web, 'loadHome(')].join('\n');
+  assert.doesNotMatch(path, /ReconnectBudget|Task\.sleep|scheduleRecoveryCheck/);
+  assert.doesNotMatch(path, socketCommand);
+});
+
+test('failed navigation keeps its own handshake deadline and HTTP backoff across retries and binds', async () => {
+  const [app, web] = await Promise.all(['AppModel', 'OfficialWebView'].map(swiftSource));
+  const failed = method(app, 'pageFailed('), schedule = method(app, 'scheduleDocumentRetry('), arm = method(app, 'armDocumentRetryIfNeeded(');
+  assert.match(failed, /scheduleDocumentRetry\(after: 0\.12\)/);
+  assert.match(app, /var documentHoldUntil: Date \{ browser == nil \? \.distantPast : handshake.holdUntil \}/);
+  assert.match(schedule, /max\(Date\(\).addingTimeInterval\(delay\), documentHoldUntil\)/);
+  assert.match(arm, /Task\.sleep\(for: \.seconds\(max\(0, deadline.timeIntervalSinceNow\)\)\)/);
+  assert.match(arm, /beginConnection\(preservePage: self.browser != nil, reusePage: false, source: \.pageFailed\)/);
+  assert.doesNotMatch(failed + schedule + arm, /ReconnectBudget|\bholdUntil\b|scheduleRecoveryCheck/);
+  assert.doesNotMatch(failed + schedule + arm, socketCommand);
+  const begin = method(app, 'beginConnection(');
+  assert.match(begin, /if source == \.pageFailed \{\s*if documentHoldUntil > Date\(\) \{ scheduleDocumentRetry\(after: 0\); return \}[\s\S]*?\} else if source.userInitiated/);
+  assert.match(begin, /ready.endpoint != self.browser\?\.endpoint && self.navigationHoldUntil\(for: source\) > Date\(\)/);
+  assert.match(method(app, 'navigationHoldUntil('), /source == \.pageFailed \? documentHoldUntil : holdUntil/);
+  assert.match(begin, /if source != \.pageFailed, !source.userInitiated, self.holdUntil > Date\(\)/);
+  assert.match(begin, /let delays = \[0\.12, 0\.35, 0\.8, 1\.6, 3\.2, 6\.0\]\s*let delay = delays\[min\(self.recoveryFailures, delays.count - 1\)\]\s*if source == \.pageFailed \{ self.scheduleDocumentRetry\(after: delay\) \}/);
+  assert.match(begin, /let requestedPageReconnect = source.userInitiated &&/);
+  assert.match(begin, /if source != \.pageFailed && !restartingDeadPage && !requestedPageReconnect/);
+  assert.match(begin, /ready.restoresFailedDocument = source == \.pageFailed/);
+  const bind = method(web, 'bind(_ next:');
+  assert.match(bind, /guard self.loaded, !next.restoresFailedDocument else \{ return \}[\s\S]*?userReconnect/);
+  assert.match(bind, /let deadline = next.restoresFailedDocument \? self.handshake.holdUntil : self.holdUntil/);
+  assert.match(method(app, 'scheduleRecoveryCheck('), /max\(Date\(\).addingTimeInterval\(delaySeconds\), holdUntil\)/);
+});

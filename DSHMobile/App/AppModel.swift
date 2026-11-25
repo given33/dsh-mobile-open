@@ -330,10 +330,15 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     private var handshake = PageHandshake()
     private var retryStep = 0
     private var lastBridgeHealth: WebSocketHealth?
+    private var documentRetryDue: Date?
     private var reloadTask: Task<Void, Never>?
+    private var documentHoldUntil: Date { browser == nil ? .distantPast : handshake.holdUntil }
     private var holdUntil: Date {
-        max(browser == nil ? .distantPast : handshake.holdUntil,
+        max(documentHoldUntil,
             desktop.flatMap { ReconnectBudget.devices[$0.id]?.holdUntil } ?? .distantPast)
+    }
+    private func navigationHoldUntil(for source: ConnectionSource) -> Date {
+        source == .pageFailed ? documentHoldUntil : holdUntil
     }
     private func issueWakeCheck(_ source: ConnectionSource) {
         // Don't overwrite a tap's pending WebViewCommand with a coalesced scene/network event.
@@ -974,6 +979,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             } catch {
                 guard let self, !Task.isCancelled, self.switchID == ticket else { return }
                 self.switchTargetID = nil
+                self.armDocumentRetryIfNeeded()
                 if self.wsHealth != .connected {
                     self.scheduleRecoveryCheck(delaySeconds: self.wsHealth == .connecting ? 3.5 : 0.05)
                 }
@@ -1018,7 +1024,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         transport?.invalidate()
         transport = channel
         cancelDocumentDeadline()
-        reloadTask?.cancel(); reloadTask = nil
+        cancelDocumentRetry()
         handshake = PageHandshake(); lastBridgeHealth = nil; retryStep = 0
         needsLaunchSelection = true; recoveryFailures = 0; revoked = false
         if pageTheme.dark == nil { pageTheme = loadSavedTheme(for: desktop?.id ?? selected.id) }
@@ -1110,28 +1116,22 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
 
     private func reloadPage(source: ConnectionSource) {
         guard let current = desktop else { return }
-        if browser == nil { beginConnection(preservePage: false, source: source) }
-        else {
-            reloadTask?.cancel(); reloadTask = nil
-            if source.userInitiated {
-                let deviceHold = ReconnectBudget.devices[current.id]?.holdUntil ?? .distantPast
-                guard userReloadUntil <= Date() || deviceHold > Date() else { showFailoverNotice("页面正在重新加载"); return }
-                clearUserBudget(source, for: current.id)
-            } else if holdUntil > Date() {
-                let delay = holdUntil.timeIntervalSinceNow
-                reloadTask = Task { [weak self] in
-                    do { try await Task.sleep(for: .seconds(max(0, delay))) } catch { return }
-                    guard let self, self.isForeground, self.browser != nil else { return }
-                    self.reloadPage(source: source)
-                }
-                return
-            }
-            startReload(userInitiated: source.userInitiated)
+        guard browser != nil else { beginConnection(preservePage: false, source: source); return }
+        if source == .pageFailed {
+            // The termination callback reset both handshakes. Start this navigation synchronously.
+            traceLink("restore source=pageFailed breaker=ignored reason=process-terminated")
+            startReload(userInitiated: false)
+            return
         }
+        guard source.userInitiated else { return }
+        let deviceHold = ReconnectBudget.devices[current.id]?.holdUntil ?? .distantPast
+        guard userReloadUntil <= Date() || deviceHold > Date() else { showFailoverNotice("页面正在重新加载"); return }
+        clearUserBudget(source, for: current.id)
+        startReload(userInitiated: true)
     }
 
     private func startReload(userInitiated: Bool) {
-        reloadTask?.cancel(); reloadTask = nil
+        cancelDocumentRetry()
         userReloadUntil = userInitiated ? Date().addingTimeInterval(ReconnectPolicy.seconds(ReconnectPolicy.handshakeGraceMs)) : .distantPast
         handshake.bind()
         cancelDocumentDeadline()
@@ -1288,6 +1288,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     }
 
     func restoringDocument() {
+        cancelDocumentRetry()
         handshake.bind()
         traceLink("document-start")
         cancelDocumentDeadline()
@@ -1308,6 +1309,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     }
 
     func pageLoaded() {
+        cancelDocumentRetry()
         userReloadUntil = .distantPast
         handshake.didLoad()
         traceLink("document-loaded")
@@ -1318,12 +1320,12 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
 
     func pageFailed(_ text: String) {
         userReloadUntil = .distantPast
-        // Ignore stale failures from an optimistic cold-boot endpoint while parallel failover is already in flight.
+        scheduleDocumentRetry(after: 0.12)
+        // A parallel optimistic refresh can still win and cancel the retry on navigation.
         if connectionTask != nil && browser?.isOptimistic == true { return }
         linkInterrupted = true
         problem = text
         wsHealth = .disconnected
-        scheduleRecoveryCheck(delaySeconds: 0.12, fresh: true, source: .pageFailed)
     }
 
     func pageProcessTerminated() {
@@ -1331,12 +1333,9 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         // Immediately restore the last captured snapshot cover before reloading in background.
         cancelDocumentDeadline()
         needsLaunchSelection = true
-        if browser != nil {
-            handshake = PageHandshake() // The WebContent process is gone. Only the device breaker survives.
-            reloadPage(source: .pageFailed)
-        } else {
-            beginConnection(preservePage: false, source: .pageFailed)
-        }
+        handshake = PageHandshake()
+        linkInterrupted = true
+        reloadPage(source: .pageFailed)
     }
 
     func pageAuthExpired() {
@@ -1469,7 +1468,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         connectionTask?.cancel(); connectionTask = nil
         recoveryTask?.cancel()
         generation = UUID()
-        reloadTask?.cancel(); reloadTask = nil
+        cancelDocumentRetry()
         browser = nil
         UserDefaults.standard.removeObject(forKey:"dsh.island."+current.id)
         taskPush.bind(nil,nil)
@@ -1543,6 +1542,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             return
         }
         endBackgroundKeepAlive()
+        armDocumentRetryIfNeeded()
         guard desktop != nil, !switchingDevice, !revoked, pathAvailable else { return }
         if browser == nil {
             if !connecting { beginConnection(preservePage: false, source: .sceneChanged) }
@@ -1577,6 +1577,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 self.lastNetworkSignature = sig
                 self.pathAvailable = available
                 self.currentOnWifi = available ? onWifi : nil
+                self.armDocumentRetryIfNeeded()
                 guard previous != nil, previous != sig, self.desktop != nil else { return }
                 if !available {
                     self.linkInterrupted = true
@@ -1604,6 +1605,37 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         pathMonitor = monitor
     }
 
+    private func cancelDocumentRetry() {
+        reloadTask?.cancel(); reloadTask = nil
+        documentRetryDue = nil
+    }
+
+    // The socket timer may already be sleeping through a breaker. Keep the failed navigation's
+    // deadline until it can run in the foreground, or a replacement navigation supersedes it.
+    private func scheduleDocumentRetry(after delay: TimeInterval) {
+        let deadline = max(Date().addingTimeInterval(delay), documentHoldUntil)
+        if let due = documentRetryDue, due <= deadline { return }
+        cancelDocumentRetry()
+        documentRetryDue = deadline
+        armDocumentRetryIfNeeded()
+    }
+
+    private func armDocumentRetryIfNeeded() {
+        guard let deadline = documentRetryDue, reloadTask == nil, isForeground, pathAvailable,
+              !switchingDevice, !revoked, desktop != nil else { return }
+        reloadTask = Task { [weak self] in
+            do { try await Task.sleep(for: .seconds(max(0, deadline.timeIntervalSinceNow))) } catch { return }
+            guard let self else { return }
+            if self.activeConnectionSource?.userInitiated == true { await self.connectionTask?.value }
+            guard !Task.isCancelled else { return }
+            self.reloadTask = nil
+            guard self.isForeground, self.pathAvailable, !self.switchingDevice, !self.revoked else { return }
+            self.documentRetryDue = nil
+            self.linkInterrupted = true
+            self.beginConnection(preservePage: self.browser != nil, reusePage: false, source: .pageFailed)
+        }
+    }
+
     // One non-sliding deadline per outage: repeated socket events must not push
     // recovery into the future indefinitely. Timers have no ownership offscreen.
     private func scheduleRecoveryCheck(delaySeconds: Double, fresh: Bool = false, source: ConnectionSource = .recovery,
@@ -1627,7 +1659,10 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         guard let current = desktop, let transport else { return }
         // An optimistic cookie refresh may race the initial load, but cannot replace its document below.
         let deviceHold = ReconnectBudget.devices[current.id]?.holdUntil ?? .distantPast
-        if source.userInitiated {
+        if source == .pageFailed {
+            if documentHoldUntil > Date() { scheduleDocumentRetry(after: 0); return }
+            traceLink("restore source=pageFailed breaker=ignored reason=bootstrap")
+        } else if source.userInitiated {
             guard connectionTask == nil || activeConnectionSource != source || deviceHold > Date() else {
                 showFailoverNotice("正在连接此设备，请稍候"); return
             }
@@ -1639,9 +1674,9 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             }
             return
         }
-        let active = reusePage && browser?.isOptimistic != true && (browser?.expiresAt.timeIntervalSinceNow ?? 0) >= 120 ? browser : nil
+        let active = source != .pageFailed && reusePage && browser?.isOptimistic != true && (browser?.expiresAt.timeIntervalSinceNow ?? 0) >= 120 ? browser : nil
         // A retained page can start its socket attempt while the pinned HTTP probe runs.
-        let restartingDeadPage = source.userInitiated && reloadTask != nil && browser?.desktopID == current.id
+        let restartingDeadPage = source.userInitiated && documentRetryDue != nil && browser?.desktopID == current.id
         if restartingDeadPage { startReload(userInitiated: true) }
         let requestedPageReconnect = source.userInitiated && !restartingDeadPage && active != nil && wsHealth != .connected
         if requestedPageReconnect { pendingCommand = .reconnect(UUID(), userInitiated: true) }
@@ -1677,8 +1712,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 try Task.checkCancellation()
                 guard let self, self.generation == ticket else { return }
                 // A mux or breaker can start while the HTTP probe is in flight. Recheck at publication.
-                while !source.userInitiated && ready.id != self.browser?.id && ready.endpoint != self.browser?.endpoint && self.holdUntil > Date() {
-                    try await Task.sleep(for: .seconds(max(0, self.holdUntil.timeIntervalSinceNow)))
+                while !source.userInitiated && ready.id != self.browser?.id && ready.endpoint != self.browser?.endpoint && self.navigationHoldUntil(for: source) > Date() {
+                    try await Task.sleep(for: .seconds(max(0, self.navigationHoldUntil(for: source).timeIntervalSinceNow)))
                     try Task.checkCancellation()
                     guard self.generation == ticket else { return }
                 }
@@ -1699,7 +1734,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                     if self.selectedDevice?.id == updated.id { self.selectedDevice = updated }
                     if self.browser == nil { self.wsHealth = .connecting }
                 }
-                if !restartingDeadPage && !requestedPageReconnect && ready.id == self.browser?.id &&
+                if source != .pageFailed && !restartingDeadPage && !requestedPageReconnect && ready.id == self.browser?.id &&
                     self.wsHealth != .connected && (source.userInitiated || self.holdUntil <= Date()) {
                     self.pendingCommand = .reconnect(UUID(), userInitiated: source.userInitiated) // JS rechecks the live mux at execution.
                 }
@@ -1711,6 +1746,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 self.cancelFailoverProbe()
                 self.offlineAttempts = 0; self.offeredThisOutage = false; self.offerCloud = false
                 self.refreshGrant(current, endpoint: ready.endpoint, using: transport)
+                ready.restoresFailedDocument = source == .pageFailed
+                if ready.restoresFailedDocument && self.wsHealth == .disconnected { self.wsHealth = .connecting }
                 ready.userInitiatedBind = source.userInitiated
                 self.browser = ready
                 self.syncIdleTimer()
@@ -1726,7 +1763,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 guard !Task.isCancelled, let self, self.generation == ticket else { return }
                 self.connecting = false
                 self.reconnecting = false
-                if !source.userInitiated, self.holdUntil > Date(), (error as? LinkError) != .unpaired {
+                if source != .pageFailed, !source.userInitiated, self.holdUntil > Date(), (error as? LinkError) != .unpaired {
                     if self.wsHealth != .connected { self.scheduleRecoveryCheck(delaySeconds: 0, fresh: !reusePage, source: source) }
                     return
                 }
@@ -1749,7 +1786,9 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                     self.taskRunning = false; self.syncIdleTimer()
                 } else {
                     let delays = [0.12, 0.35, 0.8, 1.6, 3.2, 6.0]
-                    self.scheduleRecoveryCheck(delaySeconds: delays[min(self.recoveryFailures, delays.count - 1)])
+                    let delay = delays[min(self.recoveryFailures, delays.count - 1)]
+                    if source == .pageFailed { self.scheduleDocumentRetry(after: delay) }
+                    else { self.scheduleRecoveryCheck(delaySeconds: delay) }
                     self.recoveryFailures = min(8, self.recoveryFailures + 1)
                 }
                 self.problem = error.localizedDescription
@@ -1790,6 +1829,7 @@ struct BrowserSession: Identifiable {
     var terminal: Bool
     let appVersion: String
     let wakeEndpoints: [Endpoint]
+    var restoresFailedDocument = false
     var userInitiatedBind = false
     var isOptimistic: Bool = false
     var latencyMs: Int? = nil
