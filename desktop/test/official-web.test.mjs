@@ -15,7 +15,7 @@ import { createMobileFocusTracker } from '../lib/mobile-focus.mjs';
 import { mobileHostActions } from '../lib/mobile-host-actions.mjs';
 import { injectMobileShell, MOBILE_ANCHOR_PREBOOT_JS, MOBILE_SHELL_CSS, MOBILE_SHELL_JS } from '../lib/mobile-shell.mjs';
 
-async function fixture(t, { mode = 'legacy', actions = true, terminal = false, history, officeBody, rpcBody, extraFetch, streamValue } = {}) {
+async function fixture(t, { mode = 'legacy', actions = true, terminal = false, history, officeBody, rpcBody, extraFetch, streamValue, priorEvents } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'dsh-official-web-'));
   const distRoot = join(dir, 'dist');
   await mkdir(join(distRoot, 'assets'), { recursive: true });
@@ -118,8 +118,13 @@ async function fixture(t, { mode = 'legacy', actions = true, terminal = false, h
     }),
   };
 
+  const stateDir = join(dir, 'state'), journalFile = join(stateDir, 'link-events.jsonl');
+  if (priorEvents) {
+    await mkdir(stateDir, { recursive: true });
+    await writeFile(journalFile, priorEvents);
+  }
   const link = await createLinkService({
-    stateDir: join(dir, 'state'),
+    stateDir,
     upstream,
     officialWeb,
     focus,
@@ -153,7 +158,7 @@ async function fixture(t, { mode = 'legacy', actions = true, terminal = false, h
   }
   const paired = await request('/mobile/v1/pair', { method: 'POST', body: { code: new URL(status.pairing.link).searchParams.get('c'), device: { id: 'phone-official-123', name: 'test' } } });
   const token = JSON.parse(paired.body).token;
-  return { link, request, token, origin, seen, officialWeb, focus, emitFrame: frame => listeners.get('message')(JSON.stringify(frame)) };
+  return { link, request, token, origin, seen, officialWeb, focus, journalFile, closeUpstream: () => listeners.get('close')(), emitFrame: frame => listeners.get('message')(JSON.stringify(frame)) };
 }
 
 test('official browser session uses a separate host-only cookie, mobile shell assets, gzip cache, and revokes with the phone', async t => {
@@ -1332,8 +1337,8 @@ test('credential refresh preserves pending mux; forced reconnect bypasses deboun
   bridge.reconnect(true); assert.equal(count,3);
 });
 
-async function officialMux(t) {
-  const server = await fixture(t, { actions: true, terminal: false });
+async function officialMux(t, overrides) {
+  const server = await fixture(t, { actions: true, terminal: false, ...overrides });
   const session = await server.request('/mobile/v1/web-session', { method: 'POST', token: server.token });
   assert.equal(session.status, 200);
   const cookie = session.headers['set-cookie'][0].split(';')[0];
@@ -1429,4 +1434,88 @@ test('foreground retries an unconfirmed open mux immediately but protects the fi
   now++; bridge.credentialsChanged(); assert.equal(count,3);
   assert.ok(bridge.setLogicalConnection('connected')); now+=10000;
   bridge.credentialsChanged(); bridge.wakeCheck(); assert.equal(count,3);
+});
+
+
+test('link journal correlates a shell wake with its WSS close and distinguishes an upstream close', async t => {
+  const trace = '665b5609-37ab-435d-84f1-af3a54fc26d3';
+  const { origin, url, link, request, cookie, options, closeUpstream, journalFile } = await officialMux(t);
+  const { ctx, calls } = launchFixture('light');
+  const requests = [];
+  let now = Date.now();
+  ctx.Date = class extends Date { static now() { return now; } };
+  ctx.performance = { now: () => now };
+  ctx.URL = URL;
+  ctx.location = new URL(origin);
+  ctx.crypto = { randomUUID: () => trace };
+  ctx.__DSH_MOBILE_SHELL__.linkEvents = true;
+  ctx.WebSocket = class extends WebSocket { constructor(target) { super(target, options); } };
+  ctx.document.visibilityState = 'visible';
+  ctx.fetch = (path, init) => {
+    const result = request(path, { cookie, headers: init.headers }).then(res => ({ ok: res.status === 200, json: () => JSON.parse(res.body) }));
+    requests.push(result);
+    return result;
+  };
+  vm.runInContext(MOBILE_SHELL_JS, ctx);
+  const ws = new ctx.WebSocket(url);
+  await once(ws, 'open');
+  const closed = once(ws, 'close');
+  now += 30_000; // This diagnostic test targets a stalled logical connection beyond any handshake grace.
+  const privateText = 'fixture-private-close-content';
+  ctx.__DSH_MOBILE_CORDIS__ = { reconnect() { ws.close(4001, privateText); return true; } };
+  ctx.__DSH_MOBILE_BRIDGE__.wakeCheck();
+  await Promise.all(requests);
+  await closed;
+  assert.ok(calls.some(m => m.type === 'link-force' && m.source === 'wakeCheck'));
+
+  const upstreamSocket = new WebSocket(url, options);
+  await once(upstreamSocket, 'open');
+  const upstreamClosed = once(upstreamSocket, 'close');
+  closeUpstream();
+  assert.equal((await upstreamClosed)[0], 1011);
+  await link.stop();
+  const text = await readFile(journalFile, 'utf8');
+  for (const secret of [cookie, trace, privateText, 'phone-official-123']) assert.ok(!text.includes(secret));
+  const events = text.trimEnd().split('\n').map(JSON.parse);
+  const forced = events.find(e => e.type === 'forced-reconnect');
+  assert.equal(forced.source, 'wakeCheck');
+  assert.ok(Number.isFinite(Date.parse(forced.clientAt)));
+  assert.equal(forced.muxAgeMs, 30_000); assert.equal(forced.readyState, 1);
+  const first = events.filter(e => e.socket === forced.socket);
+  assert.equal(first.length, 3);
+  assert.ok(first.every(e => e.device === forced.device && Number.isFinite(Date.parse(e.at))));
+  const phone = first.find(e => e.type === 'disconnected');
+  assert.equal(phone.source, 'phone-close'); assert.equal(phone.code, 4001);
+  assert.equal(phone.reason, 'peer-supplied'); assert.ok(phone.durationMs >= 0);
+  const remote = events.find(e => e.source === 'upstream-close');
+  assert.equal(remote.code, 1011); assert.equal(remote.reason, 'Harness disconnected');
+  assert.notEqual(remote.socket, forced.socket);
+});
+
+test('link journal enforces both retention limits across restarts', async t => {
+  for (const [lines, width] of [[500, 0], [250, 1036]]) {
+    const priorEvents = Array.from({ length: lines }, (_, i) => JSON.stringify({ i, pad: 'x'.repeat(width) }) + '\n').join('');
+    // A byte-bound fixture ends just below the cap, before a new connect/close pair arrives.
+    const seed = width ? priorEvents.slice(0, priorEvents.lastIndexOf('\n', 256 * 1024 - 2) + 1) : priorEvents;
+    const padding = width ? JSON.stringify({ pad: 'x'.repeat(256 * 1024 - Buffer.byteLength(seed) - 13) }) + '\n' : '';
+    const { url, options, journalFile, link } = await officialMux(t, { priorEvents: seed + padding });
+    const ws = new WebSocket(url, options);
+    await once(ws, 'open'); const closed = once(ws, 'close'); ws.close(); await closed;
+    await link.stop();
+    const text = await readFile(journalFile, 'utf8'), events = text.trimEnd().split('\n').map(JSON.parse);
+    assert.ok(events.length <= 500 && Buffer.byteLength(text) <= 256 * 1024);
+    assert.ok(events[0].i > 0); assert.equal(events.at(-1).type, 'disconnected');
+  }
+});
+
+test('disabling link events omits the journal and shell telemetry', async t => {
+  const previous = process.env.DSH_LINK_EVENTS;
+  let server;
+  try { process.env.DSH_LINK_EVENTS = '0'; server = await officialMux(t); }
+  finally { if (previous === undefined) delete process.env.DSH_LINK_EVENTS; else process.env.DSH_LINK_EVENTS = previous; }
+  const { url, options, request, cookie, link, journalFile } = server;
+  assert.match((await request('/', { cookie })).body.toString(), /"linkEvents":false/);
+  const ws = new WebSocket(url, options);
+  await once(ws, 'open'); const closed = once(ws, 'close'); ws.close(); await closed;
+  await link.stop(); await assert.rejects(readFile(journalFile), { code: 'ENOENT' });
 });

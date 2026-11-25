@@ -305,6 +305,7 @@ function installLaunchTheme() {
 export function injectMobileShell(html, meta = {}) {
   const payload = {
     active: true,
+    linkEvents: meta.linkEvents === true,
     version: typeof meta.version === 'string' ? meta.version : '',
     desktopTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     desktopName: typeof meta.desktopName === 'string' ? meta.desktopName : '',
@@ -3879,7 +3880,7 @@ export const MOBILE_SHELL_JS = `(() => {
   }
 
   // 5. Passively observe DSH's /api/remote.mux WebSocket to report live sync state to Swift.
-  let latestMux, latestMuxCreatedAt = 0;
+  let latestMux, latestMuxCreatedAt = 0, latestMuxTrace;
   const NativeWebSocket = globalThis.WebSocket;
   if (typeof NativeWebSocket === 'function') {
     const setWsState = (next) => {
@@ -3888,11 +3889,23 @@ export const MOBILE_SHELL_JS = `(() => {
       post({ type: 'ws', state: next });
     };
     const WrappedWebSocket = function(url, protocols) {
+      let trace;
+      if (shell.linkEvents) {
+        try {
+          const target = new URL(url, location.href);
+          if (target.host === location.host && target.pathname === '/api/remote.mux') {
+            trace = crypto.randomUUID();
+            target.searchParams.set('dmlTrace', trace);
+            url = target.href;
+          }
+        } catch {} // Optional metadata must not prevent a real WebSocket attempt.
+      }
       const ws = protocols !== undefined ? new NativeWebSocket(url, protocols) : new NativeWebSocket(url);
       try {
         const href = String(url || '');
         if (href.includes('/api/remote.mux')) {
           latestMux = ws;
+          latestMuxTrace = trace;
           latestMuxCreatedAt = Date.now();
           const report = state => { if (ws === latestMux) setWsState(state); };
           report('connecting');
@@ -4278,7 +4291,7 @@ export const MOBILE_SHELL_JS = `(() => {
   }
 
   let reconnectUntil = 0;
-  function reconnect(force = false) {
+  function reconnect(force = false, source = 'bridge') {
     // Reaffirm a genuinely open, subscribed mux instead of tearing it down unless forced
     // (e.g. server confirmed wsAlive === false on a half-open cellular NAT socket).
     if (!force && wsState === 'connected' && latestMux?.readyState === 1) {
@@ -4289,7 +4302,17 @@ export const MOBILE_SHELL_JS = `(() => {
     if (typeof cordis?.reconnect === 'function') {
       if (!force && Date.now() < reconnectUntil) return true;
       reconnectUntil = Date.now() + 400;
+      // Cordis may synchronously replace the socket. Sample its predecessor first.
+      const trace = latestMuxTrace, when = Date.now(), ready = latestMux?.readyState;
+      const age = latestMux ? Math.max(0, when - latestMuxCreatedAt) : null;
       if (cordis.reconnect() === false) { reconnectUntil = 0; return false; }
+      if (force && shell.linkEvents) {
+        // Telemetry delivery must never block reconnect.
+        post({ type: 'link-force', source });
+        void fetch('/mobile/v1/sync', { credentials: 'same-origin', cache: 'no-store', keepalive: true,
+          headers: { 'x-dsh-force-source': source, 'x-dsh-force-at': String(when), 'x-dsh-mux': trace ?? '',
+            'x-dsh-mux-age': String(age ?? ''), 'x-dsh-mux-ready': String(ready ?? '') } }).catch(() => {});
+      }
       return true;
     }
     return false;
@@ -4329,7 +4352,7 @@ export const MOBILE_SHELL_JS = `(() => {
       // Instant half-open zombie socket detection: if the desktop has zero live mux sockets
       // for this device while our browser socket still claims OPEN, reconnect immediately.
       if (shouldPoke && data.wsAlive === false && latestMux?.readyState === 1 && Date.now() - latestMuxCreatedAt >= 1000) {
-        reconnect(true);
+        reconnect(true, 'poke-wsAlive');
       }
       const cursor = typeof data.cursor === 'string' ? data.cursor : '';
       delay = cursor ? 0 : 5000; // Older servers return an immediate snapshot only.
@@ -4361,13 +4384,13 @@ export const MOBILE_SHELL_JS = `(() => {
     void pollSync();
   }
   let lastWakeRetry = -Infinity, wakeRetryMux, wakeRetryState;
-  function wakeForeground() {
+  function wakeForeground(source) {
     const mux = latestMux, ready = mux?.readyState, now = Date.now();
     const handshake = ready === 0 && now - latestMuxCreatedAt < 1000;
     // Coalesce repeated signals for the *same* transport state, never a new close.
     const duplicate = wakeRetryMux === mux && wakeRetryState === ready && now - lastWakeRetry < 400;
     if (!duplicate && (ready >= 2 || (wsState !== 'connected' && !handshake))) {
-      if (reconnect(true)) { lastWakeRetry = now; wakeRetryMux = mux; wakeRetryState = ready; }
+      if (reconnect(true, source)) { lastWakeRetry = now; wakeRetryMux = mux; wakeRetryState = ready; }
     }
     resetSync(true);
     syncViewport();
@@ -4376,7 +4399,7 @@ export const MOBILE_SHELL_JS = `(() => {
   }
 
   function wakeCheck() {
-    if (!lifecycle?.isSuspended() && document.visibilityState !== 'hidden') wakeForeground();
+    if (!lifecycle?.isSuspended() && document.visibilityState !== 'hidden') wakeForeground('wakeCheck');
   }
 
   globalThis.__DSH_MOBILE_BRIDGE__ = {
@@ -4542,7 +4565,7 @@ export const MOBILE_SHELL_JS = `(() => {
         syncRequest = null;
         request?.abort();
       },
-      onRecover: wakeForeground,
+      onRecover: reason => wakeForeground(reason === 'visible' ? 'visibility' : reason),
     });
     void pollSync();
     post({ type: 'ready', version: shell.version || '' });

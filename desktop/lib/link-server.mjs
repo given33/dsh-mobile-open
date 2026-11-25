@@ -15,7 +15,7 @@
 // exactly what the desktop web UI receives.
 import { cloudRoute } from './family.mjs';
 import https from 'node:https';
-import { readFileSync } from 'node:fs';
+import { readFileSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
@@ -193,6 +193,37 @@ const SHELL_ASSETS = {
   '/mobile/v1/shell.js': buildShellAsset('text/javascript; charset=utf-8', MOBILE_SHELL_JS),
 };
 
+// Only callers with allowlisted fields write here. Keep one bounded snapshot and
+// one writer even if a burst arrives while the previous atomic rename is pending.
+function linkJournal(file, log) {
+  const maxBytes = 256 * 1024, maxLines = 500;
+  let lines = [], writing, dirty = false, warned = false;
+  const warn = () => {
+    if (!warned) log({ type: 'error', where: 'link-events', message: 'event journal unavailable' });
+    warned = true;
+  };
+  try {
+    if (statSync(file).size <= maxBytes) lines = readFileSync(file, 'utf8').split('\n').filter(Boolean).slice(-maxLines);
+  } catch (error) { if (error.code !== 'ENOENT') warn(); }
+  let bytes = lines.reduce((total, line) => total + Buffer.byteLength(line) + 1, 0);
+  return {
+    record(event) {
+      const line = JSON.stringify({ at: new Date().toISOString(), ...event });
+      lines.push(line); bytes += Buffer.byteLength(line) + 1;
+      while (lines.length > maxLines || bytes > maxBytes) bytes -= Buffer.byteLength(lines.shift()) + 1;
+      dirty = true;
+      writing ??= (async () => {
+        do {
+          dirty = false;
+          try { await writePrivate(file, lines.join('\n') + '\n'); } catch { warn(); }
+        } while (dirty);
+        writing = undefined;
+      })();
+    },
+    flush: () => writing,
+  };
+}
+
 /**
  * @param {object} o
  * @param {{id,name,cert,key,fingerprint}} o.identity
@@ -216,6 +247,15 @@ export function createLinkServer({
   const browserRequests = new WeakSet();
   const cookieName = '__Host-dsh-mobile';
   const hashToken = value => createHash('sha256').update(value).digest('base64url');
+  const journal = stateDir && process.env.DSH_LINK_EVENTS !== '0' ? linkJournal(join(stateDir, 'link-events.jsonl'), log) : null;
+  const bridgeLimit = new RateLimit(120, 60e3);
+  const socketTrace = new WeakMap();
+  const deviceTag = id => hashToken(id).slice(0, 16);
+  const muxTag = id => typeof id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(id) ? deviceTag(id) : null;
+  function serverClose(ws, source) {
+    const trace = socketTrace.get(ws);
+    if (trace && !trace.source) trace.source = source;
+  }
   const sessionsFile = stateDir ? join(stateDir, 'web-sessions.json') : null;
   let sessionWrites = Promise.resolve();
   // Hydrate unexpired hashed browser sessions so phone cookies survive desktop restarts cleanly.
@@ -270,7 +310,7 @@ export function createLinkServer({
     if (!set) return;
     for (const ws of [...set]) {
       if (ws.readyState !== WebSocket.OPEN) { set.delete(ws); continue; }
-      try { ws.ping(); } catch { try { ws.terminate(); } catch {} }
+      try { ws.ping(); } catch { try { serverClose(ws, 'poke-terminate'); ws.terminate(); } catch {} }
     }
   };
   // A single outstanding revision watch per visible page. Bound idle sockets and
@@ -409,6 +449,17 @@ export function createLinkServer({
         });
       }
       if (path === '/mobile/v1/sync' && req.method === 'GET') {
+        // A same-origin shell may attach timing metadata to an ordinary, non-poking sync read.
+        const source = req.headers['x-dsh-force-source'];
+        if (journal && browserRequests.has(req) && ['wakeCheck', 'visibility', 'online', 'pageshow', 'resume', 'poke-wsAlive', 'bridge'].includes(source) && bridgeLimit.allow(device.id)) {
+          const when = Number(req.headers['x-dsh-force-at']);
+          const age = req.headers['x-dsh-mux-age'], ready = req.headers['x-dsh-mux-ready'];
+          if (Number.isSafeInteger(when) && when > 0 && when <= 8.64e15) {
+            journal.record({ type: 'forced-reconnect', source, device: deviceTag(device.id),
+              socket: muxTag(req.headers['x-dsh-mux']), clientAt: new Date(when).toISOString(),
+              muxAgeMs: /^\d{1,12}$/.test(age) ? Number(age) : null, readyState: /^[0-3]$/.test(ready) ? Number(ready) : null });
+          }
+        }
         const poke = url.searchParams.get('poke') === '1';
         if (poke) pokeSockets(device.id);
         let state = syncState(device.id);
@@ -608,6 +659,7 @@ export function createLinkServer({
           peer,
           shellMeta: {
             version: appVersion,
+            linkEvents: !!journal,
             desktopName: identity.name,
             readOnly: !actions(),
             terminal: allowTerminal(),
@@ -631,13 +683,18 @@ export function createLinkServer({
     zlibDeflateOptions: { level: 1 }, concurrencyLimit: 4,
   } });
   server.on('upgrade', (req, socket, head) => {
-    const path = new URL(req.url ?? '/', 'https://link.invalid').pathname;
-    const device = path === '/api/remote.mux' ? authorize(req) : undefined;
+    const url = new URL(req.url ?? '/', 'https://link.invalid');
+    const device = url.pathname === '/api/remote.mux' ? authorize(req) : undefined;
     if (!device) { socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n'); return; }
-    wss.handleUpgrade(req, socket, head, client => attach(client, device, peerAddress(req), browserRequests.has(req)));
+    wss.handleUpgrade(req, socket, head, client => attach(client, device, peerAddress(req), browserRequests.has(req), muxTag(url.searchParams.get('dmlTrace'))));
   });
 
-  async function attach(client, device, address, official = false) {
+  async function attach(client, device, address, official, tag) {
+    const started = performance.now();
+    const context = { socket: tag ?? randomBytes(8).toString('hex'), device: deviceTag(device.id) };
+    const trace = {};
+    socketTrace.set(client, trace);
+    journal?.record({ type: 'connected', ...context });
     const set = sockets.get(device.id) ?? new Set(); set.add(client); sockets.set(device.id, set);
     log({ type: 'connected', device: { id: device.id, name: device.name }, address });
     const open = new Map(), queue = [];
@@ -647,12 +704,14 @@ export function createLinkServer({
       delivery.streamId = null; delivery.clientId = null; delivery.pending.clear();
     };
     let remote, closed = false;
-    const finish = (code = 1011, reason = 'Harness disconnected') => {
+    const finish = (code = 1011, reason = 'Harness disconnected', source = 'link-server', observedCode = code, observedReason = reason) => {
       if (closed) return; closed = true;
       deliveries.delete(client);
       set.delete(client); if (!set.size && sockets.get(device.id) === set) sockets.delete(device.id);
       try { client.close(code, reason); } catch {}
       try { remote?.close(); } catch {}
+      journal?.record({ type: 'disconnected', ...context, source: trace.source ?? source, code: observedCode,
+        reason: observedReason, durationMs: Math.round(performance.now() - started) });
       log({ type: 'disconnected', device: { id: device.id, name: device.name } });
     };
     client.on('message', (bytes, isBinary) => {
@@ -714,15 +773,21 @@ export function createLinkServer({
     let lastTraffic = Date.now();
     const seen = () => { lastTraffic = Date.now(); };
     client.on('pong', seen); client.on('message', seen);
-    const beat = setInterval(() => { if (Date.now()-lastTraffic >= 180e3) { client.terminate(); return; } try { client.ping(); } catch {} }, 15e3);
+    const beat = setInterval(() => { if (Date.now()-lastTraffic >= 180e3) { serverClose(client, 'heartbeat-terminate'); client.terminate(); return; } try { client.ping(); } catch {} }, 15e3);
     beat.unref?.();
-    client.on('close', () => { clearInterval(beat); finish(1000, 'closed'); });
-    client.on('error', () => finish());
+    client.on('close', (code, reason) => {
+      clearInterval(beat);
+      // Peer-supplied close text can contain arbitrary page data. Only retain known constants.
+      const text = reason.toString();
+      const safeReason = !text ? 'empty' : ['unpaired', 'configuration changed', 'closed'].includes(text) ? text : 'peer-supplied';
+      finish(1000, 'closed', code === 1006 ? 'transport-lost' : 'phone-close', code, safeReason);
+    });
+    client.on('error', () => finish(1011, 'Harness disconnected', 'phone-error'));
     try {
       remote = await upstream.mux(device.id);
     } catch (error) {
       log({ type: 'error', where: 'mux', message: error?.message });
-      return finish(1013, 'Harness unavailable');
+      return finish(1013, 'Harness unavailable', 'upstream-open');
     }
     if (closed) { try { remote.close(); } catch {} return; }
     remote.on('message', (data, isBinary = false) => {
@@ -750,7 +815,7 @@ export function createLinkServer({
         && frame.value?.type === 'snapshot' && open.get(frame.streamId) === 'session/follow';
       client.send(data, { binary: isBinary, compress }, error => { if (error) finish(); });
     });
-    remote.on('close', () => finish(1011, 'Harness disconnected'));
+    remote.on('close', () => finish(1011, 'Harness disconnected', 'upstream-close'));
     try { for (const text of queue.splice(0)) remote.send(text); }
     catch { finish(); }
   }
@@ -761,7 +826,7 @@ export function createLinkServer({
     for (const [wake, id] of syncWaiters) if (id === event.id) wake();
     for (const ws of sockets.get(event.id) ?? []) {
       deliveries.delete(ws);
-      ws.close(4401, 'unpaired');
+      serverClose(ws, 'unpair'); ws.close(4401, 'unpaired');
     }
     void Promise.resolve(upstream.revoke?.(event.id)).catch(() => {});
   });
@@ -778,7 +843,9 @@ export function createLinkServer({
     connected() { return [...sockets.entries()].map(([id, set]) => ({ id, connections: set.size })); },
     disconnect() {
       wakeSync();
-      for (const set of sockets.values()) for (const ws of set) ws.close(1012, 'configuration changed');
+      for (const set of sockets.values()) for (const ws of set) {
+        serverClose(ws, 'configuration'); ws.close(1012, 'configuration changed');
+      }
     },
     async close() {
       unsubscribe();
@@ -787,11 +854,14 @@ export function createLinkServer({
       forgetBrowserDevice?.();
       await sessionWrites;
       browserSessions.clear();
-      for (const set of sockets.values()) for (const ws of set) ws.terminate();
-      wss.close();
+      for (const set of sockets.values()) for (const ws of set) {
+        serverClose(ws, 'shutdown-terminate'); ws.terminate();
+      }
+      const socketsClosed = new Promise(resolve => wss.close(resolve));
       const closed = new Promise(resolve => server.close(() => resolve()));
       server.closeAllConnections?.();
-      await closed;
+      await Promise.all([closed, socketsClosed]);
+      await journal?.flush();
       await devices.flush?.();
     },
   };
