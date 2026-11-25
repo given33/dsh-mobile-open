@@ -453,7 +453,7 @@ export function createLinkServer({
         const source = req.headers['x-dsh-force-source'];
         const kind = req.headers['x-dsh-link-event'] ?? 'forced-reconnect';
         const validSource = kind === 'breaker-open' ? ['upstream-1011', 'force-timeout'].includes(source)
-          : ['wakeCheck', 'visibility', 'online', 'pageshow', 'resume', 'poke-wsAlive', 'bridge', 'credentialsChanged'].includes(source);
+          : ['userRetry', 'wakeCheck', 'visibility', 'online', 'pageshow', 'resume', 'poke-wsAlive', 'bridge', 'credentialsChanged'].includes(source);
         if (journal && browserRequests.has(req) && validSource &&
             ['forced-reconnect', 'force-reconnect', 'suppressed', 'breaker-open'].includes(kind) && bridgeLimit.allow(device.id)) {
           const when = Number(req.headers['x-dsh-force-at']);

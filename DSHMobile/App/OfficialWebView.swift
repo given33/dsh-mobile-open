@@ -30,7 +30,7 @@ private final class VoiceTouchObserver: UIGestureRecognizer {
 /// and the lightweight native <-> official-UI command/status bridge.
 struct OfficialWebView: UIViewRepresentable {
     let session: BrowserSession
-    let reloadID: UUID
+    let reloadID: PageReload
     let launchRoute: [String: String]
     let command: WebViewCommand?
     let backgroundColor: UIColor?
@@ -114,7 +114,7 @@ struct OfficialWebView: UIViewRepresentable {
         context.coordinator.bind(session)
         if context.coordinator.reloadID != reloadID {
             context.coordinator.reloadID = reloadID
-            context.coordinator.reloadHome()
+            context.coordinator.reloadHome(userInitiated: reloadID.userInitiated)
         }
         if let command, context.coordinator.lastCommandID != command.id {
             context.coordinator.lastCommandID = command.id
@@ -137,10 +137,10 @@ struct OfficialWebView: UIViewRepresentable {
     @MainActor final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKDownloadDelegate, WKScriptMessageHandler, UIScrollViewDelegate, QLPreviewControllerDataSource, QLPreviewControllerDelegate {
         private var previewFile: URL?
         var session: BrowserSession
-        var reloadID: UUID
+        var reloadID: PageReload
         var lastCommandID: UUID?
         #if DEBUG
-        private let initialReloadID: UUID
+        private let initialReloadID: PageReload
         #endif
         let onRestoring: () -> Void
         var onLoaded: () -> Void
@@ -197,7 +197,7 @@ struct OfficialWebView: UIViewRepresentable {
 
         init(
             session: BrowserSession,
-            reloadID: UUID,
+            reloadID: PageReload,
             onRestoring: @escaping () -> Void,
             onLoaded: @escaping () -> Void,
             onError: @escaping (String) -> Void,
@@ -221,14 +221,19 @@ struct OfficialWebView: UIViewRepresentable {
         private var handshake = PageHandshake()
         private var requestedSession: UUID?
         private var bindTask: Task<Void, Never>?
-        private var installedBudget: Double?
+        private var installedBudget: ReconnectBudget?
         private var installedRoute: [String: String]?
         func install(_ route: [String: String], in controller: WKUserContentController) {
             let budget = ReconnectBudget.devices[session.desktopID]
-            guard route != installedRoute || budget?.updated != installedBudget, let data = try? JSONEncoder().encode(route), let literal = String(data: data, encoding: .utf8) else { return }
+            guard route != installedRoute || budget != installedBudget, let data = try? JSONEncoder().encode(route), let literal = String(data: data, encoding: .utf8) else { return }
             installedRoute = route
-            installedBudget = budget?.updated
+            let resetChanged = budget?.resetID != nil && installedBudget?.resetID != budget?.resetID
+            installedBudget = budget
             let seed = (try? JSONEncoder().encode(budget)).flatMap { String(data: $0, encoding: .utf8) } ?? "null"
+            if resetChanged, let webView {
+                // Document-start scripts cover subsequent loads. Deliver to the retained page too.
+                webView.evaluateJavaScript("globalThis.__DSH_RECONNECT_BUDGET__ = \(seed); globalThis.__DSH_MOBILE_BRIDGE__?.applyNativeBudget?.(globalThis.__DSH_RECONNECT_BUDGET__)", completionHandler: nil)
+            }
             controller.removeAllUserScripts()
             let paintBg = "(()=>{const r=globalThis.__DSH_MOBILE_LAUNCH__;if(r?.bg&&document.documentElement)document.documentElement.style.backgroundColor=r.bg;})();"
             controller.addUserScript(WKUserScript(source: Self.nativeNavigation + "\nglobalThis.__DSH_RECONNECT_BUDGET__ = \(seed);\nglobalThis.__DSH_MOBILE_LAUNCH__ = \(literal);\n" + paintBg, injectionTime: .atDocumentStart, forMainFrameOnly: true))
@@ -373,8 +378,8 @@ struct OfficialWebView: UIViewRepresentable {
             image.isAccessibilityElement = false; image.accessibilityElementsHidden = true
             webView.addSubview(image); cover = image
         }
-        func reloadHome() {
-            guard holdUntil <= Date() else { return }
+        func reloadHome(userInitiated: Bool) {
+            guard userInitiated || holdUntil <= Date() else { return }
             coverCurrentDocument(); loadHome()
         }
 
@@ -396,13 +401,15 @@ struct OfficialWebView: UIViewRepresentable {
                 guard !Task.isCancelled, self.webView === web else { return }
                 if !initial && !changingOrigin && (self.loaded || self.loadingStarted) {
                     self.session = next
-                    guard self.loaded, self.holdUntil <= Date() else { return }
+                    guard self.loaded else { return } // A new document is already loading.
+                    if next.userInitiatedBind { self.userReconnect(in: web); return }
+                    guard self.holdUntil <= Date() else { return }
                     web.evaluateJavaScript("globalThis.__DSH_MOBILE_BRIDGE__?.credentialsChanged?.()", completionHandler: nil)
                     return
                 }
                 // Only a new origin or a missing document needs navigation. A newer
                 // bind cancels this one, including while the cookie store is suspended.
-                while !initial && self.holdUntil > Date() {
+                while !initial && !next.userInitiatedBind && self.holdUntil > Date() {
                     do { try await Task.sleep(for: .seconds(max(0, self.holdUntil.timeIntervalSinceNow))) } catch { return }
                 }
                 guard !Task.isCancelled, self.webView === web else { return }
@@ -424,6 +431,13 @@ struct OfficialWebView: UIViewRepresentable {
             handshake.bind()
             loaded = false; loadingStarted = true; routePainted = false
             webView.load(URLRequest(url: session.url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 20))
+        }
+
+        private func userReconnect(in web: WKWebView) {
+            web.evaluateJavaScript("globalThis.__DSH_MOBILE_BRIDGE__?.forceUserReconnect?.()") { [weak self, weak web] value, _ in
+                guard let self, let web, self.webView === web, value as? String != "started" else { return }
+                self.onBridgeMessage(["type": "user-reconnect-feedback", "result": value as? String ?? "unavailable"])
+            }
         }
 
         func execute(_ command: WebViewCommand, in webView: WKWebView) {
@@ -453,7 +467,8 @@ struct OfficialWebView: UIViewRepresentable {
                 script = "globalThis.__DSH_MOBILE_BRIDGE__?.scrollToTop?.()"
             case .toggleRightPanel:
                 script = "globalThis.__DSH_MOBILE_BRIDGE__?.toggleRightPanel?.()"
-            case .reconnect:
+            case .reconnect(_, let userInitiated):
+                if userInitiated { userReconnect(in: webView); return }
                 guard holdUntil <= Date() else { return }
                 script = "globalThis.__DSH_MOBILE_BRIDGE__?.reconnect?.()"
             case .wakeCheck:
@@ -471,7 +486,8 @@ struct OfficialWebView: UIViewRepresentable {
             if type == "reconnect-budget", let raw = payload["budget"] as? [String: Any],
                let data = try? JSONSerialization.data(withJSONObject: raw),
                let budget = try? JSONDecoder().decode(ReconnectBudget.self, from: data) {
-                ReconnectBudget.devices[session.desktopID] = budget
+                guard budget.accept(for: session.desktopID) else { return }
+                if payload["userOverride"] as? Bool == true { onBridgeMessage(["type": "page-user-override"]) }
                 if let route = installedRoute { install(route, in: controller) }
                 return
             }

@@ -2636,19 +2636,25 @@ function reconnectRules(p) {
     // HTML + WSS ends transport grace. Cordis can still be installing subscriptions.
     return handshake(s, now) || (!s.confirmed && now < s.deadline) || now < s.passiveUntil;
   }
-  function shouldForceReconnect(s, now, reason = 'bridge') {
+  function shouldForceReconnect(s, now, reason = 'bridge', userInitiated = false) {
+    if (userInitiated) return !userForcePending(s, now);
     const b = s.budget;
     if (now < b.until || b.decision || waiting(s, now) ||
         (b.lastForce !== null && now - b.lastForce < p.minForceReconnectGapMs)) return false;
     if (reason === 'poke-wsAlive') return s.open && s.samples >= p.wsAliveSamples;
     return !s.connected;
   }
+  function userForcePending(s, now) {
+    const last = s.budget.lastUserForce;
+    return last != null && (now - last < p.minForceReconnectGapMs ||
+      (!s.connected && now - last < p.handshakeGraceMs && waiting(s, now)));
+  }
   function next(s, event, now) {
     const b = s.budget;
     const reset = { firstFalse: null, samples: 0 };
     const activity = { ...reset, epoch: s.epoch + 1 };
     const trip = at => ({ ...s, ...activity, budget: { ...b, until: at + p.breakerCooldownMs,
-      decision: 0, forces: 0, closes: 0, lastClose: null } });
+      decision: 0, forces: 0, closes: 0, lastClose: null, lastUserForce: null } });
     switch (event.type) {
       case 'tick': return b.decision && now >= b.decision ? trip(b.decision) : s;
       case 'loaded': return { ...s, loaded: true };
@@ -2677,7 +2683,16 @@ function reconnectRules(p) {
         const samples = now - firstFalse >= p.confirmWindowMs ? Math.min(p.wsAliveSamples, s.samples + 1) : 1;
         return { ...s, firstFalse, samples };
       }
+      case 'clear-budget': {
+        // Keep force timestamps: clearing a breaker cannot give automatic callers a shorter gap.
+        const latest = (a, b) => a == null ? b ?? null : b == null ? a : Math.max(a, b);
+        return { ...s, ...activity, budget: { ...b, ...event.seed, lastForce: latest(b.lastForce, event.seed?.lastForce),
+          lastUserForce: latest(b.lastUserForce, event.seed?.lastUserForce),
+          forces: 0, decision: 0, until: 0, closes: 0, lastClose: null } };
+      }
       case 'forced': {
+        if (event.userInitiated) return { ...s, ...reset, confirmed: false, deadline: now + p.handshakeGraceMs,
+          budget: { ...b, lastForce: now, lastUserForce: now } };
         const forces = b.forces + 1;
         return { ...s, ...reset, budget: { ...b, lastForce: now, forces,
           decision: forces >= p.breakerAfter ? now + p.breakerDecisionMs : 0 } };
@@ -2685,7 +2700,7 @@ function reconnectRules(p) {
       default: return s;
     }
   }
-  return { initial, handshake, waiting, shouldForceReconnect, next };
+  return { initial, handshake, waiting, userForcePending, shouldForceReconnect, next };
 }
 export const { initial: initialForceState, shouldForceReconnect, next: nextForceState } = reconnectRules(RECONNECT_POLICY);
 
@@ -3962,7 +3977,7 @@ export const MOBILE_SHELL_JS = `(() => {
   let savedBudget;
   try { savedBudget = JSON.parse(localStorage.getItem(budgetKey)); } catch {}
   const nativeBudget = globalThis.__DSH_RECONNECT_BUDGET__;
-  if (nativeBudget && (!savedBudget || nativeBudget.updated >= savedBudget.updated)) savedBudget = nativeBudget;
+  if (nativeBudget && (!savedBudget || (nativeBudget.resetID && nativeBudget.resetID !== savedBudget.resetID) || nativeBudget.updated >= savedBudget.updated)) savedBudget = nativeBudget;
   const navigationStart = globalThis.performance?.timeOrigin;
   let forceState = rules.initial(Number.isFinite(navigationStart) ? Math.min(navigationStart, Date.now()) : Date.now(), savedBudget);
   const suppressedSources = new Set();
@@ -3983,10 +3998,10 @@ export const MOBILE_SHELL_JS = `(() => {
     forceState = rules.next(old, event, now);
     if (old.firstFalse !== null && forceState.firstFalse === null) clearTimeout(confirmTimer);
     if (forceState.budget === old.budget) return;
-    const b = { ...forceState.budget, updated: now };
+    const b = { ...forceState.budget, updated: Math.max(forceState.budget.updated ?? 0, now) };
     forceState = { ...forceState, budget: b };
     try { localStorage.setItem(budgetKey, JSON.stringify(forceState.budget)); } catch {}
-    post({ type: 'reconnect-budget', budget: forceState.budget }); // Control traffic also works with diagnostics disabled.
+    post({ type: 'reconnect-budget', budget: forceState.budget, userOverride: event.type === 'clear-budget' && !event.seed }); // Control traffic also works with diagnostics disabled.
     if (b.decision !== old.budget.decision) armDecision();
     if (b.until > old.budget.until) diagnostic('breaker-open', event.type === 'close' ? 'upstream-1011' : 'force-timeout', now);
   }
@@ -3996,7 +4011,15 @@ export const MOBILE_SHELL_JS = `(() => {
     if (due) decisionTimer = setTimeout(() => applyForceEvent({ type: 'tick' }), Math.max(0, due - Date.now()));
   }
   armDecision();
-  if (savedBudget) post({ type: 'reconnect-budget', budget: forceState.budget });
+  if (savedBudget) {
+    if (savedBudget === nativeBudget) {
+      try { localStorage.setItem(budgetKey, JSON.stringify(forceState.budget)); } catch {}
+    }
+    post({ type: 'reconnect-budget', budget: forceState.budget });
+  }
+  function applyNativeBudget(seed) {
+    if (seed?.resetID && seed.resetID !== forceState.budget.resetID) applyForceEvent({ type: 'clear-budget', seed });
+  }
   const loaded = () => applyForceEvent({ type: 'loaded' });
   if (document.readyState === 'complete') loaded();
   else globalThis.addEventListener?.('load', loaded, { once: true });
@@ -4423,13 +4446,14 @@ export const MOBILE_SHELL_JS = `(() => {
     return false;
   }
 
-  function reconnect(force = false, source = 'bridge') {
+  function reconnect(force = false, source = 'bridge', userInitiated = false) {
     const now = Date.now();
     applyForceEvent({ type: 'tick' }, now); // A suspended WebKit timer may be late.
-    if (forcing || now < forceState.budget.until) return false;
-    if (latestMux?.readyState >= 2 && forceState.open) return false; // close event/1011 classification pending
+    if (forcing || (userInitiated && rules.userForcePending(forceState, now))) return false;
+    if (userInitiated) applyForceEvent({ type: 'clear-budget' }, now);
+    if (!userInitiated && latestMux?.readyState >= 2 && forceState.open) return false; // close event/1011 classification pending
     if (!force && wsState === 'connected' && latestMux?.readyState === 1) return true;
-    if (!rules.shouldForceReconnect(forceState, now, source)) {
+    if (!rules.shouldForceReconnect(forceState, now, source, userInitiated)) {
       if (rules.waiting(forceState, now) && !suppressedSources.has(source)) {
         suppressedSources.add(source);
         diagnostic('suppressed', source, now);
@@ -4443,7 +4467,7 @@ export const MOBILE_SHELL_JS = `(() => {
     forcing = true;
     try {
       if (cordis.reconnect() === false) return false;
-      applyForceEvent({ type: 'forced' }, now);
+      applyForceEvent({ type: 'forced', userInitiated }, now);
       if (forceState.connected && wsState === 'connected' && source !== 'poke-wsAlive') applyForceEvent({ type: 'state', state: 'connected' }, now);
       diagnostic('force-reconnect', source, now, lastForce === null ? null : now - lastForce, samples, transport);
       return true;
@@ -4552,8 +4576,16 @@ export const MOBILE_SHELL_JS = `(() => {
     snapshotStatus: () => snapshotStatus,
     scheduleVisualSnapshot,
     onLaunchHydrated,
-    reconnect,
+    reconnect: (force = false) => reconnect(force), // Legacy/direct bridge is automatic.
     wakeCheck,
+    applyNativeBudget,
+    forceUserReconnect() {
+      if (lifecycle?.isSuspended() || document.visibilityState === 'hidden') return 'inactive';
+      if (forcing || rules.userForcePending(forceState, Date.now())) return 'pending';
+      const accepted = reconnect(true, 'userRetry', true);
+      resetSync(true);
+      return accepted ? 'started' : 'unavailable';
+    },
     setKeyboard,
     applyDisplayPrefs,
     onTaskEvent,

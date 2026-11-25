@@ -11,10 +11,23 @@ assets = json.loads(subprocess.check_output([
     "node", "--input-type=module", "-e",
     """const m=await import(process.argv[1]); console.log(JSON.stringify({
       html:m.injectMobileShell('<html><head><meta charset="utf-8"></head><body><div id="root"><section data-conversation-content data-conversation-session="temporary" data-content-phase="hero"><div data-composer-card>NEW CHAT PLACEHOLDER</div></section></div></body></html>'),
-      css:m.MOBILE_SHELL_CSS,js:m.MOBILE_SHELL_JS
+      css:m.MOBILE_SHELL_CSS,js:m.MOBILE_SHELL_JS,policy:m.RECONNECT_POLICY
     }));""",
     (repo / "desktop/lib/mobile-shell.mjs").as_uri()
 ], text=True, encoding="utf-8"))
+
+# [elapsed milliseconds since mux start, automatic bridge method, calls, cumulative forces].
+# npm test also checks these same expected totals against the shipped policy.
+RECONNECT_TIMELINE = [
+    [0, "wakeCheck", 10, 0],
+    [1600, "wakeCheck", 1, 0],
+    [1600, "credentialsChanged", 1, 0],
+    [11500, "wakeCheck", 1, 0],
+    [12100, "wakeCheck", 10, 1],
+    [13700, "wakeCheck", 1, 1],
+    [13700, "credentialsChanged", 1, 1],
+    [17200, "wakeCheck", 1, 2]
+]
 
 with sync_playwright() as pw:
     for engine, env in [(pw.chromium, "CHROMIUM_PATH"), (pw.webkit, "WEBKIT_PATH")]:
@@ -31,7 +44,9 @@ with sync_playwright() as pw:
                 v:2,ts:Date.now(),sessionId:'history',bg:'#151517',fg:'#fff',
                 html:'<div data-dml-snap-content style="padding:40px">SAVED HISTORY</div>'
               }));
-              window.fetch=()=>{__calls++;return new Promise(()=>{});};
+              window.WebSocket=class extends EventTarget { readyState=0; };
+              window.__pokes=0;
+              window.fetch=path=>{__calls++;if(String(path).includes('poke=1'))__pokes++;return new Promise(()=>{});};
               window.__DSH_MOBILE_CORDIS__={reconnect:()=>{__reconnects++;return true;}};
             """)
             def route(r):
@@ -76,20 +91,23 @@ with sync_playwright() as pw:
             assert any(not f["cover"] for f in paint_frames)
             assert all(f["bottom"]<=1 for f in paint_frames if not f["cover"]), paint_frames
             print(engine.name+": first uncovered frame already shows latest record",flush=True)
-            # All simultaneous wake sources share the same recovery/probe.
-            result=page.evaluate("""()=>{
-              const before=__calls;
-              for(let i=0;i<10;i++)__DSH_MOBILE_BRIDGE__.wakeCheck();
-              return {probes:__calls-before,reconnects:__reconnects};
-            }""")
-            assert result=={"probes":1,"reconnects":1}, result
-            page.clock.fast_forward(1600)
-            page.evaluate("__DSH_MOBILE_BRIDGE__.wakeCheck()")
-            assert page.evaluate("__reconnects")==2
-            # After failure grace, a newly issued credential must be usable immediately.
-            page.evaluate("__DSH_MOBILE_BRIDGE__.credentialsChanged()")
-            assert page.evaluate("__reconnects")==3
-            page.clock.fast_forward(1600)
+            # Start a fresh transport handshake after the paint fixture advanced the clock.
+            page.evaluate("new WebSocket('wss://shell.test/api/remote.mux'); void 0")
+            previous = 0
+            for elapsed, method, repeats, expected in RECONNECT_TIMELINE:
+                if elapsed > previous:
+                    page.clock.fast_forward(elapsed - previous)
+                probes, forces = page.evaluate("""([method, repeats])=>{
+                  const before=__pokes;
+                  for(let i=0;i<repeats;i++) __DSH_MOBILE_BRIDGE__[method]();
+                  return [__pokes-before, __reconnects];
+                }""", [method, repeats])
+                if repeats > 1:
+                    assert probes == 1, (elapsed, probes)
+                assert forces == expected, (elapsed, method, forces, expected)
+                previous = elapsed
+            print(engine.name+": verified wake storm, handshake grace and minimum force gap PASS",flush=True)
+            page.clock.fast_forward(assets["policy"]["minForceReconnectGapMs"])
             lifecycle=page.evaluate("""()=>{
               const events = (target, ...types) => types.forEach(name=>target.dispatchEvent(new Event(name)));
               const start = [__calls, __reconnects];

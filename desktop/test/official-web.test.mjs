@@ -1652,3 +1652,82 @@ test('a silent third failed force trips by timer, survives a document replacemen
   assert.equal(forced, 4);
   assert.deepEqual(all.flat().filter(m => m.type === 'breaker-open').map(m => m.source), ['force-timeout']);
 });
+
+test('explicit reconnect clears a tripped device in grace, coalesces ten taps and leaves automatic callers guarded', () => {
+  const { ctx, storage, calls } = launchFixture('light');
+  const key = 'dml.reconnect-budget.v1';
+  let now = 100, count = 0;
+  const tripped = { updated: now, until: now + RECONNECT_POLICY.breakerCooldownMs, decision: now + 20,
+    forces: RECONNECT_POLICY.breakerAfter, closes: 2, lastClose: now, lastForce: now - 10 };
+  storage.set(key, JSON.stringify(tripped));
+  ctx.Date = class extends Date { static now() { return now; } };
+  ctx.fetch = () => new Promise(() => {});
+  ctx.WebSocket = class extends EventTarget { readyState = 0; };
+  ctx.__DSH_MOBILE_CORDIS__ = { reconnect() {
+    count++;
+    assert.equal(bridge.forceUserReconnect(), 'pending'); // Synchronous Cordis re-entry.
+    new ctx.WebSocket('/api/remote.mux');
+    return true;
+  } };
+  vm.runInContext(MOBILE_SHELL_JS, ctx);
+  const bridge = ctx.__DSH_MOBILE_BRIDGE__;
+  const auto = () => { bridge.wakeCheck(); bridge.credentialsChanged(); bridge.reconnect(true, 'userRetry', true); };
+  auto(); assert.equal(count, 0);
+  assert.equal(JSON.parse(storage.get(key)).until, tripped.until);
+  for (let i = 0; i < 10; i++) assert.equal(bridge.forceUserReconnect(), i ? 'pending' : 'started');
+  assert.equal(count, 1);
+  const cleared = JSON.parse(storage.get(key));
+  assert.deepEqual([cleared.forces, cleared.decision, cleared.until, cleared.closes, cleared.lastClose], [0, 0, 0, 0, null]);
+  assert.equal(cleared.lastForce, now);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.filter(m => m.type === 'reconnect-budget').at(-1).budget)), cleared);
+  assert.ok(calls.some(m => m.userOverride && m.budget.until === 0));
+  now += RECONNECT_POLICY.minForceReconnectGapMs;
+  auto(); assert.equal(count, 1);
+  assert.equal(bridge.forceUserReconnect(), 'pending'); // The mux is still handshaking.
+  now += RECONNECT_POLICY.handshakeGraceMs - RECONNECT_POLICY.minForceReconnectGapMs;
+  auto(); assert.equal(count, 2);
+});
+
+test('native reset reaches the retained document and wins over a stale origin on next document start', () => {
+  const key = 'dml.reconnect-budget.v1';
+  const now = 10000;
+  const old = { updated: now + 1, until: now + RECONNECT_POLICY.breakerCooldownMs, forces: 3, decision: 0, closes: 2, lastClose: now };
+  const seed = { resetID: 'A786F75C-5D84-447F-90E2-B0B65D509BC8', updated: now, until: 0, forces: 0, decision: 0, closes: 0, lastClose: null };
+  for (const retained of [true, false]) {
+    const { ctx, storage, calls } = launchFixture('light');
+    ctx.Date = class extends Date { static now() { return now; } };
+    storage.set(key, JSON.stringify(old));
+    if (!retained) ctx.__DSH_RECONNECT_BUDGET__ = seed;
+    vm.runInContext(MOBILE_SHELL_JS, ctx);
+    const bridge = ctx.__DSH_MOBILE_BRIDGE__;
+    if (retained) bridge.applyNativeBudget(seed);
+    const saved = JSON.parse(storage.get(key));
+    assert.equal(saved.resetID, seed.resetID);
+    assert.deepEqual([saved.forces, saved.decision, saved.until, saved.closes, saved.lastClose], [0, 0, 0, 0, null]);
+    assert.deepEqual(JSON.parse(JSON.stringify(calls.filter(m => m.type === 'reconnect-budget').at(-1).budget)), saved);
+    assert.equal(bridge.reconnect(true), false); // Applying a native seed does not grant user intent.
+  }
+});
+
+test('a newly tripped breaker releases an earlier user attempt before the next explicit retry', () => {
+  const { ctx, storage } = launchFixture('light');
+  let now = 1000, forces = 0;
+  ctx.Date = class extends Date { static now() { return now; } };
+  ctx.WebSocket = class extends EventTarget { readyState = 0; };
+  ctx.fetch = () => new Promise(() => {});
+  ctx.__DSH_MOBILE_CORDIS__ = { reconnect() { forces++; } };
+  vm.runInContext(MOBILE_SHELL_JS, ctx);
+  const bridge = ctx.__DSH_MOBILE_BRIDGE__;
+  assert.equal(bridge.forceUserReconnect(), 'started');
+  for (let i = 0; i < RECONNECT_POLICY.breakerAfter; i++) {
+    now++;
+    const socket = new ctx.WebSocket('/api/remote.mux');
+    socket.readyState = 3;
+    socket.dispatchEvent(Object.assign(new Event('close'), { code: 1011 }));
+  }
+  assert.ok(JSON.parse(storage.get('dml.reconnect-budget.v1')).until > now);
+  bridge.wakeCheck(); assert.equal(forces, 1);
+  assert.equal(bridge.forceUserReconnect(), 'started');
+  assert.equal(bridge.forceUserReconnect(), 'pending');
+  assert.equal(forces, 2);
+});

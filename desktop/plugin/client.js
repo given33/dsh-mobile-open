@@ -2305,7 +2305,12 @@ window.__ModuleLoader__.load({
               }, h('span', { className: 'dml-hub-quick-circle', 'aria-hidden': true }, svgIcon([h('path', { d: 'M3 6.5A1.5 1.5 0 0 1 4.5 5h3l1.5 1.5h6.5A1.5 1.5 0 0 1 17 8v6.5a1.5 1.5 0 0 1-1.5 1.5h-11A1.5 1.5 0 0 1 3 14.5v-8Z' })], 17)), h('span', null, '文件栏')),
               h('button', {
                 type: 'button', className: 'dml-hub-quick-circle-btn',
-                onClick: () => { globalThis.__DSH_MOBILE_BRIDGE__?.wakeCheck?.(); setHubState({ open: false }); globalThis.__DSH_MOBILE_BRIDGE__?.showToast?.('已触发重连校验') },
+                onClick: () => {
+                  const bridge = globalThis.__DSH_MOBILE_BRIDGE__
+                  const result = bridge?.forceUserReconnect?.()
+                  setHubState({ open: false })
+                  bridge?.showToast?.(result === 'started' ? '已触发重连校验' : result === 'pending' ? '正在重连，请稍候' : '暂时无法重连，请使用设备菜单重试')
+                },
               }, h('span', { className: 'dml-hub-quick-circle', 'aria-hidden': true }, svgIcon([h('path', { d: 'M16.5 10a6.5 6.5 0 1 1-1.9-4.6' }), h('path', { d: 'M16.5 3.5v3.5h-3.5' })], 17)), h('span', null, '重连')),
               h('button', {
                 type: 'button', className: 'dml-hub-quick-circle-btn',
