@@ -451,13 +451,21 @@ export function createLinkServer({
       if (path === '/mobile/v1/sync' && req.method === 'GET') {
         // A same-origin shell may attach timing metadata to an ordinary, non-poking sync read.
         const source = req.headers['x-dsh-force-source'];
-        if (journal && browserRequests.has(req) && ['wakeCheck', 'visibility', 'online', 'pageshow', 'resume', 'poke-wsAlive', 'bridge'].includes(source) && bridgeLimit.allow(device.id)) {
+        const kind = req.headers['x-dsh-link-event'] ?? 'forced-reconnect';
+        const validSource = kind === 'breaker-open' ? ['upstream-1011', 'force-timeout'].includes(source)
+          : ['wakeCheck', 'visibility', 'online', 'pageshow', 'resume', 'poke-wsAlive', 'bridge', 'credentialsChanged'].includes(source);
+        if (journal && browserRequests.has(req) && validSource &&
+            ['forced-reconnect', 'force-reconnect', 'suppressed', 'breaker-open'].includes(kind) && bridgeLimit.allow(device.id)) {
           const when = Number(req.headers['x-dsh-force-at']);
           const age = req.headers['x-dsh-mux-age'], ready = req.headers['x-dsh-mux-ready'];
+          const gap = req.headers['x-dsh-force-gap'], samples = req.headers['x-dsh-alive-samples'];
           if (Number.isSafeInteger(when) && when > 0 && when <= 8.64e15) {
-            journal.record({ type: 'forced-reconnect', source, device: deviceTag(device.id),
-              socket: muxTag(req.headers['x-dsh-mux']), clientAt: new Date(when).toISOString(),
-              muxAgeMs: /^\d{1,12}$/.test(age) ? Number(age) : null, readyState: /^[0-3]$/.test(ready) ? Number(ready) : null });
+            const event = { source, reason: source, device: deviceTag(device.id), socket: muxTag(req.headers['x-dsh-mux']),
+              clientAt: new Date(when).toISOString(), gapMs: /^\d{1,15}$/.test(gap) ? Number(gap) : null,
+              wsAliveSamples: /^[0-2]$/.test(samples) ? Number(samples) : null,
+              muxAgeMs: /^\d{1,12}$/.test(age) ? Number(age) : null, readyState: /^[0-3]$/.test(ready) ? Number(ready) : null };
+            journal.record({ type: kind, ...event });
+            if (kind === 'force-reconnect') journal.record({ type: 'forced-reconnect', ...event }); // 001 consumers
           }
         }
         const poke = url.searchParams.get('poke') === '1';

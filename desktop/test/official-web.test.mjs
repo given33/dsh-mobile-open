@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { brotliDecompressSync, gunzipSync } from 'node:zlib';
 import vm from 'node:vm';
-import { readHarnessSurface, PREVIEW_COMPAT_JS } from '../lib/mobile-shell.mjs';
+import { readHarnessSurface, PREVIEW_COMPAT_JS, RECONNECT_POLICY } from '../lib/mobile-shell.mjs';
 import { WebSocket } from 'ws';
 import { createLinkService } from '../lib/link-service.mjs';
 import { createOfficialWeb } from '../lib/official-web.mjs';
@@ -1316,7 +1316,7 @@ test('launch theme survives passive adoption; explicit setTheme unlocks and noti
   }
 });
 
-test('credential refresh preserves pending mux; forced reconnect bypasses debounce', async () => {
+test('credential refresh preserves pending mux; only confirmed dead pokes can replace a subscribed mux', async () => {
   const {ctx,calls} = launchFixture('light'); let count=0, now=15000;
   ctx.Date = class extends Date {static now(){return now;}};
   ctx.document.visibilityState = 'visible'; ctx.fetch = async () => ({ok:true,json:async()=>({wsAlive:false})});
@@ -1326,15 +1326,18 @@ test('credential refresh preserves pending mux; forced reconnect bypasses deboun
   const bridge = ctx.__DSH_MOBILE_BRIDGE__;
   const old = new ctx.WebSocket('/api/remote.mux'), ws = new ctx.WebSocket('/api/remote.mux');
   bridge.credentialsChanged(); assert.equal(count,0);
-  ws.readyState=1; bridge.credentialsChanged(); assert.equal(count,0);
+  ws.readyState=1; ws.dispatchEvent(new Event('open')); bridge.credentialsChanged(); assert.equal(count,0);
   bridge.setLogicalConnection('connected'); old.dispatchEvent(new Event('close'));
   assert.equal(bridge.setLogicalConnection('disconnected'),false);
   assert.equal(calls.some(m=>m.state==='disconnected'),false);
   bridge.credentialsChanged(); bridge.wakeCheck(); await new Promise(r=>setImmediate(r)); assert.equal(count,0);
-  now += 1001; bridge.wakeCheck(); await new Promise(r=>setImmediate(r)); assert.equal(count,1);
+  now += 1001; bridge.wakeCheck(); await new Promise(r=>setImmediate(r)); assert.equal(count,0);
+  ws.dispatchEvent(new Event('message'));
+  now += 3000; bridge.wakeCheck(); await new Promise(r=>setImmediate(r)); assert.equal(count,0);
+  now += 3000; bridge.wakeCheck(); await new Promise(r=>setImmediate(r)); assert.equal(count,1);
   ws.readyState=3; ws.dispatchEvent(new Event('close')); now+=401;
-  bridge.reconnect(); bridge.reconnect(); assert.equal(count,2);
-  bridge.reconnect(true); assert.equal(count,3);
+  bridge.reconnect(); bridge.reconnect(true); assert.equal(count,1);
+  now+=4599; bridge.reconnect(); bridge.reconnect(true); assert.equal(count,2);
 });
 
 async function officialMux(t, overrides) {
@@ -1418,7 +1421,7 @@ test('foreground wake restores a closed loopback TLS mux through its first subsc
   } finally { ws?.terminate(); }
 });
 
-test('foreground retries an unconfirmed open mux immediately but protects the first second of a handshake', () => {
+test('foreground, credentials and direct bridge share the handshake deadline and minimum gap', () => {
   const {ctx} = launchFixture('light'); let now=5000, count=0;
   ctx.Date = class extends Date {static now(){return now;}};
   ctx.document.visibilityState='visible'; ctx.fetch=()=>new Promise(()=>{});
@@ -1427,13 +1430,17 @@ test('foreground retries an unconfirmed open mux immediately but protects the fi
   vm.runInContext(MOBILE_SHELL_JS,ctx); const bridge=ctx.__DSH_MOBILE_BRIDGE__;
   const ws=new ctx.WebSocket('/api/remote.mux');
   now+=999; bridge.wakeCheck(); assert.equal(count,0);
-  now++; bridge.wakeCheck(); assert.equal(count,1);
-  ws.readyState=1; bridge.credentialsChanged(); assert.equal(count,1);
-  bridge.wakeCheck(); assert.equal(count,2);
-  now+=1999; bridge.credentialsChanged(); assert.equal(count,2);
-  now++; bridge.credentialsChanged(); assert.equal(count,3);
+  now++; bridge.wakeCheck(); assert.equal(count,0);
+  ws.readyState=1; ws.dispatchEvent(new Event('open')); bridge.credentialsChanged(); assert.equal(count,0);
+  for (const age of [2000,3000,3500,11999]) {
+    now = 5000 + age; bridge.wakeCheck(); bridge.credentialsChanged(); bridge.reconnect(true); assert.equal(count,0);
+  }
+  now++; bridge.credentialsChanged(); assert.equal(count,1);
+  bridge.wakeCheck(); bridge.reconnect(true); assert.equal(count,1);
+  now+=4999; bridge.credentialsChanged(); assert.equal(count,1);
+  now++; bridge.wakeCheck(); assert.equal(count,2);
   assert.ok(bridge.setLogicalConnection('connected')); now+=10000;
-  bridge.credentialsChanged(); bridge.wakeCheck(); assert.equal(count,3);
+  bridge.credentialsChanged(); bridge.wakeCheck(); bridge.reconnect(true); assert.equal(count,2);
 });
 
 
@@ -1482,7 +1489,10 @@ test('link journal correlates a shell wake with its WSS close and distinguishes 
   assert.ok(Number.isFinite(Date.parse(forced.clientAt)));
   assert.equal(forced.muxAgeMs, 30_000); assert.equal(forced.readyState, 1);
   const first = events.filter(e => e.socket === forced.socket);
-  assert.equal(first.length, 3);
+  assert.equal(first.length, 4);
+  const policyEvent = first.find(e => e.type === 'force-reconnect');
+  assert.equal(policyEvent.reason, 'wakeCheck'); assert.equal(policyEvent.gapMs, null);
+  assert.equal(policyEvent.wsAliveSamples, 0);
   assert.ok(first.every(e => e.device === forced.device && Number.isFinite(Date.parse(e.at))));
   const phone = first.find(e => e.type === 'disconnected');
   assert.equal(phone.source, 'phone-close'); assert.equal(phone.code, 4001);
@@ -1518,4 +1528,127 @@ test('disabling link events omits the journal and shell telemetry', async t => {
   const ws = new WebSocket(url, options);
   await once(ws, 'open'); const closed = once(ws, 'close'); ws.close(); await closed;
   await link.stop(); await assert.rejects(readFile(journalFile), { code: 'ENOENT' });
+});
+
+// A single virtual link drives both the old bridge and the shipped injection. Opening
+// TCP, loading HTML, committing subscriptions and replacing a mux are separate events.
+function legacyPolicy({ now, current, force }) {
+  let state = 'connecting';
+  return { setLogicalConnection(next) { state = next; return true; }, wakeCheck() {
+    const { ws, created } = current();
+    if (ws.readyState >= 2 || (state !== 'connected' && !(ws.readyState === 0 && now() - created < 1000))) force();
+  } };
+}
+function simulateCloud({ legacy = false, handshakeMs = 4000, upstreamEvery = 0 }) {
+  const { ctx, calls } = launchFixture('light');
+  let now = 0, ws, created, forceCount = 0, passive = 0, closes = 0, load;
+  const transitions = [];
+  let state = 'connecting';
+  ctx.Date = class extends Date { static now() { return now; } };
+  ctx.document.visibilityState = 'visible';
+  ctx.WebSocket = class extends EventTarget { readyState = 0; };
+  ctx.addEventListener = (type, fn) => { if (type === 'load') load = fn; };
+  ctx.__DSH_MOBILE_SHELL__.linkEvents = true;
+  ctx.fetch = () => new Promise(() => {}); // No network in the model.
+  function transition(next) {
+    if (next !== state) { state = next; transitions.push([now, next]); }
+  }
+  function create() {
+    ws = new ctx.WebSocket('/api/remote.mux'); created = now;
+    bridge.setLogicalConnection('connecting'); transition('connecting');
+  }
+  function force() { forceCount++; create(); return true; }
+  ctx.__DSH_MOBILE_CORDIS__ = { reconnect: force };
+  if (!legacy) vm.runInContext(MOBILE_SHELL_JS, ctx);
+  const bridge = legacy ? legacyPolicy({ now: () => now, current: () => ({ ws, created }), force }) : ctx.__DSH_MOBILE_BRIDGE__;
+  create();
+  let nextRecovery = legacy ? 2000 : RECONNECT_POLICY.recoveryDelaysMs[0], step = 0;
+  for (now = 100; now <= 60000; now += 100) {
+    if (now === 500) load?.();
+    if (now - created === 100) { ws.readyState = 1; ws.dispatchEvent(new Event('open')); }
+    if (now - created === handshakeMs && bridge.setLogicalConnection('connected')) transition('connected');
+    if (upstreamEvery && now % upstreamEvery === 0) {
+      ws.readyState = 3; ws.dispatchEvent(Object.assign(new Event('close'), { code: 1011 }));
+      transition('disconnected'); closes++;
+      bridge.wakeCheck(); bridge.credentialsChanged(); bridge.reconnect(true); // Race the page's own retry.
+      create(); passive++;
+    }
+    if (state !== 'connected' && now >= nextRecovery) {
+      bridge.wakeCheck();
+      nextRecovery = now + (legacy ? 2000 : RECONNECT_POLICY.recoveryDelaysMs[Math.min(++step, 4)]);
+    }
+    if (!legacy && now % 1000 === 0) { bridge.credentialsChanged(); bridge.wakeCheck(); }
+  }
+  return { forceCount, passive, closes, transitions, breakers: calls.filter(x => x.type === 'breaker-open').map(x => x.source),
+    breakerDeadlines: [...new Set(calls.filter(x => x.type === 'reconnect-budget' && x.budget.until).map(x => x.budget.until))] };
+}
+
+test('60s legacyPolicy reproduces a 4s cloud handshake loop', t => {
+  const r = simulateCloud({ legacy: true });
+  assert.ok(r.forceCount >= 3); assert.deepEqual(r.transitions, []);
+  t.diagnostic(`forced=${r.forceCount}, connected=0`);
+});
+test('60s injected bridge converges once at 4s with zero forces', t => {
+  const r = simulateCloud({});
+  assert.equal(r.forceCount, 0); assert.deepEqual(r.transitions, [[4000, 'connected']]);
+  t.diagnostic(`forced=${r.forceCount}, transitions=${JSON.stringify(r.transitions)}`);
+});
+test('60s upstream 1011 every 4s stays passive and opens one breaker on the third close', t => {
+  const r = simulateCloud({ handshakeMs: 1000, upstreamEvery: 4000 });
+  assert.equal(r.forceCount, 0); assert.equal(r.closes, 15); assert.equal(r.passive, r.closes);
+  assert.deepEqual(r.breakers, ['upstream-1011']); assert.deepEqual(r.breakerDeadlines, [12000 + 60000]);
+  t.diagnostic(`upstream=${r.closes}, passive=${r.passive}, forced=0, breaker-open@12000ms=1`);
+});
+
+test('confirmation timer takes its own second poke and rejects an in-flight sample after an item', async () => {
+  const { ctx, calls } = launchFixture('light');
+  let now = 20000, id = 0, resolve, pokes = 0, count = 0;
+  const timers = new Map();
+  ctx.Date = class extends Date { static now() { return now; } };
+  ctx.setTimeout = (fn, delay) => { timers.set(++id, { fn, at: now + delay }); return id; };
+  ctx.clearTimeout = key => timers.delete(key);
+  ctx.document.visibilityState = 'visible';
+  ctx.WebSocket = class extends EventTarget { readyState = 0; };
+  ctx.fetch = path => {
+    if (path.includes('poke=1')) { pokes++; return new Promise(r => { resolve = r; }); }
+    return new Promise(() => {});
+  };
+  ctx.__DSH_MOBILE_CORDIS__ = { reconnect: () => { count++; } };
+  vm.runInContext(MOBILE_SHELL_JS, ctx);
+  const ws = new ctx.WebSocket('/api/remote.mux'), bridge = ctx.__DSH_MOBILE_BRIDGE__;
+  ws.readyState = 1; ws.dispatchEvent(new Event('open')); bridge.setLogicalConnection('connected');
+  const answer = async () => { resolve({ ok: true, json: async () => ({ wsAlive: false }) }); await new Promise(r => setImmediate(r)); };
+  bridge.wakeCheck(); ws.dispatchEvent(new Event('message')); await answer();
+  assert.equal([...timers.values()].some(t => t.at === now + 3000), false);
+  now += 1000; bridge.wakeCheck(); await answer(); assert.equal(count, 0);
+  const confirmation = [...timers.values()].find(t => t.at === now + 3000);
+  assert.ok(confirmation); now += 3000; confirmation.fn(); await answer();
+  assert.equal(pokes, 3); assert.equal(count, 1);
+  assert.ok(calls.some(m => m.type === 'reconnect-budget' && m.budget.forces === 1));
+  assert.equal(calls.some(m => m.type === 'link-force'), false); // Diagnostics off, guards still live.
+});
+
+test('a silent third failed force trips by timer, survives a document replacement, then expires', () => {
+  let now = 1000, forced = 0, id = 0;
+  const timers = new Map(), storage = new Map(), all = [];
+  function page() {
+    const { ctx, calls } = launchFixture('light'); all.push(calls);
+    ctx.Date = class extends Date { static now() { return now; } };
+    ctx.localStorage = { getItem: k => storage.get(k), setItem: (k, v) => storage.set(k, v) };
+    ctx.setTimeout = (fn, delay) => { timers.set(++id, { fn, at: now + delay }); return id; };
+    ctx.clearTimeout = key => timers.delete(key);
+    ctx.__DSH_MOBILE_SHELL__.linkEvents = true;
+    ctx.fetch = () => new Promise(() => {});
+    ctx.__DSH_MOBILE_CORDIS__ = { reconnect: () => { forced++; } };
+    vm.runInContext(MOBILE_SHELL_JS, ctx);
+    return ctx.__DSH_MOBILE_BRIDGE__;
+  }
+  let bridge = page();
+  for (now of [13000, 18000, 23000]) assert.equal(bridge.reconnect(true), true);
+  now = 33000; [...timers.values()].find(t => t.at === now).fn();
+  now++; bridge = page();
+  now = 92999; assert.equal(bridge.reconnect(true), false);
+  now++; assert.equal(bridge.reconnect(true), true);
+  assert.equal(forced, 4);
+  assert.deepEqual(all.flat().filter(m => m.type === 'breaker-open').map(m => m.source), ['force-timeout']);
 });

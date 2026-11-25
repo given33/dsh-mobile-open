@@ -2614,6 +2614,81 @@ export function readHarnessSurface(doc, computedStyle) {
   return { dark, bgBase, sidebarFill: brightness(sidebar) !== null ? sidebar : bgBase };
 }
 
+// Keep in lockstep with ReconnectPolicy in DSHMobile/App/AppModel.swift.
+export const RECONNECT_POLICY = Object.freeze({
+  handshakeGraceMs: 12000, confirmWindowMs: 3000, wsAliveSamples: 2,
+  minForceReconnectGapMs: 5000, breakerAfter: 3, breakerDecisionMs: 10000,
+  breakerCooldownMs: 60000, recoveryDelaysMs: Object.freeze([3500, 6000, 10000, 20000, 30000]),
+});
+
+// This factory is embedded verbatim in the document. All transitions are pure;
+// timers, WebKit messages, storage and Cordis calls live in the adapter below.
+function reconnectRules(p) {
+  function initial(now, budget = {}) {
+    return { deadline: now + p.handshakeGraceMs, loaded: false, open: false, connected: false,
+      confirmed: false, epoch: 0, firstFalse: null, samples: 0, passiveUntil: 0,
+      budget: { lastForce: null, forces: 0, decision: 0, until: 0, closes: 0, lastClose: null, ...budget } };
+  }
+  function handshake(s, now) {
+    return now < s.deadline && !s.confirmed && !(s.loaded && s.open);
+  }
+  function waiting(s, now) {
+    // HTML + WSS ends transport grace. Cordis can still be installing subscriptions.
+    return handshake(s, now) || (!s.confirmed && now < s.deadline) || now < s.passiveUntil;
+  }
+  function shouldForceReconnect(s, now, reason = 'bridge') {
+    const b = s.budget;
+    if (now < b.until || b.decision || waiting(s, now) ||
+        (b.lastForce !== null && now - b.lastForce < p.minForceReconnectGapMs)) return false;
+    if (reason === 'poke-wsAlive') return s.open && s.samples >= p.wsAliveSamples;
+    return !s.connected;
+  }
+  function next(s, event, now) {
+    const b = s.budget;
+    const reset = { firstFalse: null, samples: 0 };
+    const activity = { ...reset, epoch: s.epoch + 1 };
+    const trip = at => ({ ...s, ...activity, budget: { ...b, until: at + p.breakerCooldownMs,
+      decision: 0, forces: 0, closes: 0, lastClose: null } });
+    switch (event.type) {
+      case 'tick': return b.decision && now >= b.decision ? trip(b.decision) : s;
+      case 'loaded': return { ...s, loaded: true };
+      case 'mux': return { ...s, ...activity, open: false, confirmed: false, connected: false,
+        deadline: now + p.handshakeGraceMs };
+      case 'open': return { ...s, ...activity, open: true };
+      case 'item': return { ...s, ...activity };
+      case 'state': {
+        const connected = event.state === 'connected';
+        return { ...s, ...activity, connected, confirmed: s.confirmed || connected,
+          budget: connected && (b.forces || b.decision) ? { ...b, forces: 0, decision: 0 } : b };
+      }
+      case 'close': {
+        const closed = { ...s, ...activity, open: false, connected: false };
+        if (event.code !== 1011) return { ...closed, budget: { ...b, closes: 0, lastClose: null } };
+        closed.passiveUntil = now + p.handshakeGraceMs;
+        if (now < b.until) return closed;
+        const closes = b.lastClose !== null && now - b.lastClose <= p.handshakeGraceMs ? b.closes + 1 : 1;
+        return closes >= p.breakerAfter ? { ...closed, budget: trip(now).budget }
+          : { ...closed, budget: { ...b, closes, lastClose: now } };
+      }
+      case 'poke': {
+        if (event.epoch !== s.epoch || event.alive !== false || !s.open || waiting(s, now) || now < b.until)
+          return { ...s, ...reset };
+        const firstFalse = s.firstFalse ?? now;
+        const samples = now - firstFalse >= p.confirmWindowMs ? Math.min(p.wsAliveSamples, s.samples + 1) : 1;
+        return { ...s, firstFalse, samples };
+      }
+      case 'forced': {
+        const forces = b.forces + 1;
+        return { ...s, ...reset, budget: { ...b, lastForce: now, forces,
+          decision: forces >= p.breakerAfter ? now + p.breakerDecisionMs : 0 } };
+      }
+      default: return s;
+    }
+  }
+  return { initial, handshake, waiting, shouldForceReconnect, next };
+}
+export const { initial: initialForceState, shouldForceReconnect, next: nextForceState } = reconnectRules(RECONNECT_POLICY);
+
 export const MOBILE_SHELL_JS = `(() => {
   'use strict';
   if (globalThis.__DSH_MOBILE_SHELL_INSTALLED__) return;
@@ -3881,13 +3956,58 @@ export const MOBILE_SHELL_JS = `(() => {
 
   // 5. Passively observe DSH's /api/remote.mux WebSocket to report live sync state to Swift.
   let latestMux, latestMuxCreatedAt = 0, latestMuxTrace;
+  const policy = ${JSON.stringify(RECONNECT_POLICY)};
+  const rules = (${reconnectRules.toString()})(policy);
+  const budgetKey = 'dml.reconnect-budget.v1';
+  let savedBudget;
+  try { savedBudget = JSON.parse(localStorage.getItem(budgetKey)); } catch {}
+  const nativeBudget = globalThis.__DSH_RECONNECT_BUDGET__;
+  if (nativeBudget && (!savedBudget || nativeBudget.updated >= savedBudget.updated)) savedBudget = nativeBudget;
+  const navigationStart = globalThis.performance?.timeOrigin;
+  let forceState = rules.initial(Number.isFinite(navigationStart) ? Math.min(navigationStart, Date.now()) : Date.now(), savedBudget);
+  const suppressedSources = new Set();
+  let decisionTimer, confirmTimer, forcing = false;
+  function diagnostic(kind, reason, now, gapMs = null, samples = forceState.samples, transport = {}) {
+    if (!shell.linkEvents) return;
+    const trace = transport.trace ?? latestMuxTrace, age = transport.age ?? (latestMux ? now - latestMuxCreatedAt : null);
+    const ready = transport.ready ?? latestMux?.readyState;
+    post({ type: kind === 'force-reconnect' ? 'link-force' : kind, source: reason, gapMs, wsAliveSamples: samples });
+    void fetch('/mobile/v1/sync', { credentials: 'same-origin', cache: 'no-store', keepalive: true,
+      headers: { 'x-dsh-link-event': kind, 'x-dsh-force-source': reason, 'x-dsh-force-at': String(now),
+        'x-dsh-mux': trace ?? '', 'x-dsh-mux-age': String(age ?? ''), 'x-dsh-mux-ready': String(ready ?? ''),
+        'x-dsh-force-gap': String(gapMs ?? ''), 'x-dsh-alive-samples': String(samples) } }).catch(() => {});
+  }
+  function applyForceEvent(event, now = Date.now()) {
+    if (event.type !== 'tick' && forceState.budget.decision && now >= forceState.budget.decision) applyForceEvent({ type: 'tick' }, now);
+    const old = forceState;
+    forceState = rules.next(old, event, now);
+    if (old.firstFalse !== null && forceState.firstFalse === null) clearTimeout(confirmTimer);
+    if (forceState.budget === old.budget) return;
+    const b = { ...forceState.budget, updated: now };
+    forceState = { ...forceState, budget: b };
+    try { localStorage.setItem(budgetKey, JSON.stringify(forceState.budget)); } catch {}
+    post({ type: 'reconnect-budget', budget: forceState.budget }); // Control traffic also works with diagnostics disabled.
+    if (b.decision !== old.budget.decision) armDecision();
+    if (b.until > old.budget.until) diagnostic('breaker-open', event.type === 'close' ? 'upstream-1011' : 'force-timeout', now);
+  }
+  function armDecision() {
+    clearTimeout(decisionTimer);
+    const due = forceState.budget.decision;
+    if (due) decisionTimer = setTimeout(() => applyForceEvent({ type: 'tick' }), Math.max(0, due - Date.now()));
+  }
+  armDecision();
+  if (savedBudget) post({ type: 'reconnect-budget', budget: forceState.budget });
+  const loaded = () => applyForceEvent({ type: 'loaded' });
+  if (document.readyState === 'complete') loaded();
+  else globalThis.addEventListener?.('load', loaded, { once: true });
+  function observeState(next) {
+    if (wsState === next) return false;
+    wsState = next;
+    applyForceEvent({ type: 'state', state: next });
+    return true;
+  }
   const NativeWebSocket = globalThis.WebSocket;
   if (typeof NativeWebSocket === 'function') {
-    const setWsState = (next) => {
-      if (wsState === next) return;
-      wsState = next;
-      post({ type: 'ws', state: next });
-    };
     const WrappedWebSocket = function(url, protocols) {
       let trace;
       if (shell.linkEvents) {
@@ -3907,13 +4027,26 @@ export const MOBILE_SHELL_JS = `(() => {
           latestMux = ws;
           latestMuxTrace = trace;
           latestMuxCreatedAt = Date.now();
-          const report = state => { if (ws === latestMux) setWsState(state); };
+          applyForceEvent({ type: 'mux' });
+          suppressedSources.clear();
+          post({ type: 'mux', phase: 'start' });
+          const report = state => { if (ws === latestMux && observeState(state)) post({ type: 'ws', state }); };
           report('connecting');
           // TCP/WSS open is not a usable Harness generation. Cordis confirms
           // ready after subscriptions are installed, including on reconnect.
-          ws.addEventListener('open', () => report('connecting'));
-          ws.addEventListener('close', () => report('disconnected'));
-          ws.addEventListener('error', () => report('disconnected'));
+          ws.addEventListener('open', () => {
+            if (ws !== latestMux) return;
+            applyForceEvent({ type: 'open' }); post({ type: 'mux', phase: 'open' });
+            report('connecting');
+          });
+          ws.addEventListener('message', () => { if (ws === latestMux) applyForceEvent({ type: 'item' }); });
+          ws.addEventListener('close', e => {
+            if (ws !== latestMux) return;
+            applyForceEvent({ type: 'close', code: e.code });
+            post({ type: 'mux', phase: e.code === 1011 ? 'upstream-1011' : 'closed' });
+            report('disconnected');
+          });
+          // A socket error is followed by close. Wait for its code before waking native recovery.
         }
       } catch {}
       return ws;
@@ -4290,32 +4423,31 @@ export const MOBILE_SHELL_JS = `(() => {
     return false;
   }
 
-  let reconnectUntil = 0;
   function reconnect(force = false, source = 'bridge') {
-    // Reaffirm a genuinely open, subscribed mux instead of tearing it down unless forced
-    // (e.g. server confirmed wsAlive === false on a half-open cellular NAT socket).
-    if (!force && wsState === 'connected' && latestMux?.readyState === 1) {
-      post({ type: 'ws', state: 'connected' });
-      return true;
+    const now = Date.now();
+    applyForceEvent({ type: 'tick' }, now); // A suspended WebKit timer may be late.
+    if (forcing || now < forceState.budget.until) return false;
+    if (latestMux?.readyState >= 2 && forceState.open) return false; // close event/1011 classification pending
+    if (!force && wsState === 'connected' && latestMux?.readyState === 1) return true;
+    if (!rules.shouldForceReconnect(forceState, now, source)) {
+      if (rules.waiting(forceState, now) && !suppressedSources.has(source)) {
+        suppressedSources.add(source);
+        diagnostic('suppressed', source, now);
+      }
+      return false;
     }
     const cordis = globalThis.__DSH_MOBILE_CORDIS__;
-    if (typeof cordis?.reconnect === 'function') {
-      if (!force && Date.now() < reconnectUntil) return true;
-      reconnectUntil = Date.now() + 400;
-      // Cordis may synchronously replace the socket. Sample its predecessor first.
-      const trace = latestMuxTrace, when = Date.now(), ready = latestMux?.readyState;
-      const age = latestMux ? Math.max(0, when - latestMuxCreatedAt) : null;
-      if (cordis.reconnect() === false) { reconnectUntil = 0; return false; }
-      if (force && shell.linkEvents) {
-        // Telemetry delivery must never block reconnect.
-        post({ type: 'link-force', source });
-        void fetch('/mobile/v1/sync', { credentials: 'same-origin', cache: 'no-store', keepalive: true,
-          headers: { 'x-dsh-force-source': source, 'x-dsh-force-at': String(when), 'x-dsh-mux': trace ?? '',
-            'x-dsh-mux-age': String(age ?? ''), 'x-dsh-mux-ready': String(ready ?? '') } }).catch(() => {});
-      }
+    if (typeof cordis?.reconnect !== 'function') return false;
+    const transport = { trace: latestMuxTrace, age: latestMux ? now - latestMuxCreatedAt : null, ready: latestMux?.readyState };
+    const { lastForce } = forceState.budget, samples = forceState.samples;
+    forcing = true;
+    try {
+      if (cordis.reconnect() === false) return false;
+      applyForceEvent({ type: 'forced' }, now);
+      if (forceState.connected && wsState === 'connected' && source !== 'poke-wsAlive') applyForceEvent({ type: 'state', state: 'connected' }, now);
+      diagnostic('force-reconnect', source, now, lastForce === null ? null : now - lastForce, samples, transport);
       return true;
-    }
-    return false;
+    } finally { forcing = false; }
   }
 
   let syncCursor = '', syncRequest = null, syncTimer, pendingPoke = false;
@@ -4334,7 +4466,9 @@ export const MOBILE_SHELL_JS = `(() => {
     const controller = new AbortController();
     syncRequest = controller;
     const watchdog = setTimeout(() => controller.abort(), 27000);
+    const epoch = forceState.epoch;
     const shouldPoke = pendingPoke;
+    let pokeCompleted = false;
     activePoke = shouldPoke;
     pendingPoke = false;
     let delay = 1200;
@@ -4349,10 +4483,14 @@ export const MOBILE_SHELL_JS = `(() => {
       if (!res.ok) return;
       const data = await res.json();
       if (syncRequest !== controller) return;
-      // Instant half-open zombie socket detection: if the desktop has zero live mux sockets
-      // for this device while our browser socket still claims OPEN, reconnect immediately.
-      if (shouldPoke && data.wsAlive === false && latestMux?.readyState === 1 && Date.now() - latestMuxCreatedAt >= 1000) {
-        reconnect(true, 'poke-wsAlive');
+      if (shouldPoke) {
+        pokeCompleted = true;
+        applyForceEvent({ type: 'poke', alive: data.wsAlive, epoch });
+        if (forceState.samples >= policy.wsAliveSamples) reconnect(true, 'poke-wsAlive');
+        else if (forceState.samples === 1) {
+          clearTimeout(confirmTimer);
+          confirmTimer = setTimeout(() => resetSync(true), Math.max(0, forceState.firstFalse + policy.confirmWindowMs - Date.now()));
+        }
       }
       const cursor = typeof data.cursor === 'string' ? data.cursor : '';
       delay = cursor ? 0 : 5000; // Older servers return an immediate snapshot only.
@@ -4367,6 +4505,7 @@ export const MOBILE_SHELL_JS = `(() => {
     } catch {} finally {
       clearTimeout(watchdog);
       if (syncRequest === controller) {
+        if (shouldPoke && !pokeCompleted) applyForceEvent({ type: 'poke', epoch });
         syncRequest = null;
         if (delay >= 0 && document.visibilityState !== 'hidden') syncTimer = setTimeout(pollSync, delay);
       }
@@ -4383,16 +4522,9 @@ export const MOBILE_SHELL_JS = `(() => {
     if (poke) pendingPoke = true;
     void pollSync();
   }
-  let lastWakeRetry = -Infinity, wakeRetryMux, wakeRetryState;
   function wakeForeground(source) {
-    const mux = latestMux, ready = mux?.readyState, now = Date.now();
-    const handshake = ready === 0 && now - latestMuxCreatedAt < 1000;
-    // Coalesce repeated signals for the *same* transport state, never a new close.
-    const duplicate = wakeRetryMux === mux && wakeRetryState === ready && now - lastWakeRetry < 400;
-    if (!duplicate && (ready >= 2 || (wsState !== 'connected' && !handshake))) {
-      if (reconnect(true, source)) { lastWakeRetry = now; wakeRetryMux = mux; wakeRetryState = ready; }
-    }
-    resetSync(true);
+    if (wsState !== 'connected' || latestMux?.readyState >= 2) reconnect(true, source);
+    if (Date.now() >= forceState.budget.until) resetSync(true);
     syncViewport();
     reportTheme();
     scheduleReportUi();
@@ -4436,11 +4568,8 @@ export const MOBILE_SHELL_JS = `(() => {
       reportTheme(true);
     },
     credentialsChanged() {
-      resetSync();
-      const ready = latestMux?.readyState;
-      if ((ready === 1 && wsState === 'connected') || (ready <= 1 && Date.now() - latestMuxCreatedAt < 3000)) return;
-      reconnectUntil = 0;
-      reconnect();
+      reconnect(false, 'credentialsChanged');
+      if (Date.now() >= forceState.budget.until) resetSync();
     },
     reportUi: scheduleReportUi,
     reportSelection: scheduleReportUi,
@@ -4448,8 +4577,7 @@ export const MOBILE_SHELL_JS = `(() => {
       const ready = latestMux?.readyState;
       if (ready !== undefined && ((state === 'connected' && ready !== 1) ||
           (state === 'disconnected' && ready < 2))) return false;
-      wsState = state;
-      if (state === 'connected') reconnectUntil = 0;
+      observeState(state);
       return true;
     },
     repositionPopups: repositionAllPopups,
@@ -4557,7 +4685,7 @@ export const MOBILE_SHELL_JS = `(() => {
     lifecycle = (${createWebRemoteControlLifecycleRecovery.toString()})({
       documentTarget: document, windowTarget: globalThis,
       onSuspend() {
-        lastWakeRetry = -Infinity;
+        applyForceEvent({ type: 'item' }); // Discard probes from before suspension.
         captureVisualSnapshot(true);
         clearTimeout(syncTimer);
         lastSyncReset = 0;

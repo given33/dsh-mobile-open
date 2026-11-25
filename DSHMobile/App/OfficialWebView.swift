@@ -218,13 +218,20 @@ struct OfficialWebView: UIViewRepresentable {
             self.onBridgeMessage = onBridgeMessage
         }
 
+        private var handshake = PageHandshake()
+        private var requestedSession: UUID?
+        private var bindTask: Task<Void, Never>?
+        private var installedBudget: Double?
         private var installedRoute: [String: String]?
         func install(_ route: [String: String], in controller: WKUserContentController) {
-            guard route != installedRoute, let data = try? JSONEncoder().encode(route), let literal = String(data: data, encoding: .utf8) else { return }
+            let budget = ReconnectBudget.devices[session.desktopID]
+            guard route != installedRoute || budget?.updated != installedBudget, let data = try? JSONEncoder().encode(route), let literal = String(data: data, encoding: .utf8) else { return }
             installedRoute = route
+            installedBudget = budget?.updated
+            let seed = (try? JSONEncoder().encode(budget)).flatMap { String(data: $0, encoding: .utf8) } ?? "null"
             controller.removeAllUserScripts()
             let paintBg = "(()=>{const r=globalThis.__DSH_MOBILE_LAUNCH__;if(r?.bg&&document.documentElement)document.documentElement.style.backgroundColor=r.bg;})();"
-            controller.addUserScript(WKUserScript(source: Self.nativeNavigation + "\nglobalThis.__DSH_MOBILE_LAUNCH__ = \(literal);\n" + paintBg, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            controller.addUserScript(WKUserScript(source: Self.nativeNavigation + "\nglobalThis.__DSH_RECONNECT_BUDGET__ = \(seed);\nglobalThis.__DSH_MOBILE_LAUNCH__ = \(literal);\n" + paintBg, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         }
 
         // Native chrome owns only the leading opener. This runs before Harness paints,
@@ -247,6 +254,7 @@ struct OfficialWebView: UIViewRepresentable {
         private var lastKeyboardOverlap: CGFloat = 0
 
         func stopBackgroundTimers() {
+            bindTask?.cancel(); bindTask = nil
             snapshotTask?.cancel(); snapshotTask = nil
             periodicSnapshotTask?.cancel(); periodicSnapshotTask = nil
         }
@@ -365,37 +373,55 @@ struct OfficialWebView: UIViewRepresentable {
             image.isAccessibilityElement = false; image.accessibilityElementsHidden = true
             webView.addSubview(image); cover = image
         }
-        func reloadHome() { coverCurrentDocument(); loadHome() }
+        func reloadHome() {
+            guard holdUntil <= Date() else { return }
+            coverCurrentDocument(); loadHome()
+        }
+
         func bind(_ next: BrowserSession, initial: Bool = false) {
-            guard initial || next.id != session.id, let web = webView else { return }
+            guard requestedSession != next.id, let web = webView else { return }
+            requestedSession = next.id
+            bindTask?.cancel()
             let changingOrigin = !local(next.url)
-            if changingOrigin {
-                coverCurrentDocument(); web.stopLoading()
-                loaded = false; loadingStarted = false; routePainted = false
-            }
-            session = next
-            // Optimistic cold boot: start loading immediately at t=0 using WKWebsiteDataStore's persisted HttpOnly cookie.
             if initial && next.cookies.isEmpty {
-                loadHome()
+                loadHome() // First navigation can use WKWebsiteDataStore's persisted cookie.
                 return
             }
-            Task { @MainActor [weak self, weak web] in
+            bindTask = Task { @MainActor [weak self, weak web] in
                 guard let self, let web else { return }
                 for cookie in next.cookies {
-                    guard self.session.id == next.id, self.webView === web else { return }
+                    guard !Task.isCancelled, self.webView === web else { return }
                     await web.configuration.websiteDataStore.httpCookieStore.setCookie(cookie)
                 }
-                guard self.session.id == next.id, self.webView === web else { return }
-                if !changingOrigin && !self.loaded && self.loadingStarted { return }
-                if changingOrigin || !self.loaded { self.loadHome(); return }
-                // Notify only a loaded, same-origin document, after installing all its cookies.
-                web.evaluateJavaScript("(()=>{const b=globalThis.__DSH_MOBILE_BRIDGE__;if(b?.credentialsChanged)b.credentialsChanged();else b?.reconnect?.()})()", completionHandler: nil)
+                guard !Task.isCancelled, self.webView === web else { return }
+                if !initial && !changingOrigin && (self.loaded || self.loadingStarted) {
+                    self.session = next
+                    guard self.loaded, self.holdUntil <= Date() else { return }
+                    web.evaluateJavaScript("globalThis.__DSH_MOBILE_BRIDGE__?.credentialsChanged?.()", completionHandler: nil)
+                    return
+                }
+                // Only a new origin or a missing document needs navigation. A newer
+                // bind cancels this one, including while the cookie store is suspended.
+                while !initial && self.holdUntil > Date() {
+                    do { try await Task.sleep(for: .seconds(max(0, self.holdUntil.timeIntervalSinceNow))) } catch { return }
+                }
+                guard !Task.isCancelled, self.webView === web else { return }
+                if changingOrigin {
+                    self.coverCurrentDocument(); web.stopLoading()
+                }
+                self.session = next
+                self.loadHome()
             }
         }
 
-        func loadHome() {
+        private var holdUntil: Date {
+            max(handshake.holdUntil, ReconnectBudget.devices[session.desktopID]?.holdUntil ?? .distantPast)
+        }
+
+        private func loadHome() {
             guard let webView else { return }
             frameRequestID = UUID()
+            handshake.bind()
             loaded = false; loadingStarted = true; routePainted = false
             webView.load(URLRequest(url: session.url, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 20))
         }
@@ -428,8 +454,10 @@ struct OfficialWebView: UIViewRepresentable {
             case .toggleRightPanel:
                 script = "globalThis.__DSH_MOBILE_BRIDGE__?.toggleRightPanel?.()"
             case .reconnect:
+                guard holdUntil <= Date() else { return }
                 script = "globalThis.__DSH_MOBILE_BRIDGE__?.reconnect?.()"
             case .wakeCheck:
+                guard holdUntil <= Date() else { return }
                 script = "globalThis.__DSH_MOBILE_BRIDGE__?.wakeCheck?.()"
             case .setFollowDesktop(_, let enabled):
                 script = "globalThis.__DSH_MOBILE_BRIDGE__?.setFollowDesktop?.(\(enabled ? "true" : "false"))"
@@ -440,6 +468,15 @@ struct OfficialWebView: UIViewRepresentable {
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.frameInfo.isMainFrame, let source = message.frameInfo.request.url, local(source), message.name == "dshMobile", let payload = message.body as? [String: Any] else { return }
             let type = payload["type"] as? String
+            if type == "reconnect-budget", let raw = payload["budget"] as? [String: Any],
+               let data = try? JSONSerialization.data(withJSONObject: raw),
+               let budget = try? JSONDecoder().decode(ReconnectBudget.self, from: data) {
+                ReconnectBudget.devices[session.desktopID] = budget
+                if let route = installedRoute { install(route, in: controller) }
+                return
+            }
+            if type == "mux", let phase = payload["phase"] as? String { handshake.mux(phase) }
+            if type == "ws", payload["state"] as? String == "connected" { handshake.didConnect() }
             if let type, type.hasPrefix("voice-") { handleVoice(type, payload); return }
             if type == "launch-applied" {
                 #if DEBUG
@@ -524,10 +561,12 @@ struct OfficialWebView: UIViewRepresentable {
 
         func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
             cancelVoice()
+            handshake.bind()
             onRestoring()
         }
 
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+            handshake.didLoad()
             loaded = true; loadingStarted = false; onLoaded()
             dispatchKeyboard(overlap: lastKeyboardOverlap, durationSeconds: 0, force: true)
             // didFinish only confirms HTML loading. Keep the captured view until
@@ -539,6 +578,7 @@ struct OfficialWebView: UIViewRepresentable {
             cancelVoice()
             loaded = false; loadingStarted = false; routePainted = false
             // Tell AppModel first so the saved snapshot covers the WebView before reloading silently in background.
+            handshake = PageHandshake() // A terminated process has no pending mux.
             // Keep any active cover pinned until the reloaded live session posts launch-applied.
             onProcessTerminated()
         }
