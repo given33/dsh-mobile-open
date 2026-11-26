@@ -1763,3 +1763,69 @@ test('rebuilding a document with an open device breaker issues zero forces until
     t.diagnostic(`${origin}: 0 forces through ${seed.until - 1}ms, first allowed at ${now}ms`);
   }
 });
+
+for (const [endpoint, actions, denial] of [['terminal/watch', true, 'terminal-disabled'], ['session/prompt', false, 'actions-disabled']]) {
+  test(`${denial}: restoring a denied subscription keeps the one ready mux, without automatic rebuild`, async t => {
+    const {url, options, journalFile, seen} = await officialMux(t, {actions});
+    const ws = new WebSocket(url, options);
+    t.after(() => ws.terminate());
+    const incoming = on(ws, 'message', {signal: AbortSignal.timeout(8000)});
+    let closes = 0;
+    ws.on('close', () => closes++);
+    await once(ws, 'open');
+    const open = (id, method) => ws.send(JSON.stringify({type:'open', streamId:id, endpoint:method, payload:{args:{}}}));
+    open('events', '$events');
+    assert.equal(JSON.parse((await incoming.next()).value[0]).type, 'item');
+    open('optional', endpoint);
+    const frame = JSON.parse((await incoming.next()).value[0]);
+    assert.deepEqual(Object.keys(frame).sort(), ['error','streamId','type']);
+    assert.equal(frame.type, 'error'); assert.equal(frame.streamId, 'optional');
+    assert.deepEqual(Object.keys(frame.error).sort(), ['code','details','message']);
+    assert.equal(frame.error.code, denial); assert.deepEqual(frame.error.details, {});
+    assert.equal(typeof frame.error.message, 'string');
+    assert.ok(!seen.streams.some(s => s.frame.endpoint === endpoint));
+    await new Promise(resolve => setTimeout(resolve, 5100));
+    open('follow', 'session/follow');
+    assert.equal(JSON.parse((await incoming.next()).value[0]).streamId, 'follow');
+    const rows = (await readFile(journalFile,'utf8')).trim().split('\n').map(JSON.parse);
+    assert.equal(closes, 0); assert.equal(rows.filter(r => r.type === 'connected').length, 1);
+    assert.equal(rows.filter(r => r.type === 'disconnected').length, 0);
+    await incoming.return(); ws.close(); await once(ws,'close');
+  });
+}
+
+test('native trace POST correlates with its mux, validates whole batches, rate limits and rejects page cookies', async t => {
+  const {url, options, token, cookie, request, journalFile} = await officialMux(t);
+  const trace = '665b5609-37ab-435d-84f1-af3a54fc26d3', ticket = '4d00b678-9283-41d7-9186-7f350f3a1b95';
+  const ws = new WebSocket(url + '?dmlTrace=' + trace, options);
+  await once(ws,'open'); t.after(() => ws.terminate());
+  const post = (body, auth = {token}) => request('/mobile/v1/sync',{method:'POST', ...auth, body});
+  const rows = [['document-start',''],['mux','open'],['ws','connecting->connected'],['document-loaded','']].map(([type,detail]) =>
+    ({type,detail,ms:Date.now(),ticket,page:ticket,socket:trace}));
+  assert.equal((await post(rows,{cookie})).status,401);
+  assert.equal((await post(rows)).status,200);
+  assert.equal((await post(rows)).status,429);
+  await new Promise(r => setTimeout(r,110));
+  assert.equal((await post([...rows, {...rows[0], detail:'untrusted-page-text'}])).status,400);
+  await new Promise(r => setTimeout(r,110));
+  assert.equal((await post(Array(17).fill(rows[0]))).status,400);
+  const text = await readFile(journalFile,'utf8'); const events = text.trim().split('\n').map(JSON.parse);
+  const accepted = events.filter(x => x.client);
+  assert.deepEqual(accepted.map(r=>r.type), rows.map(r=>r.type));
+  assert.ok(accepted.every(r=>r.socket===events[0].socket && r.device===events[0].device && r.ticket===accepted[0].ticket));
+  for (const forbidden of [ticket, trace, token,'untrusted-page-text']) assert.ok(!text.includes(forbidden));
+  ws.close(); await once(ws,'close');
+});
+
+test('terminal queue overflow remains a valid stream failure on the browser wire', async t => {
+  const {url, options, emitFrame} = await officialMux(t, {terminal:true});
+  const ws = new WebSocket(url, options); t.after(() => ws.terminate());
+  await once(ws,'open');
+  ws.send(JSON.stringify({type:'open',streamId:'term',endpoint:'terminal/attach',payload:{args:{}}}));
+  await once(ws,'message');
+  const pending = once(ws,'message');
+  emitFrame({type:'error',streamId:'term',error:{code:'terminal/queue-full',message:'full'}});
+  const [data, binary] = await pending;
+  assert.equal(binary,false); assert.deepEqual(JSON.parse(data).error,{code:'terminal/queue-full',message:'full',details:{}});
+  ws.close(); await once(ws,'close');
+});

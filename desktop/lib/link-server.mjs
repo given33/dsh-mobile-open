@@ -193,6 +193,20 @@ const SHELL_ASSETS = {
   '/mobile/v1/shell.js': buildShellAsset('text/javascript; charset=utf-8', MOBILE_SHELL_JS),
 };
 
+// Native diagnostics contain only closed-vocabulary state transitions and correlation IDs.
+const traceSource = '(?:activate|userRetry|launchDesktopNow|switchEndpoint|reloadPage|restore|recovery|sceneChanged|network|pageFailed|authExpired)';
+const clientTraceDetails = {
+  begin: new RegExp(`^source=${traceSource} reuseCandidate=(true|false) health=(connecting|connected|disconnected)$`),
+  'begin-ready': /^retained=(true|false) sameEndpoint=(true|false)$/,
+  ws: /^(connecting|connected|disconnected)->(connecting|connected|disconnected)$/,
+  mux: /^(start|open|closed|upstream-1011)$/,
+  'document-start': /^$/, 'document-loaded': /^$/, 'retry-request': /^$/,
+  'switch-request': /^target=(desktop|cloud)$/, activate: /^target=(desktop|cloud)$/,
+  override: new RegExp(`^source=(?:${traceSource}|pageUserReconnect) budget=cleared$`),
+  suppressed: new RegExp(`^(?:reason=(?:wakeCheck|begin) source=${traceSource}|reason=(?:userRetry|wakeCheck|visibility|online|pageshow|resume|poke-wsAlive|bridge|credentialsChanged|upstream-1011|force-timeout) gapMs=(?:null|[0-9]{1,15}) wsAliveSamples=[0-2])$`),
+  restore: /^source=pageFailed breaker=ignored reason=(process-terminated|bootstrap)$/,
+};
+
 // Only callers with allowlisted fields write here. Keep one bounded snapshot and
 // one writer even if a burst arrives while the previous atomic rename is pending.
 function linkJournal(file, log) {
@@ -248,6 +262,7 @@ export function createLinkServer({
   const cookieName = '__Host-dsh-mobile';
   const hashToken = value => createHash('sha256').update(value).digest('base64url');
   const journal = stateDir && process.env.DSH_LINK_EVENTS !== '0' ? linkJournal(join(stateDir, 'link-events.jsonl'), log) : null;
+  const nativeTraceLimit = new RateLimit(1, 100);
   const bridgeLimit = new RateLimit(120, 60e3);
   const socketTrace = new WeakMap();
   const deviceTag = id => hashToken(id).slice(0, 16);
@@ -447,6 +462,26 @@ export function createLinkServer({
           app: appVersion,
           wsAlive: hasLiveSocket(device.id),
         });
+      }
+      if (path === '/mobile/v1/sync' && req.method === 'POST') {
+        if (!devices.verify(bearer(req))) return json(res, 401, {error:'bearer-required'});
+        if (!journal) return json(res, 200, {accepted:0});
+        if (!nativeTraceLimit.allow(device.id)) return json(res, 429, {error:'rate-limited'});
+        let rows;
+        try { rows = JSON.parse(await readBody(req, 8192)); }
+        catch (e) { return json(res, e.status ?? 400, {error:'invalid-batch'}); }
+        if (!Array.isArray(rows) || !rows.length || rows.length > 16) return json(res, 400, {error:'invalid-batch'});
+        const events = [];
+        for (const row of rows) {
+          const ticket = muxTag(row?.ticket);
+          if (!ticket || typeof row.type !== 'string' || !Object.hasOwn(clientTraceDetails, row.type) || typeof row.detail !== 'string' ||
+              row.detail.length > 160 || !clientTraceDetails[row.type].test(row.detail) ||
+              !Number.isSafeInteger(row.ms) || row.ms <= 0 || row.ms > 8.64e15) return json(res, 400, {error:'invalid-event'});
+          events.push({type:row.type, client:true, clientAt:new Date(row.ms).toISOString(), device:deviceTag(device.id),
+            ticket, page:muxTag(row.page), socket:muxTag(row.socket), detail:row.detail});
+        }
+        for (const event of events) journal.record(event);
+        return json(res, 200, {accepted:events.length});
       }
       if (path === '/mobile/v1/sync' && req.method === 'GET') {
         // A same-origin shell may attach timing metadata to an ordinary, non-poking sync read.
@@ -722,6 +757,14 @@ export function createLinkServer({
         reason: observedReason, durationMs: Math.round(performance.now() - started) });
       log({ type: 'disconnected', device: { id: device.id, name: device.name } });
     };
+    const denials = new Set();
+    function rejectStream(streamId, code, message) {
+      if (!denials.has(code)) {
+        denials.add(code);
+        journal?.record({type:'stream-denied', ...context, reason:code});
+      }
+      client.send(JSON.stringify({type:'error', streamId, error:{code, message, details:{}}}));
+    }
     client.on('message', (bytes, isBinary) => {
       let msg;
       try { msg = JSON.parse(bytes.toString('utf8')); } catch { return finish(1008, 'bad-frame'); }
@@ -746,21 +789,24 @@ export function createLinkServer({
           ? officialReadStreamPolicy
           : policy;
       const terminalAllowed = allowTerminal();
-      // Terminal subscriptions are optional, even in a writable official session.
-      // Refuse just that stream; closing the carrier would restart every subscriber.
-      if (msg?.type === 'open' && typeof msg.endpoint === 'string' && msg.endpoint.startsWith('terminal/') && !terminalAllowed) {
-        client.send(JSON.stringify({ type: 'error', streamId: msg.streamId, error: { code: 'terminal-disabled', message: '请在电脑上允许手机使用终端。' } }));
-        return;
-      }
       const verdict = checkClientFrame(msg, open, streamPolicy, terminalAllowed, officialWritable, official ? 64 : MAX_STREAMS);
       if (verdict === 'unknown-stream') return;
-      if (verdict !== 'ok') {
-        if (official && !officialWritable && msg?.type === 'open' && verdict === 'endpoint-forbidden') {
-          client.send(JSON.stringify({ type: 'error', streamId: msg.streamId, error: { code: 'actions-disabled', message: '电脑端未开启「允许手机操作」，当前仅可实时查看。' } }));
-          return;
+      if (msg?.type === 'open') {
+        // A stream denial needs an unambiguous, unused ID. Never send a terminal
+        // frame for a duplicate ID: that would terminate an unrelated subscription.
+        if (typeof msg.streamId !== 'string' || !msg.streamId.length || msg.streamId.length > 128 || /[\x00-\x1f]/.test(msg.streamId) ||
+            !allEndpoints.has(msg.endpoint) || open.has(msg.streamId)) return finish(1008, 'frame-policy: invalid-open');
+        if (msg.endpoint.startsWith('terminal/') && !terminalAllowed) {
+          return rejectStream(msg.streamId, 'terminal-disabled', '请在电脑上允许手机使用终端。');
         }
-        return finish(1008, `frame-policy: ${verdict}`);
+        if (verdict === 'too-many-streams') return rejectStream(msg.streamId, verdict, 'Too many open streams');
+        if (verdict === 'endpoint-forbidden' || verdict === 'write-forbidden') {
+          // The native protocol never admits a unary RPC as a stream open.
+          if (!official && CONTROL_RPC.has(msg.endpoint) && !READ_STREAMS.has(msg.endpoint)) return finish(1008, 'frame-policy: endpoint-forbidden');
+          return rejectStream(msg.streamId, 'actions-disabled', '当前权限不允许此订阅。');
+        }
       }
+      if (verdict !== 'ok') return finish(1008, `frame-policy: ${verdict}`);
       if (msg.type === 'open') {
         if (msg.endpoint === '$events') {
           if (delivery.streamId) return finish(1008, 'duplicate-event-stream');
@@ -787,7 +833,7 @@ export function createLinkServer({
       clearInterval(beat);
       // Peer-supplied close text can contain arbitrary page data. Only retain known constants.
       const text = reason.toString();
-      const safeReason = !text ? 'empty' : ['unpaired', 'configuration changed', 'closed'].includes(text) ? text : 'peer-supplied';
+      const safeReason = !text ? 'empty' : ['unpaired', 'configuration changed', 'closed', 'invalid Remote stream frame'].includes(text) ? text : 'peer-supplied';
       finish(1000, 'closed', code === 1006 ? 'transport-lost' : 'phone-close', code, safeReason);
     });
     client.on('error', () => finish(1011, 'Harness disconnected', 'phone-error'));
@@ -803,6 +849,13 @@ export function createLinkServer({
       if (client.bufferedAmount > 16 * MAX_BODY) return finish(1013, 'phone too slow');
       let frame;
       try { frame = JSON.parse(data.toString()); } catch {}
+      // Older LocalMux versions also synthesize this terminal error without the
+      // required details record. Adapt only that known local wire shape.
+      if (!isBinary && frame?.type === 'error' && frame.error?.code === 'terminal/queue-full' &&
+          open.get(frame.streamId) === 'terminal/attach' && !Object.hasOwn(frame.error, 'details')) {
+        frame.error.details = {};
+        data = JSON.stringify(frame);
+      }
       if (frame?.type === 'end' || frame?.type === 'error') open.delete(frame.streamId);
       if (delivery.streamId !== null && frame?.streamId === delivery.streamId) {
         if (frame.type !== 'item') clearDelivery();

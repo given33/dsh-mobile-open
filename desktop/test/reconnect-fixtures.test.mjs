@@ -152,3 +152,15 @@ test('failed navigation keeps its own handshake deadline and HTTP backoff across
   assert.match(bind, /let deadline = next.restoresFailedDocument \? self.handshake.holdUntil : self.holdUntil/);
   assert.match(method(app, 'scheduleRecoveryCheck('), /max\(Date\(\).addingTimeInterval\(delaySeconds\), holdUntil\)/);
 });
+
+test('transient ws transitions preserve document backoff; stable health owns the reset and automatic origin replacement is guarded', async () => {
+  const text = await readFile(new URL('../../DSHMobile/App/AppModel.swift', import.meta.url),'utf8');
+  const ws = text.slice(text.indexOf('case "ws":'), text.indexOf('case "secondary-hub":'));
+  assert.ok(ws.includes('lastBridgeHealth = reported'));
+  assert.doesNotMatch(ws,/retryStep\s*=|recoveryFailures\s*=/);
+  assert.match(text,/stableHealthTask\?\.cancel\(\)[\s\S]*?Task\.sleep\(for: .seconds\(ReconnectPolicy.seconds\(ReconnectPolicy.handshakeGraceMs\)\)\)[\s\S]*?self.wsHealth == .connected[\s\S]*?self.retryStep = 0/);
+  const publish = text.slice(text.indexOf('// A mux or breaker can start'), text.indexOf('self.browser = ready',text.indexOf('// A mux or breaker can start')));
+  assert.match(publish,/if !source.userInitiated,[\s\S]*?self.wsHealth == .connected,[\s\S]*?ready.endpoint != currentPage.endpoint \{[^}]*?return/);
+  const view = await readFile(new URL('../../DSHMobile/App/OfficialWebView.swift', import.meta.url),'utf8');
+  assert.match(view,/!changingOrigin && \(self.loaded \|\| self.loadingStarted\)[\s\S]*?credentialsChanged[\s\S]*?return\s+}/);
+});

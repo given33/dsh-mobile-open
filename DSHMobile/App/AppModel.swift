@@ -270,7 +270,16 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     @Published private(set) var linkInterrupted = false
     @Published private(set) var wsHealth: WebSocketHealth = .connecting {
         didSet {
-            if oldValue != wsHealth { traceLink("ws \(oldValue)->\(wsHealth)") }
+            guard oldValue != wsHealth else { return }
+            traceLink("ws \(oldValue)->\(wsHealth)")
+            stableHealthTask?.cancel()
+            if wsHealth == .connected {
+                stableHealthTask = Task { [weak self] in
+                    do { try await Task.sleep(for: .seconds(ReconnectPolicy.seconds(ReconnectPolicy.handshakeGraceMs))) } catch { return }
+                    guard let self, self.wsHealth == .connected else { return }
+                    self.retryStep = 0; self.recoveryFailures = 0
+                }
+            }
         }
     }
     @Published private(set) var actionsEnabled = true
@@ -310,14 +319,73 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     }
     private let traceEnabled = ProcessInfo.processInfo.environment["DSH_LINK_EVENTS"] != "0"
     private(set) var linkEvents: [String] = []
+    private struct ClientTrace: Encodable {
+        let ms: Int64
+        let ticket, type, detail: String
+        let page, socket: String?
+    }
+    private var traceSocket: String?
+    private var traceQueue: [(host: PairedDesktop, endpoint: Endpoint, event: ClientTrace)] = []
+    private var traceUpload: Task<Void, Never>?
     private func traceLink(_ event: @autoclosure () -> String) {
         guard traceEnabled else { return }
         let time = Int64(Date().timeIntervalSince1970 * 1000)
-        let page = browser?.id.uuidString ?? "none"
-        let line = "[dsh-link] ms=\(time) ticket=\(generation.uuidString) page=\(page) \(event())"
+        let page = browser?.desktopID == desktop?.id ? browser?.id.uuidString : nil
+        let message = event()
+        let line = "[dsh-link] ms=\(time) ticket=\(generation.uuidString) page=\(page ?? "none") socket=\(traceSocket ?? "none") \(message)"
         if linkEvents.count == 256 { linkEvents.removeFirst() }
         linkEvents.append(line)
         print(line)
+        guard !ephemeral, let host = desktop,
+              let endpoint = (browser?.desktopID == host.id ? browser?.endpoint : nil) ?? host.preferred ?? host.endpoints.first else { return }
+        let fields = message.split(separator: " ", maxSplits: 1)
+        guard let name = fields.first,
+              ["begin", "begin-ready", "ws", "mux", "document-start", "document-loaded", "switch-request", "activate", "override", "suppressed", "restore", "retry-request"].contains(String(name)) else { return }
+        let row = ClientTrace(ms: time, ticket: generation.uuidString, type: String(name), detail: fields.dropFirst().first.map(String.init) ?? "", page: page, socket: traceSocket)
+        if traceQueue.count == 64 { traceQueue.removeFirst() }
+        traceQueue.append((host, endpoint, row))
+        guard traceUpload == nil else { return }
+        traceUpload = Task { [weak self] in
+            while let self, !self.traceQueue.isEmpty {
+                try? await Task.sleep(for: .milliseconds(150))
+                await self.flushTraceBatch()
+            }
+            self?.traceUpload = nil
+        }
+    }
+
+    private func flushTraceBatch() async {
+        guard let first = traceQueue.first else { return }
+        // Preserve the destination across a device switch. Diagnostics have their own
+        // pinned channel and short deadline, independent of admission and recovery.
+        let batch = traceQueue.prefix(16).prefix { $0.host.id == first.host.id && $0.endpoint == first.endpoint }
+        let data = try? JSONEncoder().encode(batch.map { $0.event })
+        traceQueue.removeFirst(batch.count)
+        guard let data else { return }
+        let channel = PinnedTransport(fingerprint: first.host.fingerprint)
+        defer { channel.invalidate() }
+        var req = URLRequest(url: first.endpoint.baseURL.appendingPathComponent("mobile/v1/sync"), timeoutInterval: 2)
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(first.host.token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = data
+        _ = try? await channel.session.data(for: req)
+    }
+
+    var connectionLogText: String {
+        func label(_ id: String) -> String { id == cloudHost?.id ? "cloud" : id == localHost?.id ? "desktop" : "other" }
+        let statuses = deviceStatuses.map { id, status -> String in
+            let state: String
+            switch status {
+            case .checking: state = "checking"
+            case .connecting: state = "connecting"
+            case .online(_, let latency): state = "online latencyMs=\(latency.map(String.init) ?? "unknown")"
+            case .offline: state = "offline"
+            }
+            return "\(label(id))=\(state)"
+        }.sorted().joined(separator: ", ")
+        return (["wsHealth=\(wsHealth)", "switchTargetID=\(switchTargetID.map { label($0) } ?? "none")",
+                 "deviceStatuses=\(statuses)", "recoveryFailures=\(recoveryFailures)"] + linkEvents).joined(separator: "\n")
     }
 
     private func clearUserBudget(_ source: ConnectionSource, for id: String) {
@@ -328,6 +396,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     private var activeConnectionSource: ConnectionSource?
     private var userReloadUntil = Date.distantPast
     private var handshake = PageHandshake()
+    private var stableHealthTask: Task<Void, Never>?
     private var retryStep = 0
     private var lastBridgeHealth: WebSocketHealth?
     private var documentRetryDue: Date?
@@ -1025,6 +1094,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         transport = channel
         cancelDocumentDeadline()
         cancelDocumentRetry()
+        stableHealthTask?.cancel(); traceSocket = nil
         handshake = PageHandshake(); lastBridgeHealth = nil; retryStep = 0
         needsLaunchSelection = true; recoveryFailures = 0; revoked = false
         if pageTheme.dark == nil { pageTheme = loadSavedTheme(for: desktop?.id ?? selected.id) }
@@ -1290,6 +1360,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
     func restoringDocument() {
         cancelDocumentRetry()
         handshake.bind()
+        traceSocket = nil
         traceLink("document-start")
         cancelDocumentDeadline()
         if !needsLaunchSelection { needsLaunchSelection = true }
@@ -1347,7 +1418,11 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
         guard let type = body["type"] as? String else { return }
         switch type {
         case "mux":
-            if let phase = body["phase"] as? String { handshake.mux(phase) }
+            if let phase = body["phase"] as? String, ["start", "open", "closed", "upstream-1011"].contains(phase) {
+                if phase == "start" { traceSocket = (body["trace"] as? String).flatMap(UUID.init(uuidString:))?.uuidString.lowercased() }
+                handshake.mux(phase)
+                traceLink("mux \(phase)")
+            }
         case "breaker-open", "suppressed", "link-force":
             if let source = body["source"] as? String, ["userRetry", "wakeCheck", "visibility", "online", "pageshow", "resume", "poke-wsAlive", "bridge", "credentialsChanged", "upstream-1011", "force-timeout"].contains(source) {
                 if type == "link-force" { traceLink("forced-reconnect source=\(source)") } // 001 consumers
@@ -1392,8 +1467,8 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
             case "disconnected": reported = .disconnected
             default: return
             }
-            if reported != lastBridgeHealth { retryStep = 0; lastBridgeHealth = reported }
-            else if wsHealth == reported { return }
+            if reported == lastBridgeHealth && wsHealth == reported { return }
+            lastBridgeHealth = reported
             switch raw {
             case "connected":
                 if linkInterrupted { linkInterrupted = false }
@@ -1402,7 +1477,7 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                 offlineAttempts = 0; offeredThisOutage = false; offerCloud = false
                 problem = nil
                 reconnecting = false
-                recoveryTask?.cancel(); recoveryTask = nil; recoveryFailures = 0
+                recoveryTask?.cancel(); recoveryTask = nil
             case "connecting", "reconnecting":
                 if wsHealth == .disconnected { recoveryTask?.cancel(); recoveryTask = nil }
                 if wsHealth == .connected { linkInterrupted = true }
@@ -1717,7 +1792,12 @@ private final class NotificationRouter: NSObject, UNUserNotificationCenterDelega
                     try Task.checkCancellation()
                     guard self.generation == ticket else { return }
                 }
-                self.traceLink("begin-ready retained=\(ready.id == self.browser?.id) pageNext=\(ready.id.uuidString) sameEndpoint=\(ready.endpoint == self.browser?.endpoint)")
+                if !source.userInitiated, source != .pageFailed, source != .authExpired,
+                   self.wsHealth == .connected, let currentPage = self.browser, ready.endpoint != currentPage.endpoint {
+                    self.connecting = false; self.reconnecting = false
+                    return
+                }
+                self.traceLink("begin-ready retained=\(ready.id == self.browser?.id) sameEndpoint=\(ready.endpoint == self.browser?.endpoint)")
                 self.saveCachedRoute(ready)
                 let mergedEndpoints = Self.mergeAdvertisedEndpoints(existing: current.endpoints, advertised: ready.advertisedEndpoints)
                 let endpointsChanged = mergedEndpoints != current.endpoints

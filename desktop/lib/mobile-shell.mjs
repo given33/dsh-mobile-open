@@ -4052,7 +4052,7 @@ export const MOBILE_SHELL_JS = `(() => {
           latestMuxCreatedAt = Date.now();
           applyForceEvent({ type: 'mux' });
           suppressedSources.clear();
-          post({ type: 'mux', phase: 'start' });
+          post({ type: 'mux', phase: 'start', trace });
           const report = state => { if (ws === latestMux && observeState(state)) post({ type: 'ws', state }); };
           report('connecting');
           // TCP/WSS open is not a usable Harness generation. Cordis confirms

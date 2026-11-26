@@ -732,6 +732,12 @@ private struct ConnectionDetailSheet: View {
                         }
                     }
                 }
+                Section {
+                    ShareLink(item: model.connectionLogText) {
+                        Label("导出连接日志", systemImage: "square.and.arrow.up")
+                    }
+                    .accessibilityIdentifier("connection.exportLog")
+                }
             }
             .navigationTitle("连接详情")
             .navigationBarTitleDisplayMode(.inline)

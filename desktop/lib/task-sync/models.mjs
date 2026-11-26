@@ -54,7 +54,25 @@ function view(forms, ns) {
   if (!row || !object(row.value)) throw Error('Model settings service not ready');
   return row;
 }
-export function modelSnapshot(forms) {
+// Only native adapter model definitions use the encoded-byte target. Keep the raw
+// cloud view for comparison, so a legacy row already on the standby is repaired.
+function migrateModelRows(sections) {
+  function migrate(row) {
+    if (!object(row) || !Object.hasOwn(row,'imageMaxBytes')) return row;
+    const entries = Object.entries(row);
+    return Object.fromEntries(Object.hasOwn(row,'imageTargetBytes')
+      ? entries.filter(([key]) => key !== 'imageMaxBytes')
+      : entries.map(([key,value]) => [key === 'imageMaxBytes' ? 'imageTargetBytes' : key, value]));
+  }
+  for (const ns of ['llm-deepseek', 'llm-deepseek-account']) {
+    for (const key of ['models','modelOverrides']) {
+      const rows = sections[ns]?.[key];
+      if (Array.isArray(rows)) sections[ns][key] = rows.map(migrate);
+      else if (object(rows)) sections[ns][key] = Object.fromEntries(Object.entries(rows).map(([id,row]) => [id,migrate(row)]));
+    }
+  }
+}
+function snapshot(forms) {
   // Hosts may omit an official adapter (disabled, unconfigured, or not yet mounted).
   // Absence never means "clear this provider". Active empty catalogues are explicit.
   const sections = {};
@@ -66,6 +84,12 @@ export function modelSnapshot(forms) {
   validateNested(sections);
   const data = {v:1, owner:'desktop', sections};
   if (Buffer.byteLength(JSON.stringify(data)) > 1024 * 1024) reject();
+  return data;
+}
+
+export function modelSnapshot(forms) {
+  const data = snapshot(forms);
+  migrateModelRows(data.sections);
   return data;
 }
 
@@ -82,8 +106,9 @@ function differences(before, after, path) {
 export async function applyModelSnapshot(settings, data) {
   if (data?.v !== 1 || data.owner !== 'desktop' || !object(data.sections)) reject();
   // Validate the whole envelope before any write, including unexpected nested keys.
-  const clean = modelSnapshot(Object.entries(data.sections).map(([ns,value]) => ({ns,value})));
+  const clean = snapshot(Object.entries(data.sections).map(([ns,value]) => ({ns,value})));
   if (!equal(clean,data)) reject();
+  migrateModelRows(clean.sections);
   const forms = settings.describe({redactSecrets:true});
   const changes = [];
   for (const ns of namespaces) {

@@ -46,3 +46,25 @@ test('rejects credential-bearing URLs, injected settings and config expressions 
   const injected=modelSnapshot(fixture('safe')); injected.sections['llm-pi-ai'].providers.demo.headers={Authorization:'secret'};
   await assert.rejects(applyModelSnapshot({describe(){throw Error('must not run');}},injected),/non-portable/);
 });
+
+test('legacy model rows change only imageMaxBytes on snapshot and cloud apply, including old queued snapshots', async () => {
+  const rows = fixture('next'), native = rows.find(r => r.ns === 'llm-deepseek');
+  const model = {id:'vision', imagePixelBudget:640000, imageMaxBytes:1048576, label:'vision'};
+  native.value = {models:[model], modelOverrides:{vision:{enabled:true, imageMaxBytes:512, other:{label:'unchanged'}}}};
+  const legacy = JSON.stringify(native.value);
+  const next = modelSnapshot(rows);
+  assert.equal(JSON.stringify(next.sections[native.ns]), legacy.replaceAll('imageMaxBytes','imageTargetBytes'));
+  assert.equal(JSON.stringify(native.value), legacy);
+  const queued = structuredClone(next); queued.sections[native.ns] = JSON.parse(legacy);
+  const writes = [];
+  const settings = {describe:()=>rows, mutate:async(ns,ops)=>{
+    assert.equal(ns, native.ns); writes.push(ops);
+    for (const {op,path,value} of ops) {assert.equal(op,'set'); native.value[path[0]]=value;}
+  }};
+  await applyModelSnapshot(settings, queued);
+  assert.equal(JSON.stringify(native.value), legacy.replaceAll('imageMaxBytes','imageTargetBytes'));
+  await applyModelSnapshot(settings, queued); await applyModelSnapshot(settings, next);
+  assert.equal(writes.length,1); assert.deepEqual(modelSnapshot(rows), next);
+  native.value.models = [{id:'both',imageTargetBytes:33,imageMaxBytes:88}];
+  assert.deepEqual(modelSnapshot(rows).sections[native.ns].models,[{id:'both',imageTargetBytes:33}]);
+});
